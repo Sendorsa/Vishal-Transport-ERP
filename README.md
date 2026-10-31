@@ -28,10 +28,10 @@ npm run check      # every business-rule check (diesel, audit, actions, restore,
 | Payments | `/payments`: incoming (with TDS + allocation) and outgoing, history |
 | Reports | `/reports`: customer and vehicle profitability, diesel, P&L, cash flow, receivables aging (CSV export) |
 | Settings | `/settings`: company profiles, expense heads, drivers, vehicle types, backup / restore / reset data |
-| User accounts | `/settings/users` (and `/login`, `/auth/callback`): Google sign-in only; DEV adds accounts (no email is sent; status "Approved · not signed in yet" until the person's first Google sign-in), changes roles, deactivates / reactivates and recovers accounts (Supabase; the rest of the ERP doesn't require sign-in yet) |
+| User accounts | `/settings/users` (and `/login`, `/auth/callback`): Google sign-in only; DEV adds accounts (no email is sent; status "Approved · not signed in yet" until the person's first Google sign-in), changes roles, deactivates / reactivates and recovers accounts (Supabase) |
 | Audit Log | `/audit`: every change with before / after (Owner and Dev); deletion review and restore (Owner) |
 
-Use the top bar to switch **company** (Group / VT / VTHPL) and **role** (Owner / Dev / Employee — see `src/lib/permissions.ts`).
+**Sign-in:** every page requires Google sign-in with an ACTIVE pre-created account (`/login`; gate in `src/proxy.ts` + `src/lib/auth/gate.ts`). The role (Owner / Dev / Employee — see `src/lib/permissions.ts`) comes from that account; the top bar shows it, with Sign out, and switches **company** (Group / VT / VTHPL).
 
 ## Architecture (built to swap in the real backend)
 

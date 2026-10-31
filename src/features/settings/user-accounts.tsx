@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { LogIn, LogOut, UserPlus } from "lucide-react"
+import { LogOut, UserPlus } from "lucide-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -12,7 +12,7 @@ import { FormModal } from "@/components/shared/form-modal"
 import { Field, PageSkeleton } from "@/components/shared/misc"
 import { PageHeader } from "@/components/shared/page-header"
 import { SimpleSelect } from "@/components/shared/simple-select"
-import { createClient } from "@/lib/supabase/client"
+import { GoogleSignInButton, signOutToLogin } from "@/features/auth/sign-in-buttons"
 import type { ErpRole } from "@/lib/supabase/database.types"
 import { formatDate } from "@/lib/format"
 import { getAccountState, addAccount, relinkAccount, setAccountRole, setAccountStatus, type Account, type AccountState, type Result } from "@/app/settings/users/actions"
@@ -25,30 +25,7 @@ const ROLE_OPTIONS: { value: ErpRole; label: string }[] = [
 const roleLabel = (r: ErpRole) => ROLE_OPTIONS.find((o) => o.value === r)?.label ?? r
 const STATUS_LABEL = { INVITED: "Approved · not signed in yet", ACTIVE: "Active", DISABLED: "Deactivated" } as const
 
-/** Starts Google sign-in; Google returns to /auth/callback. */
-export function GoogleSignInButton() {
-  const [pending, setPending] = useState(false)
-  const signIn = async () => {
-    setPending(true)
-    try {
-      const { error } = await createClient().auth.signInWithOAuth({
-        provider: "google",
-        options: { redirectTo: `${window.location.origin}/auth/callback` },
-      })
-      if (error) throw error
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Sign-in couldn't start.")
-      setPending(false)
-    }
-  }
-  return (
-    <Button onClick={signIn} disabled={pending}>
-      <LogIn className="size-4" /> Sign in with Google
-    </Button>
-  )
-}
-
-/** Settings → Users: your account, and (for an active DEV) every account with its management actions. */
+/** Settings → User accounts: your account, and (for an active DEV) every account with its management actions. */
 export function UserAccounts({ error }: { error?: string }) {
   const [state, setState] = useState<AccountState | null>(null)
   const refresh = useCallback(() => getAccountState().then(setState), [])
@@ -59,15 +36,12 @@ export function UserAccounts({ error }: { error?: string }) {
     if (error) toast.error(error)
   }, [error])
 
-  const signOut = async () => {
-    await createClient().auth.signOut()
-    await refresh()
-  }
+  const signOut = signOutToLogin
 
   const header = (
     <PageHeader
       title="User accounts"
-      description="Google sign-in accounts for the database version of the ERP. The ERP itself still runs on this browser's data and the role switcher until the switch-over."
+      description="Google sign-in accounts and their roles. Business data still lives in this browser until the database switch-over."
       backHref="/settings"
       backLabel="Settings"
     />

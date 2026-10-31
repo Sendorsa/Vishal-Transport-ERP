@@ -16,7 +16,7 @@ import { PageHeader } from "@/components/shared/page-header"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { StatusBadge } from "@/components/shared/status-badge"
 import { fetchBackup, useAdminAction, useDrivers, useRestoreBackup, useSetDriverStatus, useSettings, useUpdateSettings } from "@/lib/api/hooks"
-import { useCan, useRole } from "@/lib/app-state"
+import { useCan, useRole, useSession } from "@/lib/app-state"
 import { STATES } from "@/lib/constants"
 import { formatDate } from "@/lib/format"
 import { can as canRole, ROLES, type Resource } from "@/lib/permissions"
@@ -396,13 +396,16 @@ const MATRIX: { resource: Resource; label: string; actions: ("view" | "create" |
 
 function RolesPanel() {
   const [role, setRole] = useRole()
+  const session = useSession() // a signed-in account's role comes from the database and can't be switched here
   return (
     <div className="space-y-4">
+      {session && <p className="text-xs text-muted-foreground">Your role comes from your account. Only Dev can change roles, in Settings → User accounts.</p>}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {ROLES.map((r) => (
           <button
             key={r.value}
             type="button"
+            disabled={!!session}
             onClick={() => {
               setRole(r.value)
               toast.success(`Now viewing as ${r.label}`)

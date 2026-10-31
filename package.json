@@ -11,7 +11,7 @@
     "check:diesel": "tsx src/domain/diesel.check.ts",
     "check:audit": "tsx src/lib/api/audit.check.ts",
     "check:actions": "tsx src/lib/api/actions.check.ts",
-    "check": "npm run check:diesel && npm run check:audit && npm run check:actions && npm run check:restore && npm run check:roles && npm run check:backup && npm run check:tankers && npm run check:month && npm run check:fresh-start && npm run check:supabase && npm run check:supabase-diesel",
+    "check": "npm run check:diesel && npm run check:audit && npm run check:actions && npm run check:restore && npm run check:roles && npm run check:backup && npm run check:tankers && npm run check:month && npm run check:fresh-start && npm run check:supabase && npm run check:supabase-diesel && npm run check:auth",
     "check:restore": "tsx src/lib/api/restore.check.ts",
     "check:roles": "tsx src/lib/api/roles.check.ts",
     "check:backup": "tsx src/lib/api/backup.check.ts",
@@ -24,7 +24,8 @@
     "import:test": "tsx scripts/fuel-import/test-import.ts",
     "check:supabase": "tsx src/lib/supabase/supabase.check.ts",
     "supabase:ping": "tsx scripts/supabase-ping.ts",
-    "check:supabase-diesel": "tsx src/lib/supabase/diesel-schema.check.ts"
+    "check:supabase-diesel": "tsx src/lib/supabase/diesel-schema.check.ts",
+    "check:auth": "tsx src/lib/auth/gate.check.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.9.1",

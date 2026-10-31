@@ -1,21 +1,28 @@
 import { createServerClient } from "@supabase/ssr"
 import { NextResponse, type NextRequest } from "next/server"
 import { supabaseEnv } from "@/lib/supabase/env"
+import { gate, type AccountStatus } from "@/lib/auth/gate"
+import { readAccount } from "@/lib/auth/account"
+import type { Database } from "@/lib/supabase/database.types"
 
 /**
- * Keeps the Supabase session cookie fresh on the account pages. Never an authorisation check: the server
- * actions verify the session and the role, and the database checks again. The rest of the ERP doesn't
- * require sign-in yet (owner's decision, 1 Nov 2026), so the matcher covers only the account pages.
+ * The sign-in gate for every page (and the server actions posted to them). Runs before anything renders, so a
+ * signed-out or unapproved visitor never receives ERP content: no verified session → /login (remembering where
+ * they were going); a session without an ACTIVE ERP account → /login, which explains why. It also refreshes an
+ * expiring session cookie. Identity: getClaims() only; account: a read-only lookup of the caller's own profile
+ * (readAccount). It never links accounts — that happens only in the OAuth callback.
+ * Rules: src/lib/auth/gate.ts.
  */
 export async function proxy(request: NextRequest) {
-  let response = NextResponse.next({ request })
+  const path = request.nextUrl.pathname + request.nextUrl.search
   let env: ReturnType<typeof supabaseEnv>
   try {
     env = supabaseEnv()
   } catch {
-    return response // not configured: the page explains it
+    return apply(request, NextResponse.next({ request }), gate(path, { configured: false, signedIn: false, status: null }))
   }
-  const supabase = createServerClient(env.url, env.key, {
+  let response = NextResponse.next({ request })
+  const supabase = createServerClient<Database>(env.url, env.key, {
     cookies: {
       getAll: () => request.cookies.getAll(),
       setAll(cookiesToSet, headers) {
@@ -26,10 +33,24 @@ export async function proxy(request: NextRequest) {
       },
     },
   })
-  await supabase.auth.getClaims() // refreshes an expiring session
-  return response
+  const { data, error } = await supabase.auth.getClaims() // verifies the JWT; refreshes an expiring session
+  const claims = error ? null : (data?.claims ?? null)
+  const status: AccountStatus | null = claims ? ((await readAccount(supabase, claims.sub))?.status ?? null) : null
+  return apply(request, response, gate(path, { configured: true, signedIn: !!claims, status }))
+}
+
+/** Lets the request through, or redirects — carrying any refreshed session cookies and no-cache headers along. */
+function apply(request: NextRequest, response: NextResponse, result: ReturnType<typeof gate>) {
+  if (result.action === "allow") return response
+  const redirect = NextResponse.redirect(new URL(result.to, request.url))
+  response.cookies.getAll().forEach((c) => redirect.cookies.set(c))
+  response.headers.forEach((value, key) => {
+    if (/^(cache-control|expires|pragma)$/i.test(key)) redirect.headers.set(key, value)
+  })
+  return redirect
 }
 
 export const config = {
-  matcher: ["/login", "/settings/users"],
+  // Every page except Next.js assets, static files and the OAuth callback (which handles its own session).
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|auth/callback|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)"],
 }

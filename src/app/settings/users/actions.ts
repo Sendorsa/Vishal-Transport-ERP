@@ -43,18 +43,14 @@ const toAccount = (p: ProfileRow): Account => ({
   createdAt: p.created_at,
 })
 
-/** The verified session and the caller's own account (linking a pre-created account at first Google sign-in). */
+/** The verified session (getClaims) and the caller's own account row. Read-only: linking happens only in the OAuth callback. */
 async function session() {
   const supabase = await createClient() // throws a setup message when Supabase isn't configured
   const { data, error } = await supabase.auth.getClaims()
   const claims = error ? null : (data?.claims ?? null)
   if (!claims) return { supabase, claims: null, me: null }
   const own = () => supabase.from("profiles").select("*").eq("user_id", claims.sub).maybeSingle()
-  let { data: me } = await own()
-  if (!me) {
-    await supabase.rpc("link_google_account") // no-op unless a pre-created account matches the Google-verified email
-    ;({ data: me } = await own())
-  }
+  const { data: me } = await own()
   return { supabase, claims, me }
 }
 

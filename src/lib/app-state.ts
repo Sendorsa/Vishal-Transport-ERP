@@ -1,11 +1,12 @@
 "use client"
 
 /**
- * Mock session: current role and company scope. Persisted in localStorage and read with
- * useSyncExternalStore so the server render (Owner / Group) hydrates without mismatch.
- * Replace with the real session (JWT claims) when auth exists.
+ * Session: current role and company scope. The role comes from the signed-in Google account's ERP account
+ * (verified on the server, src/lib/auth/session.ts, handed down by AppShell through SessionProvider). The stored
+ * localStorage role (`vt:ui:role`) is only the fallback for code with no signed-in session (the offline checks).
+ * Company scope stays a per-browser preference.
  */
-import { useCallback, useSyncExternalStore } from "react"
+import { createContext, useCallback, useContext, useSyncExternalStore } from "react"
 import type { AuditActor, CompanyScope, LegacyRole, Role } from "./types"
 import { can, type Action, type Resource } from "./permissions"
 import { monthKey, msUntilIndiaMidnight, todayISO } from "./format"
@@ -41,11 +42,28 @@ const ROLES = ["OWNER", "DEV", "EMPLOYEE"] as const
 const SCOPES = ["GROUP", "VT", "VTHPL"] as const
 const LEGACY: readonly LegacyRole[] = ["ACCOUNTANT", "OPS_MANAGER"]
 
+/** The signed-in account, verified on the server for this page load (null on /login and in the offline checks). */
+export interface VerifiedSession {
+  role: Role
+  email: string | null
+}
+const SessionContext = createContext<VerifiedSession | null>(null)
+export const SessionProvider = SessionContext.Provider
+export const useSession = () => useContext(SessionContext)
+
+// The verified role for code outside React (the API's currentRole). Browser only: on the server, module state
+// would be shared between requests.
+let verifiedRole: Role | null = null
+export function setVerifiedRole(role: Role | null) {
+  if (typeof window !== "undefined") verifiedRole = role
+}
+
 /**
  * The stored session role. A removed role (Accountant / Operations Manager, 31 Oct 2026) reads as Employee — never
  * the unknown-role fallback to Owner, which would promote it. The stored value itself is left as it is.
  */
 function readRole(): Role {
+  if (verifiedRole) return verifiedRole
   try {
     if (LEGACY.includes(window.localStorage.getItem(ROLE_KEY) as LegacyRole)) return "EMPLOYEE"
   } catch {
@@ -68,16 +86,22 @@ export function currentActor(): AuditActor {
 }
 
 export function useRole(): [Role, (r: Role) => void] {
-  const role = useSyncExternalStore(
+  const session = useContext(SessionContext)
+  const stored = useSyncExternalStore(
     subscribe,
     readRole,
     () => "OWNER" as Role
   )
-  const set = useCallback((r: Role) => {
-    window.localStorage.setItem(ROLE_KEY, r)
-    emit()
-  }, [])
-  return [role, set]
+  // A signed-in account's role can't be switched from the browser.
+  const set = useCallback(
+    (r: Role) => {
+      if (session) return
+      window.localStorage.setItem(ROLE_KEY, r)
+      emit()
+    },
+    [session]
+  )
+  return [session?.role ?? stored, set]
 }
 
 /**

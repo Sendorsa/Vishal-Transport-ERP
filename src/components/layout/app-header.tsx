@@ -1,7 +1,8 @@
 "use client"
 
+import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Building2, Check, ChevronDown, UserCog } from "lucide-react"
+import { Building2, Check, ChevronDown, LogOut, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
@@ -15,8 +16,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { useCompanyScope, useRole } from "@/lib/app-state"
-import { ROLES, roleLabel } from "@/lib/permissions"
+import { useCompanyScope, useRole, useSession } from "@/lib/app-state"
+import { roleLabel } from "@/lib/permissions"
+import { signOutToLogin } from "@/features/auth/sign-in-buttons"
 import type { CompanyScope } from "@/lib/types"
 
 const SCOPES: { value: CompanyScope; label: string; description: string }[] = [
@@ -55,8 +57,10 @@ export function CompanySwitcher() {
   )
 }
 
-export function RoleSwitcher() {
-  const [role, setRole] = useRole()
+/** The signed-in account: email, role (from the database, not switchable), User accounts for DEV, Sign out. */
+export function AccountMenu() {
+  const session = useSession()
+  const [role] = useRole()
   const initials = roleLabel(role)
     .split(" ")
     .map((w) => w[0])
@@ -72,20 +76,22 @@ export function RoleSwitcher() {
           <ChevronDown className="hidden text-muted-foreground lg:block" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-72">
-        <DropdownMenuLabel className="flex items-center gap-2">
-          <UserCog className="size-4" /> Switch role (demo)
+      <DropdownMenuContent align="end" className="w-64">
+        <DropdownMenuLabel className="grid gap-0.5">
+          <span className="truncate text-sm font-medium">{session?.email ?? "Signed in"}</span>
+          <span className="text-xs font-normal text-muted-foreground">{roleLabel(role)}</span>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {ROLES.map((r) => (
-          <DropdownMenuItem key={r.value} onSelect={() => setRole(r.value)} className="items-start">
-            <Check className={r.value === role ? "mt-0.5 opacity-100" : "mt-0.5 opacity-0"} />
-            <div className="grid">
-              <span className="font-medium">{r.label}</span>
-              <span className="text-xs text-muted-foreground">{r.description}</span>
-            </div>
+        {role === "DEV" && (
+          <DropdownMenuItem asChild>
+            <Link href="/settings/users">
+              <Users className="size-4" /> User accounts
+            </Link>
           </DropdownMenuItem>
-        ))}
+        )}
+        <DropdownMenuItem onSelect={() => void signOutToLogin()}>
+          <LogOut className="size-4" /> Sign out
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -102,7 +108,7 @@ export function AppHeader() {
       <span className="hidden text-sm font-medium text-muted-foreground sm:inline">Vishal Transport ERP</span>
       <div className="ml-auto flex items-center gap-1.5">
         {showEntitySwitcher && <CompanySwitcher />}
-        <RoleSwitcher />
+        <AccountMenu />
       </div>
     </header>
   )
