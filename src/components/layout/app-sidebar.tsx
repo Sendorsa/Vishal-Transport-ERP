@@ -40,7 +40,7 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild tooltip="Vishal Transport">
-              <Link href="/" onClick={() => setOpenMobile(false)}>
+              <Link href="/fuel-stations" onClick={() => setOpenMobile(false)}>
                 <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
                   <Truck className="size-4" />
                 </div>

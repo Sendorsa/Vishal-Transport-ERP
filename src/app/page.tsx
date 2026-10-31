@@ -1,5 +1,6 @@
-import { DashboardView } from "@/features/dashboard/dashboard-view"
+import { redirect } from "next/navigation"
 
-export default function DashboardPage() {
-  return <DashboardView />
+/** The ERP opens on Fuel Stations (owner, 1 Nov 2026). The Dashboard is at /dashboard. */
+export default function Home() {
+  redirect("/fuel-stations")
 }

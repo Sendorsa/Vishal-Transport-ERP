@@ -34,7 +34,7 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: NavItem[] = [
-  { title: "Dashboard", href: "/", icon: LayoutDashboard, resource: "dashboard", group: "Overview", mobile: true },
+  { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard, resource: "dashboard", group: "Overview", mobile: true },
   { title: "Customers", href: "/customers", icon: Users, resource: "customers", group: "Operations" },
   { title: "Vehicles", href: "/vehicles", icon: Bus, resource: "vehicles", group: "Operations" },
   { title: "Trips", href: "/trips", icon: Route, resource: "trips", group: "Operations", mobile: true },

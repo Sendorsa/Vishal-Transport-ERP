@@ -16,7 +16,7 @@ npm run check      # every business-rule check (diesel, audit, actions, restore,
 
 | Module | Routes |
 |---|---|
-| Dashboard | `/`: KPIs, revenue/expense trends, customer and vehicle profitability, overdue, compliance, ready-to-bill |
+| Dashboard | `/dashboard` (`/` opens Fuel Stations): KPIs, revenue/expense trends, customer and vehicle profitability, overdue, compliance, ready-to-bill |
 | Customers | `/customers`, `/customers/new`, `/customers/[id]`: pricing terms, invoices, trips, profitability |
 | Vehicles | `/vehicles`, `/vehicles/new`, `/vehicles/[id]`: insurance, road tax, maintenance, diesel, profitability |
 | Trips | `/trips`, `/trips/new`, `/trips/[id]`: revenue priced from the customer's pricing model |
