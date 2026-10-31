@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server"
 import { supabaseEnv } from "@/lib/supabase/env"
 import { gate, type AccountStatus } from "@/lib/auth/gate"
 import { readAccount } from "@/lib/auth/account"
+import { proxyRedirect } from "@/lib/auth/redirect"
 import type { Database } from "@/lib/supabase/database.types"
 
 /**
@@ -39,14 +40,14 @@ export async function proxy(request: NextRequest) {
   return apply(request, response, gate(path, { configured: true, signedIn: !!claims, status }))
 }
 
-/** Lets the request through, or redirects — carrying any refreshed session cookies and no-cache headers along. */
+/**
+ * Lets the request through, or redirects on the host the browser used (proxyRedirect: its Host header, never a
+ * configured URL or `request.url`), carrying any refreshed session cookies along. Never cacheable.
+ */
 function apply(request: NextRequest, response: NextResponse, result: ReturnType<typeof gate>) {
   if (result.action === "allow") return response
-  const redirect = NextResponse.redirect(new URL(result.to, request.url))
+  const redirect = proxyRedirect(request, result.to)
   response.cookies.getAll().forEach((c) => redirect.cookies.set(c))
-  response.headers.forEach((value, key) => {
-    if (/^(cache-control|expires|pragma)$/i.test(key)) redirect.headers.set(key, value)
-  })
   return redirect
 }
 

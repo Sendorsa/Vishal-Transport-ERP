@@ -36,9 +36,28 @@ export function safeNext(raw: string | null | undefined): string {
   return url.pathname + url.search + url.hash
 }
 
+/**
+ * Where Google sign-in must return: this deployment's own callback, built from the origin the browser is on
+ * (`window.location.origin`) — never a configured or hard-coded host, so localhost returns to localhost and the Vercel
+ * domain to the Vercel domain. Supabase honours it only if it is on its Redirect URLs allow list; otherwise it falls
+ * back to its Site URL (SUPABASE_SETUP.md §5).
+ */
+export function oauthCallbackUrl(origin: string): string {
+  const o = new URL(origin)
+  if ((o.protocol !== "https:" && o.protocol !== "http:") || o.origin !== origin.replace(/\/$/, "")) throw new Error(`Not an origin: ${origin}`)
+  return `${o.origin}/auth/callback`
+}
+
 /** `path` is the request's pathname plus search (e.g. "/diesel?month=2026-11"). */
 export function gate(path: string, s: AuthState): GateResult {
   const url = new URL(path, "http://erp.local")
+  // Supabase returns a sign-in to its Site URL (the site root) when the requested callback isn't allow-listed: finish
+  // it here, on the host the browser is on (the PKCE check in the callback still decides whether it succeeds).
+  if (url.pathname === "/" && (url.searchParams.has("code") || url.searchParams.has("error"))) {
+    const keep = new URLSearchParams()
+    for (const k of ["code", "error", "error_description"]) if (url.searchParams.has(k)) keep.set(k, url.searchParams.get(k)!)
+    return { action: "redirect", to: `/auth/callback?${keep}` }
+  }
   const onLogin = url.pathname === "/login"
   if (!s.configured) return onLogin ? { action: "allow" } : { action: "redirect", to: "/login" }
   if (!s.signedIn) {

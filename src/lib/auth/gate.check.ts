@@ -10,8 +10,10 @@ import { fileURLToPath } from "node:url"
 import { setRole } from "@/lib/api/test-browser"
 import { currentRole, setVerifiedRole } from "@/lib/app-state"
 import { can } from "@/lib/permissions"
-import { config } from "@/proxy"
-import { gate, LANDING, safeNext, type AuthState } from "./gate"
+import { NextRequest } from "next/server"
+import { config, proxy } from "@/proxy"
+import { gate, LANDING, oauthCallbackUrl, safeNext, type AuthState } from "./gate"
+import { sameHostRedirect } from "./redirect"
 
 const OUT: AuthState = { configured: true, signedIn: false, status: null } // signed out, or an expired session
 const ACTIVE: AuthState = { configured: true, signedIn: true, status: "ACTIVE" }
@@ -86,6 +88,26 @@ assert.equal(currentRole(), "DEV")
 setVerifiedRole(null)
 assert.equal(currentRole(), "OWNER", "without a session (offline checks) the stored role still applies")
 
+/* ---------------------------------------------------------------- redirects stay on the host that started sign-in (local and Vercel) */
+const HOSTS = ["http://localhost:3000", "http://127.0.0.1:3000", "https://vishal-erp.vercel.app", "https://erp.vishaltransport.example"]
+for (const origin of HOSTS) assert.equal(oauthCallbackUrl(origin), `${origin}/auth/callback`, `Google returns to ${origin}'s own callback`)
+for (const bad of ["javascript:alert(1)", "https://vishal-erp.vercel.app/path", "ftp://host"]) assert.throws(() => oauthCallbackUrl(bad), `not an origin: ${bad}`)
+
+// Supabase falls back to its Site URL (the site root) with ?code= when the callback isn't allow-listed: finish it here.
+assert.equal(to("/?code=abc123", OUT), "/auth/callback?code=abc123", "a sign-in returned to the site root is finished on this host")
+assert.equal(to("/?code=abc123", ACTIVE), "/auth/callback?code=abc123")
+assert.equal(to("/?error=access_denied&error_description=Denied", OUT), "/auth/callback?error=access_denied&error_description=Denied", "…as is a refused one")
+assert.equal(to("/?code=x&next=https%3A%2F%2Fevil.example", OUT), "/auth/callback?code=x", "only the OAuth parameters are carried over")
+assert.equal(to("/dashboard?code=abc", OUT), "/login?next=%2Fdashboard%3Fcode%3Dabc", "only the site root is treated as an OAuth return")
+
+// The callback's redirects are relative, so the browser stays on its own host whatever the server thinks it is.
+const r = sameHostRedirect("/dashboard")
+assert.equal(r.status, 307)
+assert.equal(r.headers.get("location"), "/dashboard", "relative Location: no host for anything to get wrong")
+assert.match(r.headers.get("cache-control") ?? "", /no-store/, "never cached (it can carry session cookies)")
+for (const bad of ["https://localhost:3000/login", "//evil.example", "login"]) assert.throws(() => sameHostRedirect(bad), `refuses ${bad}`)
+
+
 /* ---------------------------------------------------------------- account linking happens only in the OAuth callback */
 // Page loads, the layout and server actions read the caller's own profile (readAccount); only /auth/callback may call
 // link_google_account, the function that links a Google sign-in to a pre-created account.
@@ -100,4 +122,36 @@ assert.deepEqual(linkers, ["app/auth/callback/route.ts"], "only the OAuth callba
 for (const f of ["proxy.ts", "lib/auth/session.ts", "app/settings/users/actions.ts"])
   assert.match(readFileSync(join(SRC, f), "utf8"), /readAccount|\.from\("profiles"\)/, `${f} reads the account instead of linking`)
 
-console.log("auth: sign-in gate (signed out, expired, unapproved, deactivated, approved), safe return paths, no loops, proxy matcher, role binding, linking only in the OAuth callback: all checks passed")
+// The proxy redirects to the host of the incoming request — localhost stays localhost, Vercel stays Vercel.
+async function proxyChecks() {
+  // What a browser on each host sends; Vercel's edge adds x-forwarded-proto.
+  const request = (origin: string, path: string, extra: Record<string, string> = {}) => {
+    const u = new URL(origin)
+    return new NextRequest(`${origin}${path}`, { headers: { host: u.host, "x-forwarded-proto": u.protocol.replace(":", ""), ...extra } })
+  }
+  const proxyTo = async (origin: string, path: string, extra?: Record<string, string>) => (await proxy(request(origin, path, extra))).headers.get("location")
+  for (const origin of HOSTS) {
+    assert.equal(await proxyTo(origin, "/dashboard"), `${origin}/login`, `${origin}: Supabase not configured → its own /login`)
+    assert.equal(await proxyTo(origin, "/?code=abc"), `${origin}/auth/callback?code=abc`, `${origin}: a site-root OAuth return → its own callback`)
+  }
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "http://127.0.0.1:9" // dummy project: no request is made without a session cookie
+  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_offlinecheck"
+  for (const origin of HOSTS) {
+    assert.equal(await proxyTo(origin, "/"), `${origin}/login`, `${origin}: signed out → its own /login`)
+    assert.equal(await proxyTo(origin, "/dashboard"), `${origin}/login?next=%2Fdashboard`, `${origin}: the destination is remembered, on the same host`)
+    const res = await proxy(request(origin, "/dashboard"))
+    assert.match(res.headers.get("cache-control") ?? "", /no-store/, `${origin}: the redirect is never cached`)
+    if (origin.startsWith("https://")) assert.doesNotMatch(res.headers.get("location") ?? "", /localhost|127\.0\.0\.1/, `${origin}: never redirected to localhost`)
+  }
+  // A Host header that isn't a plain host[:port] can't steer the redirect.
+  assert.equal(await proxyTo("https://vishal-erp.vercel.app", "/dashboard", { host: "evil.example/x" }), "https://vishal-erp.vercel.app/login?next=%2Fdashboard", "a malformed Host header falls back to the request URL")
+  delete process.env.NEXT_PUBLIC_SUPABASE_URL
+  delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+}
+
+proxyChecks()
+  .then(() => console.log("auth: sign-in gate (signed out, expired, unapproved, deactivated, approved), safe return paths, no loops, proxy matcher, role binding, same-host redirects (local and Vercel), linking only in the OAuth callback: all checks passed"))
+  .catch((e) => {
+    console.error(e)
+    process.exit(1)
+  })

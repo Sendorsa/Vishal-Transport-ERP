@@ -4,7 +4,7 @@ import { useEffect, useState } from "react"
 import { Loader2, LogOut } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
-import { COOKIE_NEXT, LANDING } from "@/lib/auth/gate"
+import { COOKIE_NEXT, LANDING, oauthCallbackUrl } from "@/lib/auth/gate"
 import { useSession } from "@/lib/app-state"
 import { createClient } from "@/lib/supabase/client"
 import { cn } from "@/lib/utils"
@@ -30,7 +30,7 @@ export function GoogleSignInButton({ next = LANDING, className }: { next?: strin
       document.cookie = `${COOKIE_NEXT}=${encodeURIComponent(next)}; Path=/; Max-Age=600; SameSite=Lax${secure}`
       const { error } = await createClient().auth.signInWithOAuth({
         provider: "google",
-        options: { redirectTo: `${window.location.origin}/auth/callback` },
+        options: { redirectTo: oauthCallbackUrl(window.location.origin) }, // this host's own callback
       })
       if (error) throw error
     } catch (e) {

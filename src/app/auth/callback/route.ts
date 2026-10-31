@@ -1,7 +1,8 @@
 import { cookies } from "next/headers"
-import { NextResponse, type NextRequest } from "next/server"
+import type { NextRequest } from "next/server"
 import { createClient } from "@/lib/supabase/server"
 import { COOKIE_NEXT, safeNext } from "@/lib/auth/gate"
+import { sameHostRedirect as go } from "@/lib/auth/redirect"
 
 /**
  * Google sign-in returns here. Exchanges the code for a session (cookies), then links the caller to their
@@ -38,13 +39,4 @@ export async function GET(request: NextRequest) {
     to.set("error", "failed")
   }
   return go(to.size ? `/login?${to}` : "/login")
-}
-
-/**
- * A same-origin redirect with a relative Location, so the browser stays on the host it used (in development
- * `request.url` can name a different host, which would lose the session cookie just set).
- */
-function go(path: string) {
-  // It may carry the new session cookies: never cacheable (one user's session must never be served to another).
-  return new NextResponse(null, { status: 307, headers: { Location: path, "Cache-Control": "private, no-cache, no-store, must-revalidate, max-age=0", Expires: "0", Pragma: "no-cache" } })
 }
