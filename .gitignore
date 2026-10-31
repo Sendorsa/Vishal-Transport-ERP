@@ -30,8 +30,34 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files — never commit credentials (.env, .env.local, .env.*.local, .env.production, .env.development, .env.test …)
 .env*
+!.env.example
+
+# local business-data exports, database dumps and backups (never commit business data)
+vishal-erp-*.json
+/backups/
+/import/
+*.dump
+*.backup
+*.sql.gz
+*.pgdump
+*.sql.bak
+*.tgz
+*.tar.gz
+/backup*/
+migration-dry-run-*.md
+
+# temporary files and logs
+*.log
+*.tmp
+*.swp
+*~
+.tmp/
+
+# supabase CLI local state
+/supabase/.temp/
+/supabase/.branches/
 
 # vercel
 .vercel

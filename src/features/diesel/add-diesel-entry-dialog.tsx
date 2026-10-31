@@ -1,0 +1,238 @@
+"use client"
+
+import { useMemo, useState } from "react"
+import { endOfMonth, parseISO } from "date-fns"
+import { toast } from "sonner"
+import { Input } from "@/components/ui/input"
+import { FormModal } from "@/components/shared/form-modal"
+import { ReasonField } from "@/components/shared/audit"
+import { Field } from "@/components/shared/misc"
+import { SimpleSelect } from "@/components/shared/simple-select"
+import { useCreateDiesel, useCreateFuelStation, useDieselEntries, useFuelStations, useTankerAdjustments, useTankerDispenses, useTankerLoads, useTankerTransfers, useTankers, useUpdateDiesel } from "@/lib/api/hooks"
+import { fillOrder } from "@/domain/diesel"
+import { TANKER_SOURCE_ID, insufficientTankerMessage, isStockPool, tankerLabel, tankerOf, valueTankers } from "@/domain/tanker"
+import { CreatableSelect } from "@/components/shared/creatable-select"
+import { fuelLabel } from "@/lib/constants"
+import { formatDate, formatINR, formatNumber, round2, toISODate, todayISO } from "@/lib/format"
+import type { Customer, DieselEntry, Vehicle } from "@/lib/types"
+
+/** The "Direct petrol pump" diesel source; every other source value is a tanker id. */
+const PUMP = "PUMP"
+
+/**
+ * Adds — or, with `entry`, edits — a fill for one vehicle, costed to one customer, inside one month.
+ * Opened only from the vehicle diesel screen, so customer, vehicle and month come from context.
+ * Mount with `key={entry.id}` when editing so the form starts from that entry.
+ */
+export function AddDieselEntryDialog({
+  open,
+  onOpenChange,
+  vehicle,
+  customer,
+  month,
+  entry,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  vehicle: Vehicle
+  customer: Customer | null
+  month: string
+  entry?: DieselEntry
+}) {
+  const stations = useFuelStations()
+  const entries = useDieselEntries()
+  const create = useCreateDiesel()
+  const update = useUpdateDiesel()
+  const createPump = useCreateFuelStation()
+  const tankers = useTankers()
+  const loads = useTankerLoads()
+  const external = useTankerDispenses()
+  const transfers = useTankerTransfers()
+  const adjustments = useTankerAdjustments()
+  const today = todayISO()
+  const monthEnd = toISODate(endOfMonth(parseISO(`${month}-01`)))
+  const maxDate = monthEnd < today ? monthEnd : today
+  const defaultDate = maxDate
+
+  const blank = entry
+    ? { date: entry.date, vendorId: entry.vendorId, litres: String(entry.litres), rate: String(entry.rate), odometerKm: entry.odometerKm === null ? "" : String(entry.odometerKm), billNo: entry.billNo, paymentMode: entry.paymentMode as string, tankerId: entry.vendorId === TANKER_SOURCE_ID ? tankerOf(entry) : "" }
+    : { date: defaultDate, vendorId: "dv_vishal", litres: "", rate: "", odometerKm: "", billNo: "", paymentMode: "CREDIT", tankerId: "" }
+  const [f, setF] = useState(blank)
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [reason, setReason] = useState("")
+  const set = (k: keyof typeof f) => (v: string) => setF((s) => ({ ...s, [k]: v }))
+
+  const vehicleFills = useMemo(
+    () => (entries.data ?? []).filter((e) => e.vehicleId === vehicle.id && e.id !== entry?.id).sort(fillOrder),
+    [entries.data, vehicle.id, entry?.id]
+  )
+  const odoTyped = Number(f.odometerKm || vehicle.odometerKm || 0)
+  // Previous fill = latest fill before this one in (date, odometer) order — same rule the KPIs use.
+  const lastFill = [...vehicleFills].reverse().find((e) => e.odometerKm !== null && (e.date < f.date || (e.date === f.date && e.odometerKm <= odoTyped)))
+  const lastOdo = lastFill?.odometerKm ?? null
+  const lastRate = useMemo(
+    () => (entries.data ?? []).filter((e) => e.vendorId === f.vendorId).sort((a, b) => b.date.localeCompare(a.date))[0]?.rate,
+    [entries.data, f.vendorId]
+  )
+  const litres = Number(f.litres)
+  // Diesel source (owner, 31 Oct 2026): a direct petrol-pump fill, or one of the company tankers (JIO / Office / Mini).
+  // A tanker fill is an internal stock movement: it takes litres out of that tanker and is never a purchase — the
+  // purchase was the tanker load. Its rate is the source rate entered on the fill (answer 23), never an average.
+  const fromTanker = f.vendorId === TANKER_SOURCE_ID
+  const wasTankerFill = entry?.vendorId === TANKER_SOURCE_ID
+  // A tanker's own fuel is a pump fill, never its cargo (an own fill already recorded from cargo stays editable).
+  const ownTanker = (tankers.data ?? []).find((t) => t.vehicleId === vehicle.id)
+  // A historical fill on a stock pool (no registration) keeps it; the pool is never offered (DIESEL_TANKER_CLEANUP_REPORT.md).
+  const pool = (tankers.data ?? []).find((t) => wasTankerFill && t.id === f.tankerId && isStockPool(t))
+  const tankerOptions =
+    vehicle.fuelType === "DIESEL" && !ownTanker
+      ? (tankers.data ?? []).filter((t) => !isStockPool(t) && (t.status === "ACTIVE" || t.id === f.tankerId))
+      : (tankers.data ?? []).filter((t) => wasTankerFill && t.id === tankerOf(entry!) && !isStockPool(t))
+  const sourceOptions = [
+    { value: PUMP, label: "Direct petrol pump" },
+    ...tankerOptions.map((t) => ({ value: t.id, label: `Tanker — ${tankerLabel(t)}` })),
+    ...(pool ? [{ value: pool.id, label: `${pool.name} (historical stock)` }] : []),
+  ]
+  const tankerId = fromTanker ? f.tankerId : ""
+  const valuation = valueTankers({ loads: loads.data ?? [], fills: (entries.data ?? []).filter((e) => e.id !== entry?.id), external: external.data ?? [], transfers: transfers.data ?? [], adjustments: adjustments.data ?? [] })
+  const cargo = valuation.stock.get(tankerId) ?? { litres: 0, value: 0, avgRate: null }
+  // Shown for reference only — the user enters the rate actually used for this fill.
+  const lastLoad = useMemo(
+    () => (loads.data ?? []).filter((l) => !l.opening && tankerOf(l) === tankerId).sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))[0],
+    [loads.data, tankerId]
+  )
+  const rate = fromTanker ? Number(f.rate || 0) : Number(f.rate || lastRate || 0)
+  const setSource = (v: string) =>
+    setF((cur) =>
+      v === PUMP
+        ? { ...cur, vendorId: entry && !wasTankerFill ? entry.vendorId : "dv_vishal", tankerId: "", rate: wasTankerFill ? "" : cur.rate }
+        : { ...cur, vendorId: TANKER_SOURCE_ID, tankerId: v, rate: cur.vendorId === TANKER_SOURCE_ID ? cur.rate : "" }
+    )
+  const odo = odoTyped
+  const ev = vehicle.fuelType === "EV" // fuel type comes from the vehicle record
+  const unit = ev ? "kWh" : "L"
+  const amount = round2(litres * rate)
+  const kmSince = lastOdo === null ? null : odo - lastOdo
+  const kmpl = kmSince && kmSince > 0 && litres > 0 ? kmSince / litres : null
+
+  const close = () => {
+    setF(blank)
+    setErrors({})
+    setReason("")
+    onOpenChange(false)
+  }
+
+  const submit = async () => {
+    const errs: Record<string, string> = {}
+    if (!f.date.startsWith(month)) errs.date = `Pick a date in this month`
+    if (f.date > today) errs.date = "Date can't be in the future"
+    if (!(litres > 0)) errs.litres = ev ? "Enter units (kWh)" : "Enter litres"
+    else if (litres > 600) errs.litres = "More than a tank — check the value"
+    if (fromTanker) {
+      if (ownTanker && !wasTankerFill) errs.vendorId = `${ownTanker.name}'s own fuel isn't taken from tanker cargo — pick a fuel station`
+      else if (!tankerId) errs.vendorId = "Choose the tanker"
+      else if (litres > cargo.litres) errs.litres = insufficientTankerMessage(cargo.litres)
+      if (!f.rate.trim()) errs.rate = "Enter the source rate per litre for this fill"
+      else if (!(rate > 50 && rate < 200)) errs.rate = "Rate should be ₹50–200 per litre"
+    } else if (ev ? !(rate > 0 && rate < 100) : !(rate > 50 && rate < 200)) errs.rate = ev ? "Rate should be ₹1–100 per kWh" : "Rate should be ₹50–200 per litre"
+    if (lastOdo !== null && odo < lastOdo) errs.odometerKm = `Below last fill (${formatNumber(lastOdo)} km)`
+    setErrors(errs)
+    if (Object.keys(errs).length) return
+    const data = { date: f.date, vendorId: f.vendorId, litres, rate, odometerKm: odo, billNo: f.billNo.trim(), paymentMode: (fromTanker ? "CREDIT" : f.paymentMode) as "CREDIT" | "CASH", tankerId: fromTanker ? tankerId : undefined }
+    if (entry) await update.mutateAsync({ id: entry.id, data, reason })
+    else await create.mutateAsync({ ...data, vehicleId: vehicle.id, customerId: customer?.id ?? null })
+    toast.success(`Diesel entry ${entry ? "updated" : "saved"} — ${formatINR(amount)}`)
+    close()
+  }
+
+  return (
+    <FormModal
+      open={open}
+      onOpenChange={(o) => (o ? onOpenChange(o) : close())}
+      title={entry ? "Edit diesel entry" : "Add diesel entry"}
+      description={`${vehicle.regNo} · costed to ${customer?.shortName ?? "Unallocated"}`}
+      submitLabel={entry ? "Save changes" : "Save entry"}
+      pending={create.isPending || update.isPending}
+      onSubmit={submit}
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Date" required error={errors.date}>
+          <Input type="date" value={f.date} min={`${month}-01`} max={maxDate} onChange={(e) => set("date")(e.target.value)} />
+        </Field>
+        <Field label="Payment">
+          {fromTanker ? (
+            <div className="flex h-8 items-center rounded-lg border bg-muted/40 px-2.5 text-sm text-muted-foreground">From tanker cargo — nothing to pay</div>
+          ) : (
+            <SimpleSelect value={f.paymentMode} onChange={set("paymentMode")} options={[{ value: "CREDIT", label: "Credit (vendor account)" }, { value: "CASH", label: "Cash" }]} />
+          )}
+        </Field>
+        <Field
+          label="Diesel source"
+          required
+          error={errors.vendorId}
+          hint={fromTanker && tankerId && !pool ? `Available in this tanker: ${formatNumber(cargo.litres, 2)} L — the fill is taken out of its stock` : undefined}
+        >
+          <SimpleSelect value={fromTanker ? tankerId : PUMP} onChange={setSource} options={sourceOptions} />
+        </Field>
+        {fromTanker ? null : (
+          <Field label="Fuel Station" required>
+            <CreatableSelect
+              value={f.vendorId}
+              onChange={(v) => setF((cur) => ({ ...cur, vendorId: v }))}
+              options={(stations.data ?? []).filter((v) => v.status === "ACTIVE" && !v.isTanker).map((v) => ({ value: v.id, label: v.location ? `${v.name} — ${v.location}` : v.name }))}
+              onCreate={createPump}
+              placeholder="Select fuel station"
+            />
+          </Field>
+        )}
+        <Field label="Fuel type">
+          <div className="flex h-8 items-center rounded-lg border bg-muted/40 px-2.5 text-sm" title="Set on the vehicle record">
+            {fuelLabel(vehicle.fuelType)} <span className="ml-auto text-xs text-muted-foreground">from vehicle</span>
+          </div>
+        </Field>
+        <Field label={ev ? "Units (kWh)" : "Litres"} required error={errors.litres}>
+          <Input type="number" step="0.01" value={f.litres} onChange={(e) => set("litres")(e.target.value)} autoFocus />
+        </Field>
+        {fromTanker ? (
+          <Field
+            label="Source rate (₹ / L)"
+            required
+            error={errors.rate}
+            hint={lastLoad ? `For reference — last load into this tanker: ${formatINR(lastLoad.rate)} / L on ${formatDate(lastLoad.date)}` : "The rate this diesel is costed at"}
+          >
+            <Input type="number" step="0.01" value={f.rate} onChange={(e) => set("rate")(e.target.value)} />
+          </Field>
+        ) : (
+          <Field label={ev ? "Rate (₹ / kWh)" : "Rate (₹ / L)"} required error={errors.rate} hint={lastRate ? `Last at this pump: ${formatINR(lastRate)}` : undefined}>
+            <Input type="number" step="0.01" value={f.rate} placeholder={lastRate?.toFixed(2)} onChange={(e) => set("rate")(e.target.value)} />
+          </Field>
+        )}
+        <Field label="Odometer (km)" required error={errors.odometerKm}>
+          <Input type="number" value={f.odometerKm} placeholder={String(vehicle.odometerKm)} onChange={(e) => set("odometerKm")(e.target.value)} />
+        </Field>
+        <Field label="Bill / indent no.">
+          <Input value={f.billNo} onChange={(e) => set("billNo")(e.target.value)} />
+        </Field>
+        {entry && <ReasonField value={reason} onChange={setReason} className="sm:col-span-2" />}
+      </div>
+      <div className="grid grid-cols-3 gap-3 rounded-lg border bg-muted/40 p-3 text-sm">
+        <div>
+          <div className="text-xs text-muted-foreground">Amount</div>
+          <div className="num font-semibold">{formatINR(amount)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">Since last fill</div>
+          <div className="num font-medium">{kmSince !== null ? `${formatNumber(kmSince)} km` : "—"}</div>
+          {lastFill && <div className="text-[11px] text-muted-foreground">{formatDate(lastFill.date)}</div>}
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">Mileage</div>
+          <div className={kmpl && kmpl < vehicle.mileageKmpl * 0.9 ? "num font-medium text-destructive" : "num font-medium"}>
+            {kmpl ? `${kmpl.toFixed(2)} km/${unit}` : "—"}
+          </div>
+          <div className="text-[11px] text-muted-foreground">rated {vehicle.mileageKmpl}</div>
+        </div>
+      </div>
+    </FormModal>
+  )
+}
