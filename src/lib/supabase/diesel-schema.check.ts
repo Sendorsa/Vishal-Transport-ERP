@@ -57,6 +57,11 @@ async function main() {
       ('${PROFILE[OWNER]}', '${OWNER}', 'owner@example.com', 'OWNER', 'ACTIVE', now()),
       ('${PROFILE[DEV]}', '${DEV}', 'dev@example.com', 'DEV', 'ACTIVE', now()),
       ('${PROFILE[EMP]}', '${EMP}', 'staff@example.com', 'EMPLOYEE', 'ACTIVE', now());
+    -- Every account change needs its audit event in the same transaction (20261101000700_accounts.sql).
+    insert into audit.events (actor_kind, action, module, record_type, record_id) values
+      ('SYSTEM', 'CREATED', 'Accounts', 'User account', '${PROFILE[OWNER]}'),
+      ('SYSTEM', 'CREATED', 'Accounts', 'User account', '${PROFILE[DEV]}'),
+      ('SYSTEM', 'CREATED', 'Accounts', 'User account', '${PROFILE[EMP]}');
   `)
 
   /** One business write as a signed-in user, in one transaction (deferred checks run at COMMIT). */

@@ -1,10 +1,12 @@
 # Supabase Diesel Database Schema — Phase 1 (authoritative design)
 
-**Status (31 Oct 2026):**
+**Status (designed 31 Oct 2026; status updated 1 Nov 2026):**
 - **Designed.**
-- **Implemented as SQL files:** `supabase/migrations/20261101000000` … `20261101000600` (7 migrations; moved unchanged from `supabase/proposed/diesel/` after the owner approved D-1 … D-18 on 1 Nov 2026). **Not applied to any Supabase project.**
+- **Implemented as SQL files:** `supabase/migrations/20261101000000` … `20261101000600` (7 migrations; moved unchanged from `supabase/proposed/diesel/` after the owner approved D-1 … D-18 on 1 Nov 2026).
 - **Locally validated:** in PostgreSQL 18.6 (PGlite 0.5.10), in memory, by `npm run check:supabase-diesel`.
-- **Not executed against Supabase.** No table exists in the live project (Mumbai, `ap-south-1`).
+- **Applied to Supabase:** the 8 migrations through `20261101000600` (`20261028000000` plus these 7) are applied to the Production project `Vishal Transport erp` (`dqnoducqiootfvkzskhu`, Mumbai `ap-south-1`, PostgreSQL 17.11). The owner applied them; `npx supabase migration list --linked` confirmed it on 1 Nov 2026. The tables exist; they held no business data at the last check.
+- **Pending, not applied:** `20261101000700_accounts.sql` (account management) waits for the owner's go-ahead.
+- **No staging project** (owner's decision).
 - The ERP still reads and writes only browser localStorage.
 
 **Supersedes:** for the Diesel phase, `SUPABASE_DATABASE_ARCHITECTURE.md`, `SUPABASE_ER_DIAGRAM.md` and `SUPABASE_MIGRATION_PLAN.md` (31 Oct 2026, full-ERP design with a data copy). The decisions carried over are restated in §12.
@@ -351,7 +353,7 @@ IX `(record_id, at)`, `(module, at)`, `(action, at)`, `(at)`, `(txid, record_id)
 ### 3.5 `public` (existing)
 
 `public.profiles`:
-- one row per ERP account: invitation = email + role, no `user_id`;
+- one row per ERP account: a pre-created account (by DEV; no invitation email) = email + role, no `user_id` (`INVITED`, "Approved · not signed in yet"), linked at the first Google sign-in (`public.link_google_account()`, `20261101000700_accounts.sql`);
 - `role public.erp_role`, recreated as **OWNER / DEV / EMPLOYEE** by migration `…000000_erp_roles_three.sql` (D-2), which refuses to run while any account holds a removed role;
 - RLS: a user reads only their own row. `profiles_guard` blocks role and status changes from browser roles.
 

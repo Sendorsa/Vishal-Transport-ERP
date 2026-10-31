@@ -1,6 +1,6 @@
 # Supabase Diesel Database — Implementation Report
 
-**Date:** 1 Nov 2026 (updated after the owner's approval of D-1 … D-18, the same day)
+**Date:** 1 Nov 2026 (updated after the owner's approval of D-1 … D-18, and with the Production migration status, the same day)
 **Scope:** Diesel Management only — Fuel Stations, Diesel, Diesel Tankers and AdBlue, station payments and TDS, plus the shared masters, month locks and audit trail they use.
 
 **Companion documents:**
@@ -18,11 +18,11 @@
 | **Design approved** | **Yes, 1 Nov 2026:** all decisions D-1 … D-18, and keeping `finance.payment_categories` (§9) |
 | **Implemented in files** | Done. 7 SQL files in `supabase/migrations/` (`20261101000000` … `20261101000600`), moved from `supabase/proposed/diesel/` after the approval (identical SHA-256 before and after the move). Since then only line 1 of each header comment has been updated; the SQL statements are unchanged |
 | **Validated locally** | Done. `npm run check:supabase-diesel` runs every migration in `supabase/migrations/` in PGlite (PostgreSQL 18.6 in-process) and exercises the rules as Owner, Dev and Employee (§10) |
-| **Executed against Supabase** | **No.** No project linked, no connection made, no live table created, no migration run |
-| **Connected to the application** | **No.** The ERP still reads and writes only browser localStorage. No code imports the Supabase clients |
+| **Executed against Supabase** | **The 8 migrations through `20261101000600` are applied** to the Production project `Vishal Transport erp` (`dqnoducqiootfvkzskhu`). The owner applied them after this report was first written; `npx supabase migration list --linked` confirmed it on 1 Nov 2026. **`20261101000700_accounts.sql` (accounts, written later) is pending and not applied**; it waits for the owner's go-ahead. There is no staging project (owner's decision). *(When this report was first written, nothing had been applied.)* |
+| **Connected to the application** | **No, for business data:** the ERP still reads and writes only browser localStorage. The account-management pages (`/login`, Settings → User accounts) use Supabase Auth and need `20261101000700_accounts.sql`, which is not applied yet |
 | **Data imported** | **None.** No localStorage, backup, Excel or demo data was read, copied or changed |
 
-> **The approvals are design approvals, not authorisation to apply the migrations.** Being in `supabase/migrations/` means a future `supabase db push` would pick the files up, so nobody links the project or pushes them — to staging or production — until the owner separately authorises the staging step (§12).
+> **Applying a migration needs the owner's go-ahead for that step.** The 8 Diesel-phase migrations (through `20261101000600`) were applied to Production by the owner. Any later migration, starting with the pending `20261101000700_accounts.sql`, is first checked offline (`npm run check`) and with `npx supabase db push --dry-run --linked`. There is no staging project.
 
 ## 2. SQL files
 
@@ -274,13 +274,15 @@ Run 1 Nov 2026, finishing 01:23 IST, **after** the 7 files moved into `supabase/
 - The 7 files moved unchanged into `supabase/migrations/` (D-17).
 - `check:supabase` and `check:supabase-diesel` validate the active migrations; `database.types.ts` has the three-role enum.
 
+> **Superseded (1 Nov 2026): there is no staging project.** The owner decided to use the existing Production project directly. Each migration is checked offline and with `supabase db push --dry-run`, then applied with the owner's go-ahead. Accounts are pre-created by DEV and activated by Google sign-in only (`SUPABASE_SETUP.md` §6). The staging steps below are kept only as a record.
+
 **Waiting for the owner's go-ahead:**
 1. **Commit** the current work to git, so the migrations have a reviewable history.
-2. **Staging project first**, never production:
+2. ~~**Staging project first**, never production~~ (superseded):
    - create or pick a staging (or branch) project and link the CLI;
    - `npx supabase db push --dry-run`, then `db push`;
    - generate types (`supabase gen types`) into `database.types.ts`;
    - test the stock locks with two concurrent sessions.
-3. **Phase 2 auth:** Google sign-in and the first Owner added by SQL (`SUPABASE_SETUP.md`).
+3. **Phase 2 auth:** Google sign-in; the first DEV pre-created by `private.bootstrap_first_dev` (SQL editor), then DEV adds the other accounts (`SUPABASE_SETUP.md` §6).
 4. **Adapter behind a switch** (`local` / `supabase`); every `npm run check` suite must pass on both backends.
-5. **Production:** only after the staging trial matches the browser figures. The owner enters masters and opening figures by hand; no data import.
+5. **Production:** only after the offline acceptance suite shows the same figures as the browser (no staging trial). The owner enters masters and opening figures by hand; no data import.

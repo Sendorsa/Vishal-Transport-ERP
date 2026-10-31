@@ -68,7 +68,7 @@ Route file (src/app/**/page.tsx, thin)
 | Feature | State | Evidence | Recommendation |
 |---|---|---|---|
 | Supabase clients | Built, **imported by nothing** (deliberately) | `src/lib/supabase/client.ts`, `server.ts`; CLAUDE.md "Supabase (Phase 1)" | Keep. They are the foundation for the migration plan |
-| Login / invitations | Designed only | `../SUPABASE_SETUP.md` §6; the role is the mock session `vt:ui:role` | Phase 2 |
+| Login / accounts | Built for account management (1 Nov 2026): Google sign-in only; DEV pre-creates accounts, no invitation emails; the business app still uses the mock session `vt:ui:role` | `../SUPABASE_SETUP.md` §6 | Phase 2 |
 | November Fresh Start "clear operational data" | **Not built** (waits for owner decisions) | CLAUDE.md "November 2026 Fresh Start"; `../NOVEMBER_FRESH_START_IMPLEMENTATION_REPORT.md` | Unchanged |
 | External tanker dispenses | **No UI to create** (removed 31 Oct 2026); API `create` / `update` kept for checks and Restore | `api.tankerDispenses.create` is called only from `*.check.ts` | Keep in the browser app. Not carried into the Supabase schema (D-15) |
 | Stock pools (`tnk_default`, combined pool) | Hidden on the Tankers page; history kept | `isStockPool` in `domain/tanker.ts` | Keep. Not carried into the Supabase schema (D-16) |

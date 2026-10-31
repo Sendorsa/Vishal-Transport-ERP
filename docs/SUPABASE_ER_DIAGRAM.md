@@ -1,8 +1,8 @@
 # Supabase ER Diagram: Vishal Transport ERP
 
-> **Superseded for the Diesel phase (31 Oct 2026)** by `SUPABASE_DIESEL_DATABASE_SCHEMA.md` (authoritative schema, SQL in `supabase/migrations/20261101*` — design approved 1 Nov 2026, not applied to any Supabase project) and `SUPABASE_DIESEL_MIGRATION_PLAN.md` (no data import). Kept for the full-ERP context and the D-numbered decisions it introduced; where the two differ, the Diesel documents win.
+> **Superseded for the Diesel phase (31 Oct 2026)** by `SUPABASE_DIESEL_DATABASE_SCHEMA.md` (authoritative schema, SQL in `supabase/migrations/20261101*` — design approved 1 Nov 2026; applied to the Production project `Vishal Transport erp` (`dqnoducqiootfvkzskhu`) through `20261101000600`; `20261101000700_accounts.sql` is pending, not applied; no staging project) and `SUPABASE_DIESEL_MIGRATION_PLAN.md` (no data import). Kept for the full-ERP context and the D-numbered decisions it introduced; where the two differ, the Diesel documents win.
 
-**Design only.** The tables are proposed in `SUPABASE_DATABASE_ARCHITECTURE.md`; none exists in the live project.
+**Design only.** The tables are proposed in `SUPABASE_DATABASE_ARCHITECTURE.md` and were never created as drawn here. The Production project holds the Diesel-phase schema instead (see the banner above).
 
 **Cardinality notation:** `||--o{` = one to zero-or-more; `|o--o{` = optional parent.
 

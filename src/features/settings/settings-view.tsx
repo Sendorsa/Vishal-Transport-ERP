@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import Link from "next/link"
 import { Building2, Check, Database, Download, Plus, RotateCcw, Trash2, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -40,7 +41,15 @@ export function SettingsView() {
 
   return (
     <div>
-      <PageHeader title="Settings" description="Company profiles, master lists and demo controls." />
+      <PageHeader
+        title="Settings"
+        description="Company profiles, master lists and demo controls."
+        actions={
+          <Button asChild variant="outline" size="sm">
+            <Link href="/settings/users">User accounts</Link>
+          </Button>
+        }
+      />
       <Tabs defaultValue="company">
         <TabsList className="max-w-full justify-start overflow-x-auto">
           <TabsTrigger value="company">Company profile</TabsTrigger>

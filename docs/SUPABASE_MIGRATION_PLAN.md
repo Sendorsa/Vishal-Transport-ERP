@@ -1,8 +1,8 @@
 # Supabase Migration Plan: localStorage → Supabase PostgreSQL
 
-> **Superseded for the Diesel phase (31 Oct 2026)** by `SUPABASE_DIESEL_DATABASE_SCHEMA.md` (authoritative schema, SQL in `supabase/migrations/20261101*` — design approved 1 Nov 2026, not applied to any Supabase project) and `SUPABASE_DIESEL_MIGRATION_PLAN.md` (no data import). Kept for the full-ERP context and the D-numbered decisions it introduced; where the two differ, the Diesel documents win.
+> **Superseded for the Diesel phase (31 Oct 2026)** by `SUPABASE_DIESEL_DATABASE_SCHEMA.md` (authoritative schema, SQL in `supabase/migrations/20261101*` — design approved 1 Nov 2026; applied to the Production project `Vishal Transport erp` (`dqnoducqiootfvkzskhu`) through `20261101000600`; `20261101000700_accounts.sql` is pending, not applied; no staging project) and `SUPABASE_DIESEL_MIGRATION_PLAN.md` (no data import). Kept for the full-ERP context and the D-numbered decisions it introduced; where the two differ, the Diesel documents win.
 
-**Status:** plan only. Nothing in it has been run. Every step needs the owner's approval first, and the decisions D-1 … D-14 in `SUPABASE_DATABASE_ARCHITECTURE.md` §9 come before it.
+**Status:** plan only. This full-ERP plan, including its data copy, has not been run. The Diesel-phase migrations were applied to Production instead (see the banner above), and no data was imported. Every step needs the owner's approval first, and the decisions D-1 … D-14 in `SUPABASE_DATABASE_ARCHITECTURE.md` §9 come before it.
 
 **Rules (CLAUDE.md):**
 - **Copy and verify, never move-and-delete.** The browser data stays untouched until the owner approves switching over.
@@ -12,8 +12,8 @@
 ## 0. Preconditions
 
 1. **Decisions approved:** D-1 (write path), D-2 (roles enum), D-4 (ids), D-5 (uniqueness), D-8 (audit log), D-10 (timing vs the November fresh start).
-2. **Phase 2 sign-in is built and tested:** Google OAuth, Owner invitations, `profiles` ACTIVE. The first Owner account exists. Without it, RLS gives nobody access.
-3. **The business schema is a reviewed migration file.** It's applied first to a **Supabase branch or local stack**, never straight to the live project. `check:supabase` is extended to load it into PGlite and test the RLS policies per role (Owner / Dev / Employee / no account), the month lock and the append-only audit.
+2. **Phase 2 sign-in is built and tested:** Google OAuth, accounts pre-created by DEV (no invitation emails), `profiles` ACTIVE. *(Superseded wording: the first account is now DEV, not Owner — see `SUPABASE_SETUP.md` §6.)* The first account exists. Without it, RLS gives nobody access.
+3. **The business schema is a reviewed migration file.** ~~It's applied first to a **Supabase branch or local stack**, never straight to the live project.~~ *(Superseded: there is no staging project. Reviewed migrations are checked offline and with `supabase db push --dry-run`, then applied to Production with the owner's go-ahead.)* `check:supabase` is extended to load it into PGlite and test the RLS policies per role (Owner / Dev / Employee / no account), the month lock and the append-only audit.
 4. **The server data layer exists behind `src/lib/api`** (D-1), and `npm run check` passes against PostgreSQL as well as against localStorage.
 
 ## 1. Choose the source dataset

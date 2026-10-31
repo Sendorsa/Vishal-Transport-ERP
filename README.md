@@ -28,6 +28,7 @@ npm run check      # every business-rule check (diesel, audit, actions, restore,
 | Payments | `/payments`: incoming (with TDS + allocation) and outgoing, history |
 | Reports | `/reports`: customer and vehicle profitability, diesel, P&L, cash flow, receivables aging (CSV export) |
 | Settings | `/settings`: company profiles, expense heads, drivers, vehicle types, backup / restore / reset data |
+| User accounts | `/settings/users` (and `/login`, `/auth/callback`): Google sign-in only; DEV adds accounts (no email is sent; status "Approved · not signed in yet" until the person's first Google sign-in), changes roles, deactivates / reactivates and recovers accounts (Supabase; the rest of the ERP doesn't require sign-in yet) |
 | Audit Log | `/audit`: every change with before / after (Owner and Dev); deletion review and restore (Owner) |
 
 Use the top bar to switch **company** (Group / VT / VTHPL) and **role** (Owner / Dev / Employee — see `src/lib/permissions.ts`).

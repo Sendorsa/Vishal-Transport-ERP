@@ -1,6 +1,11 @@
 # Supabase Diesel Migration Plan — replacing localStorage for the Fuel modules
 
-**Status (1 Nov 2026):** plan only. Nothing here has been executed against Supabase. The schema it targets is `SUPABASE_DIESEL_DATABASE_SCHEMA.md`; decisions D-1 … D-18 were approved on 1 Nov 2026 and the SQL moved unchanged into `supabase/migrations/20261101*` (step 1's file move is done; applying to staging is not).
+**Status (1 Nov 2026):**
+- **The schema is applied, the application switch-over isn't.** The schema it targets is `SUPABASE_DIESEL_DATABASE_SCHEMA.md`; decisions D-1 … D-18 were approved on 1 Nov 2026.
+- **Applied:** the 8 migrations through `20261101000600` are applied to the Production project `Vishal Transport erp` (`dqnoducqiootfvkzskhu`), confirmed by `npx supabase migration list --linked`.
+- **Pending, not applied:** `20261101000700_accounts.sql`.
+- **No staging project** (owner's decision).
+- **Not done yet:** the adapter, the backend switch, the parallel trial and go-live (steps 3–6). The browser app still uses localStorage.
 
 **Out of scope, by instruction:**
 - **No data is migrated:** no localStorage records, demo data, JSON backups, Excel workbooks or historical records.
@@ -59,7 +64,7 @@ Browser (unchanged components + hooks)
   - a server-only connection string `SUPABASE_DB_URL` (never `NEXT_PUBLIC_`);
   - a Postgres driver (e.g. `postgres` or `pg`);
   - `@supabase/ssr` middleware (`proxy.ts`) for the session cookie.
-- **The Supabase secret key** (`SUPABASE_SECRET_KEY`, placeholder only in `.env.local`) is **not** needed by this path. Keep it empty unless a server feature such as admin invitations needs the Admin API. It must never be imported into browser code.
+- **The Supabase secret key** (`SUPABASE_SECRET_KEY`, placeholder only in `.env.local`) is **not** needed by this path. Keep it empty: account management doesn't need it (DEV pre-creates accounts through database functions; no invitation emails). It must never be imported into browser code.
 
 ## 4. The repository adapter (what changes in code)
 
@@ -102,11 +107,13 @@ Browser (unchanged components + hooks)
 
 ## 5. Step-by-step rollout
 
+> **Superseded in part (1 Nov 2026): there is no staging project.** The owner decided to use the existing Production project. Steps 1 and 4 now mean: offline checks plus `supabase db push --dry-run`, then Production with the owner's go-ahead, and figure parity checked offline. Step 2: DEV pre-creates accounts and Google is the only sign-in, with no invitation emails (`SUPABASE_SETUP.md` §6).
+
 | Step | What | Done when |
 |---|---|---|
 | 0 | **Approvals:** D-1 … D-18 (`SUPABASE_DIESEL_DATABASE_SCHEMA.md` §12). Supabase Pro plan with PITR (D-13) | Owner signs off |
 | 1 | **Schema in a non-production project first.** ~~Move `supabase/proposed/diesel/*.sql` into `supabase/migrations/` unchanged~~ (done 1 Nov 2026). `npm run check:supabase` + `check:supabase-diesel` pass. `npx supabase db push --dry-run`, then `db push` **to a staging / branch project** | Staging has the schema; the checks pass there too |
-| 2 | **Auth (Phase 2):** Google sign-in, `proxy.ts`, the first Owner inserted by SQL (`SUPABASE_SETUP.md`), invitations for Dev and Employees | Each person signs in and sees their role |
+| 2 | **Auth (Phase 2):** Google sign-in only, `proxy.ts`, the first DEV pre-created by `private.bootstrap_first_dev` (SQL editor), DEV adds the Owner and Employee accounts (no email is sent) | Each person signs in and sees their role |
 | 3 | **Adapter behind a switch:** `NEXT_PUBLIC_DATA_BACKEND=local\|supabase` (default `local`). Build the Postgres repository and server transaction wrapper. Run every existing `npm run check` suite against both backends (the checks drive `api.*`, so they become the adapter's acceptance tests) | All suites pass on `supabase` (staging) |
 | 4 | **Parallel trial on staging:** the owner enters a few real days in staging, compares the station ledger, tanker stock and AdBlue figures with the browser version | Figures identical |
 | 5 | **Go-live on production:** apply the migrations to the production project. The owner enters masters, station opening balances (Debit / Credit) and tanker opening stock as of the go-live date (`OCTOBER_31_CARRY_FORWARD_WORKSHEET.md`). Flip the switch to `supabase` | First live entries saved and audited |
@@ -120,12 +127,12 @@ Browser (unchanged components + hooks)
 
 ## 6. Verification at each step
 
-- **Schema:** `npm run check:supabase-diesel` (PGlite, offline). Then the same SQL on staging via `db push --dry-run`.
+- **Schema:** `npm run check:supabase-diesel` (PGlite, offline). Then `npx supabase db push --dry-run --linked` against Production (no staging project).
 - **Behaviour:** the full `npm run check` against the Supabase backend (step 3).
 - **Figures:** for a sample period, the station ledger (opening, purchased, paid, closing), tanker stock per tanker and AdBlue stock must match the browser exactly, to the paisa. The only expected difference is the documented 1-paisa float case (D-12), which the database computes correctly.
 - **Security:**
   - signed-out → nothing;
-  - Google account without an invitation → nothing;
+  - Google account without a pre-created account → nothing;
   - Employee → no money writes and no locked month;
   - Dev → no Owner-only actions;
   - audit rows can't be changed.
@@ -135,7 +142,7 @@ Browser (unchanged components + hooks)
 | Situation | Rollback |
 |---|---|
 | A migration fails while applying | Each migration file runs in one transaction (Supabase CLI), so nothing is left half-applied. Fix it in a **new** file |
-| The schema is wrong on staging | Drop the staging project / branch and re-create it. Production was never touched |
+| ~~The schema is wrong on staging~~ | Superseded: there is no staging project. A wrong schema on Production is fixed by a new migration (never by editing an applied one), or by point-in-time recovery for a destructive mistake |
 | Problems after go-live (app side) | Flip `NEXT_PUBLIC_DATA_BACKEND` back to `local`. The browser's localStorage was never modified, so the app works as before. Entries made in Supabase meanwhile are exported (CSV / JSON from the Fuel tables) and re-entered or restored once fixed |
 | Bad data written in production | Restore / Push Back from the Audit Log (per record), or Supabase point-in-time recovery (D-13) to just before the incident on a new project, then compare |
 | A later migration breaks something | Additive migrations are reverted by a new migration (e.g. drop the new column / constraint). Destructive changes need a backup first and owner approval |
@@ -146,5 +153,5 @@ Browser (unchanged components + hooks)
 
 1. **D-1 implementation detail:** host the server on Vercel (current) with a pooled connection (Supabase pooler, transaction mode). A session-level `SET LOCAL` per transaction is compatible with transaction pooling.
 2. **Go-live date and opening balances:** the same "31 October baseline" as the November Fresh Start, or the actual go-live date?
-3. **Employee devices:** Employees will sign in with Google accounts. Which emails get invitations?
+3. **Employee devices:** Employees sign in with Google. *(Answered: DEV pre-creates the five accounts with their emails; no invitation emails are sent.)*
 4. **Phase 1 visibility:** should Dev-only non-fuel pages be hidden entirely in production until their phase?

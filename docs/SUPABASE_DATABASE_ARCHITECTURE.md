@@ -1,8 +1,8 @@
 # Supabase Database Architecture: Vishal Transport ERP
 
-> **Superseded for the Diesel phase (31 Oct 2026)** by `SUPABASE_DIESEL_DATABASE_SCHEMA.md` (authoritative schema, SQL in `supabase/migrations/20261101*` — design approved 1 Nov 2026, not applied to any Supabase project) and `SUPABASE_DIESEL_MIGRATION_PLAN.md` (no data import). Kept for the full-ERP context and the D-numbered decisions it introduced; where the two differ, the Diesel documents win.
+> **Superseded for the Diesel phase (31 Oct 2026)** by `SUPABASE_DIESEL_DATABASE_SCHEMA.md` (authoritative schema, SQL in `supabase/migrations/20261101*` — design approved 1 Nov 2026; applied to the Production project `Vishal Transport erp` (`dqnoducqiootfvkzskhu`) through `20261101000600`; `20261101000700_accounts.sql` is pending, not applied; no staging project) and `SUPABASE_DIESEL_MIGRATION_PLAN.md` (no data import). Kept for the full-ERP context and the D-numbered decisions it introduced; where the two differ, the Diesel documents win.
 
-**Status:** design only (31 Oct 2026). No SQL has been run, and no table exists in the live Supabase project (Mumbai, `ap-south-1`). The ERP still reads and writes only browser localStorage.
+**Status:** design only (31 Oct 2026). The full-ERP tables in this document were never created as designed; what is applied in the Production project is the Diesel-phase schema (see the banner above). The ERP still reads and writes only browser localStorage.
 
 **Companion documents:**
 - `SUPABASE_ER_DIAGRAM.md`: the entity-relationship diagram.
@@ -300,7 +300,7 @@ $$;
 ### 6.2 Defaults
 
 - **RLS on every table.** `revoke all … from public, anon, authenticated`, then grant only what the policies below need. `anon` (signed-out) gets **nothing** on any business table: only authorised users access the ERP.
-- **Every policy starts with `private.erp_role() is not null`**, through `private.can`. A Google account without an ACTIVE invitation sees nothing.
+- **Every policy starts with `private.erp_role() is not null`**, through `private.can`. A Google account without an ACTIVE, pre-created ERP account sees nothing.
 - **Never `user_metadata`** in a policy (users can edit it). The role always comes from `profiles`, which the browser can't change (existing `profiles_guard`).
 
 ### 6.3 Policies per table
