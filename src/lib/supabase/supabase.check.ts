@@ -28,6 +28,17 @@ async function main() {
   delete process.env.NEXT_PUBLIC_SUPABASE_URL
   delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
   assert.throws(supabaseEnv, /not configured/)
+  // The URL must be the project's base URL: a path, query, plain http or a non-URL makes Supabase Auth answer
+  // {"error":"requested path is invalid"} instead of signing in, so it is refused up front.
+  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_abc"
+  for (const bad of ["https://example.supabase.co/rest/v1", "https://example.supabase.co/auth/v1/callback", "https://example.supabase.co/?x=1", "http://example.supabase.co", "example.supabase.co", "https://user:pw@example.supabase.co"]) {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = bad
+    assert.throws(supabaseEnv, /base URL/, `refused: ${bad}`)
+  }
+  for (const ok of ["https://example.supabase.co", "https://example.supabase.co/", "http://127.0.0.1:54321", "http://localhost:54321"]) {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = ok
+    assert.equal(supabaseEnv().url, new URL(ok).origin, `accepted (normalised): ${ok}`)
+  }
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co"
   process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = "sb_secret_abc"
   assert.throws(supabaseEnv, /secret key/)
