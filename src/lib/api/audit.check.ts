@@ -27,7 +27,7 @@ async function main() {
   const log = () => api.audit.list()
   const count = async () => (await log()).length
 
-  // 0. First use seeds demo data — recorded as a SYSTEM event, not a user one.
+  // 0. The checks start on demo data (test-browser.ts) — recorded as a SYSTEM event, not a user one.
   const first = await log()
   assert.equal(first.length, 1)
   assert.deepEqual([first[0].action, first[0].actor.kind, first[0].actor.role], ["DATA_RESET", "SYSTEM", null])

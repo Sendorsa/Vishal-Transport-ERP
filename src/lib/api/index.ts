@@ -100,6 +100,12 @@ function assertTankerOpen(tankerId: string | undefined, what = "Choose the tanke
   return t
 }
 
+/** A pump fill must name an existing fuel station — never the tanker source or an id with no station behind it. */
+function assertPumpStation(vendorId: string) {
+  const station = readCollection("fuel_stations").find((v) => v.id === vendorId)
+  if (!station || station.isTanker) throw new Error("Choose the fuel station the diesel was bought from")
+}
+
 function checkLoad(input: TankerLoadInput, existing?: TankerLoad) {
   if (!existing || existing.tankerId !== input.tankerId) assertTankerOpen(input.tankerId, "Choose the tanker the diesel was loaded into")
   const station = readCollection("fuel_stations").find((v) => v.id === input.stationId)
@@ -1099,7 +1105,10 @@ export const api = {
           if (!(input.rate > 0)) throw new Error("Enter the source rate per litre for this tanker fill")
           input = { ...input, paymentMode: "CREDIT" }
           assertTankerStock(tankerRecords({ fills: [...readCollection("diesel_entries"), { ...input, id: "new", createdAt: new Date().toISOString() }] }))
-        } else delete input.tankerId
+        } else {
+          assertPumpStation(input.vendorId)
+          delete input.tankerId
+        }
         const entry = await diesel.create({ ...input, companyCode: vehicle.companyCode, amount: round2(input.litres * input.rate) })
         if (input.odometerKm !== null && input.odometerKm > vehicle.odometerKm) await vehicles.update(vehicle.id, { odometerKm: input.odometerKm })
         audit({ action: "CREATED", ...meta.diesel(entry), after: dieselView(entry) })
@@ -1125,7 +1134,10 @@ export const api = {
           // Only an older fill saved without a rate (costed at the average on read) may keep rate 0; nothing new gets it.
           const legacyNoRate = isTankerFill(before) && !(before.rate > 0) && !(input.rate > 0)
           if (!(input.rate > 0) && !legacyNoRate) throw new Error("Enter the source rate per litre for this tanker fill")
-        } else input = { ...input, tankerId: undefined }
+        } else {
+          if (input.vendorId !== before.vendorId) assertPumpStation(input.vendorId) // an existing fill keeps its station
+          input = { ...input, tankerId: undefined }
+        }
         if (isTankerFill(input) || isTankerFill(before))
           assertTankerStock(tankerRecords({ fills: readCollection("diesel_entries").map((e) => (e.id === id ? { ...e, ...input } : e)) }))
         const beforeView = dieselView(before)

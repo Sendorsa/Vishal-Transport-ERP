@@ -56,7 +56,7 @@ export function AddDieselEntryDialog({
 
   const blank = entry
     ? { date: entry.date, vendorId: entry.vendorId, litres: String(entry.litres), rate: String(entry.rate), odometerKm: entry.odometerKm === null ? "" : String(entry.odometerKm), billNo: entry.billNo, paymentMode: entry.paymentMode as string, tankerId: entry.vendorId === TANKER_SOURCE_ID ? tankerOf(entry) : "" }
-    : { date: defaultDate, vendorId: "dv_vishal", litres: "", rate: "", odometerKm: "", billNo: "", paymentMode: "CREDIT", tankerId: "" }
+    : { date: defaultDate, vendorId: "", litres: "", rate: "", odometerKm: "", billNo: "", paymentMode: "CREDIT", tankerId: "" }
   const [f, setF] = useState(blank)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [reason, setReason] = useState("")
@@ -105,7 +105,7 @@ export function AddDieselEntryDialog({
   const setSource = (v: string) =>
     setF((cur) =>
       v === PUMP
-        ? { ...cur, vendorId: entry && !wasTankerFill ? entry.vendorId : "dv_vishal", tankerId: "", rate: wasTankerFill ? "" : cur.rate }
+        ? { ...cur, vendorId: entry && !wasTankerFill ? entry.vendorId : "", tankerId: "", rate: wasTankerFill ? "" : cur.rate }
         : { ...cur, vendorId: TANKER_SOURCE_ID, tankerId: v, rate: cur.vendorId === TANKER_SOURCE_ID ? cur.rate : "" }
     )
   const odo = odoTyped
@@ -134,7 +134,8 @@ export function AddDieselEntryDialog({
       else if (litres > cargo.litres) errs.litres = insufficientTankerMessage(cargo.litres)
       if (!f.rate.trim()) errs.rate = "Enter the source rate per litre for this fill"
       else if (!(rate > 50 && rate < 200)) errs.rate = "Rate should be ₹50–200 per litre"
-    } else if (ev ? !(rate > 0 && rate < 100) : !(rate > 50 && rate < 200)) errs.rate = ev ? "Rate should be ₹1–100 per kWh" : "Rate should be ₹50–200 per litre"
+    } else if (!f.vendorId) errs.vendorId = "Choose the fuel station (or add it)"
+    if (!fromTanker && f.vendorId && (ev ? !(rate > 0 && rate < 100) : !(rate > 50 && rate < 200))) errs.rate = ev ? "Rate should be ₹1–100 per kWh" : "Rate should be ₹50–200 per litre"
     if (lastOdo !== null && odo < lastOdo) errs.odometerKm = `Below last fill (${formatNumber(lastOdo)} km)`
     setErrors(errs)
     if (Object.keys(errs).length) return
@@ -169,13 +170,13 @@ export function AddDieselEntryDialog({
         <Field
           label="Diesel source"
           required
-          error={errors.vendorId}
+          error={fromTanker ? errors.vendorId : undefined}
           hint={fromTanker && tankerId && !pool ? `Available in this tanker: ${formatNumber(cargo.litres, 2)} L — the fill is taken out of its stock` : undefined}
         >
           <SimpleSelect value={fromTanker ? tankerId : PUMP} onChange={setSource} options={sourceOptions} />
         </Field>
         {fromTanker ? null : (
-          <Field label="Fuel Station" required>
+          <Field label="Fuel Station" required error={errors.vendorId}>
             <CreatableSelect
               value={f.vendorId}
               onChange={(v) => setF((cur) => ({ ...cur, vendorId: v }))}

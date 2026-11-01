@@ -18,7 +18,8 @@ import {
   subMonths,
 } from "date-fns"
 import { calculateTax, calculateTripRevenue, fyLabel } from "@/domain/pricing"
-import { round2, toISODate } from "@/lib/format"
+import { round2, toISODate, todayISO } from "@/lib/format"
+import { CONFIRMED_TANKERS } from "@/domain/tanker"
 import type {
   BusinessUnit,
   CompanyCode,
@@ -59,7 +60,7 @@ function mulberry32(seed: number) {
 
 /* ------------------------------------------------------------------ Static master data */
 
-/** Default fuel stations (vt:fuelStations) — demo data and the empty workspace both start with these. */
+/** Fuel stations of the demo data (Settings → Reset to demo data). The clean workspace keeps only `dv_tanker`. */
 export const DEFAULT_FUEL_STATIONS: FuelStation[] = [
     { id: "dv_vishal", name: "Vishal Gasoline (Jio-bp)", location: "Hosur — VT outlet", isInterCompany: true, creditDays: 15, status: "ACTIVE", createdAt: "2026-04-01T00:00:00.000Z", updatedAt: "2026-04-01T00:00:00.000Z" },
     { id: "dv_shankara", name: "Shree Shankara Fuels", location: "Hosur", isInterCompany: false, creditDays: 30, status: "ACTIVE", createdAt: "2026-04-01T00:00:00.000Z", updatedAt: "2026-04-01T00:00:00.000Z" },
@@ -71,6 +72,59 @@ export const DEFAULT_FUEL_STATIONS: FuelStation[] = [
     { id: "dv_aries", name: "Aries Gemini Fuels", location: "Harohalli", isInterCompany: false, creditDays: 21, status: "ACTIVE", createdAt: "2026-04-01T00:00:00.000Z", updatedAt: "2026-04-01T00:00:00.000Z" },
     { id: "dv_tanker", name: "Diesel Tanker", location: "Company tanker", isInterCompany: false, creditDays: 0, status: "ACTIVE", isTanker: true, createdAt: "2026-04-01T00:00:00.000Z", updatedAt: "2026-04-01T00:00:00.000Z" },
 ]
+
+/**
+ * The clean go-live workspace (owner, 1 Nov 2026) — what every new browser starts with, and what Settings → Clear
+ * all data leaves. No customers, drivers, petrol pumps, entries, stock or payments. Kept:
+ * - `dv_tanker`, the internal tanker source a tanker fill points to (a system row, not a petrol pump);
+ * - the three company tankers — JIO (TN70AX9480), Office (KA53C0538), Mini (KA51AF1429) — each with its tanker
+ *   vehicle record. Vehicle details the books don't record stay blank, as in the fuel import. Zero loads, zero stock.
+ * Company configuration (VT, VTHPL) comes with DEFAULT_SETTINGS.
+ */
+export function cleanWorkspace(now = new Date()): { fuel_stations: FuelStation[]; vehicles: Vehicle[]; tankers: Tanker[] } {
+  const at = now.toISOString()
+  const today = todayISO()
+  const tankerStation = DEFAULT_FUEL_STATIONS.find((s) => s.id === "dv_tanker")!
+  const vehicles: Vehicle[] = CONFIRMED_TANKERS.map((t) => ({
+    id: `veh_${t.regNo.toLowerCase()}`,
+    regNo: t.regNo,
+    companyCode: "VT",
+    typeCode: "",
+    make: "",
+    model: "",
+    year: 0,
+    seats: null,
+    fuelType: "DIESEL",
+    mileageKmpl: 0,
+    ownership: "OWNED",
+    ownerName: null,
+    status: "ACTIVE",
+    statusHistory: [{ status: "ACTIVE", startDate: today, endDate: null }],
+    odometerKm: 0,
+    assignedCustomerId: null,
+    defaultDriverId: null,
+    insurance: { provider: "", policyNo: "", validTill: "", premium: 0 },
+    roadTax: { validTill: "", amount: 0, period: "ANNUAL" },
+    fitnessValidTill: "",
+    permitValidTill: "",
+    emiAmount: 0,
+    notes: `Diesel tanker ${t.name}.`,
+    createdAt: at,
+    updatedAt: at,
+  }))
+  const tankers: Tanker[] = CONFIRMED_TANKERS.map((t) => ({
+    id: t.id,
+    name: t.name,
+    regNo: t.regNo,
+    vehicleId: `veh_${t.regNo.toLowerCase()}`,
+    capacityLitres: null,
+    status: "ACTIVE",
+    notes: "",
+    createdAt: at,
+    updatedAt: at,
+  }))
+  return { fuel_stations: [structuredClone(tankerStation)], vehicles, tankers }
+}
 
 export const DEFAULT_SETTINGS: Settings = {
   companies: [

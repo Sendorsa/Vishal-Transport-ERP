@@ -15,30 +15,35 @@ import {
   writeSettings,
 } from "@/lib/storage/local-store"
 import type { CollectionKey, CollectionMap, Settings } from "@/lib/types"
-import { DEFAULT_FUEL_STATIONS, DEFAULT_SETTINGS, generateSeedData } from "@/lib/storage/seed"
+import { DEFAULT_SETTINGS, cleanWorkspace, generateSeedData } from "@/lib/storage/seed"
 
 /** Seeds demo data on first use (or after a schema change). Idempotent and synchronous. */
+/**
+ * First use, and app-loaded demo data nobody has touched, become the clean go-live workspace (owner, 1 Nov 2026):
+ * demo data is never loaded automatically any more — only by Settings → Reset to demo data. Real data is never
+ * replaced: restored / imported data, a workspace someone has typed into (including typed-into demo data) and data
+ * of unknown origin are kept and only migrated (migrateStorage) when the data format changes.
+ */
 export function ensureSeeded() {
   if (!isBrowser()) return
   migrateStorage()
   const meta = readMeta()
-  if (meta && meta.version === SCHEMA_VERSION) return
-  // Only app-generated demo data (or a first visit) is ever re-seeded. Restored / imported data, an empty
-  // workspace the user has typed into, and data of unknown origin are real: a data-format change migrates
-  // them (migrateStorage above), never replaces them with demo data.
+  if (meta && meta.version === SCHEMA_VERSION && meta.source !== "DEMO") return // the common case, without reading the audit log
   if (meta && meta.source !== "DEMO") return writeMeta({ ...meta, version: SCHEMA_VERSION })
-  // Demo data someone has typed into since the last reset, or data whose meta key was lost, is real too:
-  // it is kept and becomes "unknown origin", so later format changes migrate it as well.
   const events = readAuditEvents()
   const lastReset = events.findLastIndex((e) => e.action === "DATA_RESET")
   const userWrote = events.slice(lastReset + 1).some((e) => e.actor.kind !== "SYSTEM")
+  // Demo data the app loaded by itself (first use, before 1 Nov 2026) vs. demo data someone chose (Settings → Reset).
+  const autoLoaded = lastReset < 0 || events[lastReset].actor.kind === "SYSTEM"
+  if (meta && meta.version === SCHEMA_VERSION && !(autoLoaded && !userWrote)) return // chosen demo data, or typed into: kept
+  // Typed-into demo data after a format change, or data whose meta key was lost: real — kept, "unknown origin" from now on.
   if (meta ? userWrote : COLLECTION_KEYS.some((k) => readCollection(k).length > 0))
     return writeMeta({ version: SCHEMA_VERSION, seededAt: meta?.seededAt ?? new Date().toISOString() })
-  loadDemoData()
+  loadEmptyWorkspace()
   // Done by the app, not a user: recorded as a SYSTEM event (and the boundary for "Edited" badges).
   appendAuditEvent(
     buildEvent(
-      { action: "DATA_RESET", module: "System", recordType: "Data", recordId: "workspace", label: meta ? "Demo data re-loaded after an app data-format change" : "Demo data loaded on first use" },
+      { action: "DATA_RESET", module: "System", recordType: "Data", recordId: "workspace", label: !meta ? "Clean workspace created on first use" : autoLoaded && !userWrote ? "Automatically loaded demo data replaced by the clean go-live workspace" : "Demo data replaced by the clean workspace after an app data-format change" },
       { kind: "SYSTEM", userId: null, name: null, role: null },
       `aud_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
       new Date().toISOString()
@@ -55,11 +60,18 @@ export function loadDemoData() {
 }
 
 /** Empty workspace: default master data, no transactions. */
+/**
+ * The clean go-live workspace (cleanWorkspace in seed.ts): company configuration, the internal tanker source and the
+ * three tankers with their vehicles; nothing else, zero stock. Used on first use and by Settings → Clear all data.
+ */
 export function loadEmptyWorkspace() {
   clearAll()
   writeSettings(structuredClone(DEFAULT_SETTINGS))
   for (const key of COLLECTION_KEYS) writeCollection(key, [])
-  writeCollection("fuel_stations", structuredClone(DEFAULT_FUEL_STATIONS))
+  const clean = cleanWorkspace(new Date())
+  writeCollection("fuel_stations", clean.fuel_stations)
+  writeCollection("vehicles", clean.vehicles)
+  writeCollection("tankers", clean.tankers)
   writeMeta({ version: SCHEMA_VERSION, seededAt: new Date().toISOString(), source: "EMPTY" })
 }
 

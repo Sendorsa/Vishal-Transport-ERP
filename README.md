@@ -1,7 +1,9 @@
 # Vishal Transport ERP — frontend prototype
 
 High-fidelity, frontend-only prototype for Vishal Group (VT, the primary company, managing VTHPL).
-No backend, no auth: all data lives in the browser's **localStorage**, seeded with about 6 months of realistic demo data that ends today.
+Sign-in is through Supabase (Google), but **all business data still lives in each browser's localStorage. It is NOT shared between users or devices** until the database switch-over (`docs/SUPABASE_INTEGRATION_PLAN.md`), so the ERP is not multi-user production-ready yet.
+
+**A new browser starts with the clean go-live workspace:** company settings, the internal tanker source and the three tankers (JIO, Office, Mini) with zero stock, and nothing else. Demo data (about 6 months, ending today) is loaded only on request, via Settings → Data → Reset to demo data. Settings → Data → Clear all data returns a browser to the clean workspace.
 
 ```bash
 npm install

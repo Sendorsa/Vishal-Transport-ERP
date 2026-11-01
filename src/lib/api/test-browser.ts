@@ -1,3 +1,7 @@
+import { loadDemoData } from "./bootstrap"
+import { appendAuditEvent, SCHEMA_VERSION, writeMeta } from "@/lib/storage/local-store"
+import { buildEvent } from "@/domain/audit"
+
 /**
  * In-memory stand-in for the browser, for the runnable API checks (check:audit, check:actions).
  * Import it before the API: it installs `window.localStorage`. Nothing touches real browser data.
@@ -25,6 +29,19 @@ export const failure: { key: string | null; once: boolean } = { key: null, once:
 
 export const storage = new MemoryStorage()
 Object.assign(globalThis, { window: { localStorage: storage, addEventListener() {}, removeEventListener() {} } })
+
+// The checks exercise the API on the demo data. First use no longer loads it (the clean go-live workspace does), so
+// load it explicitly and mark it as data of unknown origin: the checks' data is never replaced behind their back.
+loadDemoData()
+writeMeta({ version: SCHEMA_VERSION, seededAt: new Date().toISOString() })
+appendAuditEvent(
+  buildEvent(
+    { action: "DATA_RESET", module: "System", recordType: "Data", recordId: "workspace", label: "Demo data loaded for the checks" },
+    { kind: "SYSTEM", userId: null, name: null, role: null },
+    "aud_checkdemo01",
+    new Date().toISOString()
+  )
+)
 
 /** The mock-session role the API reads (vt:ui:role). */
 /** Removed roles can still be stored by an old browser — they must read as Employee. */

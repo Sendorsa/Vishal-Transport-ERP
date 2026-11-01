@@ -541,7 +541,7 @@ function DataPanel() {
               <CardTitle className="flex items-center gap-2 text-sm font-semibold">
                 <Trash2 className="size-4" /> Start empty
               </CardTitle>
-              <CardDescription>Clears all customers, vehicles and transactions, keeping master lists.</CardDescription>
+              <CardDescription>Deletes every customer, vehicle, driver, fuel station, entry and payment in this browser, leaving the clean workspace: company settings, the three tankers (JIO, Office, Mini) with zero stock, and the internal tanker source.</CardDescription>
             </CardHeader>
             <CardContent>
               <Button variant="destructive" onClick={() => setConfirm("clear")}>
