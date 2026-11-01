@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import { Field } from "@/components/shared/misc"
+import { Field, FormActionBar } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { calculateTripRevenue, PRICING_MODELS } from "@/domain/pricing"
 import { useCustomers, useDrivers, useSaveTrip, useVehicles } from "@/lib/api/hooks"
@@ -226,7 +226,7 @@ export function TripForm({ trip, defaultCustomerId, onDone }: { trip?: Trip; def
             )}
           </CardContent>
         </Card>
-        <div className="flex justify-end gap-2">
+        <FormActionBar>
           <Button type="button" variant="outline" onClick={() => (onDone ? onDone() : router.back())}>
             Cancel
           </Button>
@@ -234,7 +234,7 @@ export function TripForm({ trip, defaultCustomerId, onDone }: { trip?: Trip; def
             {save.isPending && <Loader2 className="animate-spin" />}
             {trip ? "Save trip" : "Create trip"}
           </Button>
-        </div>
+        </FormActionBar>
       </div>
     </form>
   )

@@ -18,7 +18,7 @@ export function RowActions({ onEdit, onDelete, lockedReason, editLabel = "Edit e
     return (
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="inline-flex size-7 cursor-help items-center justify-center text-muted-foreground" tabIndex={0} aria-label={lockedReason} onClick={(e) => e.stopPropagation()}>
+          <span className="inline-flex size-7 cursor-help items-center justify-center text-muted-foreground pointer-coarse:size-11" tabIndex={0} aria-label={lockedReason} onClick={(e) => e.stopPropagation()}>
             <Lock className="size-3.5" />
           </span>
         </TooltipTrigger>
@@ -27,7 +27,7 @@ export function RowActions({ onEdit, onDelete, lockedReason, editLabel = "Edit e
     )
   if (!onEdit && !onDelete) return null
   return (
-    <span className="inline-flex gap-0.5" onClick={(e) => e.stopPropagation()}>
+    <span className="inline-flex gap-0.5 pointer-coarse:gap-2" onClick={(e) => e.stopPropagation()}>
       {onEdit && <ActionButton label={editLabel} onClick={onEdit} icon={<Pencil />} />}
       {onDelete && <ActionButton label={deleteLabel} onClick={onDelete} icon={<Trash2 />} danger />}
     </span>
@@ -37,7 +37,7 @@ export function RowActions({ onEdit, onDelete, lockedReason, editLabel = "Edit e
 function ActionButton({ label, onClick, icon, danger }: { label: string; onClick: () => void; icon: React.ReactNode; danger?: boolean }) {
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
+      <TooltipTrigger asChild tap={false}>
         <Button variant="ghost" size="icon-sm" aria-label={label} onClick={onClick} className={danger ? "hover:bg-destructive/10 hover:text-destructive" : undefined}>
           {icon}
         </Button>

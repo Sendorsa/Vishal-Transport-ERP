@@ -242,7 +242,7 @@ export function CompanyDiesel({ slug }: { slug: string }) {
           <h2 className="text-sm font-semibold">
             Vehicles · {monthLabel(month)} <span className="font-normal text-muted-foreground">· open a vehicle to see or add Diesel & AdBlue entries</span>
           </h2>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {archivedCount > 0 && (
               <Button variant={showArchived ? "secondary" : "ghost"} size="sm" onClick={() => setShowArchived((v) => !v)}>
                 <Archive /> {showArchived ? "Hide archived vehicles" : `Show archived vehicles (${archivedCount})`}

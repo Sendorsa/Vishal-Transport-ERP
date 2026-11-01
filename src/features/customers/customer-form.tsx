@@ -9,7 +9,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { Field, FormSection } from "@/components/shared/misc"
+import { Field, FormActionBar, FormSection } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { calculateTripRevenue, PRICING_MODELS } from "@/domain/pricing"
 import { useSaveCustomer } from "@/lib/api/hooks"
@@ -229,11 +229,11 @@ export function CustomerForm({ customer, onDone }: { customer?: Customer; onDone
               <div className="grid gap-2 sm:col-span-2">
                 <div className="text-xs font-medium">Route rate card</div>
                 {routes.fields.map((f, i) => (
-                  <div key={f.id} className="grid grid-cols-[1fr_88px_104px_auto] gap-2">
-                    <Input {...register(`pricing.routes.${i}.route`)} placeholder="Origin → destination" aria-invalid={!!errors.pricing?.routes?.[i]?.route} />
+                  <div key={f.id} className="grid grid-cols-[1fr_1fr_auto] gap-2 sm:grid-cols-[1fr_88px_104px_auto]">
+                    <Input {...register(`pricing.routes.${i}.route`)} placeholder="Origin → destination" aria-invalid={!!errors.pricing?.routes?.[i]?.route} className="max-sm:col-span-3" />
                     <Input type="number" {...register(`pricing.routes.${i}.distanceKm`, num)} placeholder="km" />
                     <Input type="number" step="0.01" {...register(`pricing.routes.${i}.rate`, num)} placeholder="₹ / trip" />
-                    <Button type="button" variant="ghost" size="icon" onClick={() => routes.remove(i)}>
+                    <Button type="button" variant="ghost" size="icon" onClick={() => routes.remove(i)} aria-label="Remove route">
                       <Trash2 />
                     </Button>
                   </div>
@@ -258,7 +258,7 @@ export function CustomerForm({ customer, onDone }: { customer?: Customer; onDone
           </FormSection>
         </CardContent>
       </Card>
-      <div className="sticky bottom-16 mt-4 flex justify-end gap-2 md:bottom-4">
+      <FormActionBar className="mt-4 md:sticky md:bottom-4">
         <Button type="button" variant="outline" onClick={() => (onDone && customer ? onDone(customer) : router.back())}>
           Cancel
         </Button>
@@ -266,7 +266,7 @@ export function CustomerForm({ customer, onDone }: { customer?: Customer; onDone
           {save.isPending && <Loader2 className="animate-spin" />}
           {customer ? "Save changes" : "Create customer"}
         </Button>
-      </div>
+      </FormActionBar>
     </form>
   )
 }

@@ -29,7 +29,7 @@ export function EntityDrawer({
           {description && <SheetDescription>{description}</SheetDescription>}
         </SheetHeader>
         <div className="flex-1 overflow-y-auto p-4">{children}</div>
-        {footer && <SheetFooter className="border-t">{footer}</SheetFooter>}
+        {footer && <SheetFooter className="border-t pb-[max(1rem,env(safe-area-inset-bottom))]">{footer}</SheetFooter>}
       </SheetContent>
     </Sheet>
   )

@@ -216,7 +216,7 @@ export function AddDieselEntryDialog({
         </Field>
         {entry && <ReasonField value={reason} onChange={setReason} className="sm:col-span-2" />}
       </div>
-      <div className="grid grid-cols-3 gap-3 rounded-lg border bg-muted/40 p-3 text-sm">
+      <div className="grid grid-cols-3 gap-3 rounded-lg border bg-muted/40 p-3 text-sm [&>div]:min-w-0 [&_.num]:[overflow-wrap:anywhere]">
         <div>
           <div className="text-xs text-muted-foreground">Amount</div>
           <div className="num font-semibold">{formatINR(amount)}</div>

@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
-import { Field, NoAccess } from "@/components/shared/misc"
+import { Field, FormActionBar, NoAccess } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { buildInvoice, type ManualLineInput } from "@/domain/invoicing"
 import { useCreateInvoice, useCustomers, useSettings, useTrips, useVehicles } from "@/lib/api/hooks"
@@ -148,7 +148,7 @@ export function InvoiceForm({ defaultCustomerId }: { defaultCustomerId?: string 
             ) : unbilled.length === 0 ? (
               <p className="px-4 py-10 text-center text-sm text-muted-foreground">No unbilled trips in this period. Adjust the dates or add manual lines below.</p>
             ) : (
-              <div className="max-h-[420px] overflow-y-auto">
+              <div className="max-h-[420px] overflow-auto">
                 <table className="w-full text-sm">
                   <thead className="sticky top-0 bg-muted/80 text-xs text-muted-foreground backdrop-blur">
                     <tr>
@@ -198,11 +198,11 @@ export function InvoiceForm({ defaultCustomerId }: { defaultCustomerId?: string 
           </CardHeader>
           <CardContent className="space-y-2">
             {lines.map((l, i) => (
-              <div key={i} className="grid grid-cols-[1fr_72px_110px_auto] gap-2">
-                <Input value={l.description} placeholder="e.g. Extra trip — 12 Sep, night shift" onChange={(e) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} />
+              <div key={i} className="grid grid-cols-[1fr_1fr_auto] gap-2 sm:grid-cols-[1fr_72px_110px_auto]">
+                <Input className="max-sm:col-span-3" value={l.description} placeholder="e.g. Extra trip — 12 Sep, night shift" onChange={(e) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} />
                 <Input type="number" value={l.quantity} onChange={(e) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, quantity: Number(e.target.value) } : x)))} />
-                <Input type="number" step="0.01" value={l.rate} placeholder="Rate" onChange={(e) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, rate: Number(e.target.value) } : x)))} />
-                <Button variant="ghost" size="icon" onClick={() => setLines((ls) => ls.filter((_, j) => j !== i))}>
+                <Input type="number" inputMode="text" step="0.01" value={l.rate} placeholder="Rate" onChange={(e) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, rate: Number(e.target.value) } : x)))} />
+                <Button variant="ghost" size="icon" onClick={() => setLines((ls) => ls.filter((_, j) => j !== i))} aria-label="Remove line">
                   <Trash2 />
                 </Button>
               </div>
@@ -255,7 +255,7 @@ export function InvoiceForm({ defaultCustomerId }: { defaultCustomerId?: string 
             )}
           </CardContent>
         </Card>
-        <div className="flex flex-wrap justify-end gap-2">
+        <FormActionBar className="max-md:text-[13px] max-md:[&>*]:px-2 max-md:[&>*]:leading-tight max-md:[&>*]:whitespace-normal">
           <Button variant="outline" onClick={() => router.back()}>
             Cancel
           </Button>
@@ -266,7 +266,7 @@ export function InvoiceForm({ defaultCustomerId }: { defaultCustomerId?: string 
             {create.isPending && <Loader2 className="animate-spin" />}
             Issue invoice
           </Button>
-        </div>
+        </FormActionBar>
       </div>
     </div>
   )

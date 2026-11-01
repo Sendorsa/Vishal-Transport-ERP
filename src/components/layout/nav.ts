@@ -14,7 +14,7 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react"
-import type { Resource } from "@/lib/permissions"
+import { can, type Resource } from "@/lib/permissions"
 import type { Role } from "@/lib/types"
 
 /**
@@ -31,6 +31,8 @@ export interface NavItem {
   resource: Resource
   group: NavGroup
   mobile?: boolean
+  /** Shorter label for the phone tab bar. */
+  short?: string
 }
 
 export const NAV_ITEMS: NavItem[] = [
@@ -39,9 +41,9 @@ export const NAV_ITEMS: NavItem[] = [
   { title: "Vehicles", href: "/vehicles", icon: Bus, resource: "vehicles", group: "Operations" },
   { title: "Trips", href: "/trips", icon: Route, resource: "trips", group: "Operations", mobile: true },
   // Fuel: fuel-related modules (future: fuel vendors, analytics, reconciliation, purchase orders).
-  { title: "Fuel Stations", href: "/fuel-stations", icon: Store, resource: "diesel", group: "Fuel" },
+  { title: "Fuel Stations", short: "Stations", href: "/fuel-stations", icon: Store, resource: "diesel", group: "Fuel" },
   { title: "Diesel", href: "/diesel", icon: Fuel, resource: "diesel", group: "Fuel", mobile: true },
-  { title: "Diesel Tankers", href: "/tanker", icon: Container, resource: "diesel", group: "Fuel" },
+  { title: "Diesel Tankers", short: "Tankers", href: "/tanker", icon: Container, resource: "diesel", group: "Fuel" },
   { title: "AdBlue", href: "/adblue", icon: Droplets, resource: "diesel", group: "Fuel" },
   { title: "Invoices", href: "/invoices", icon: FileText, resource: "invoices", group: "Finance", mobile: true },
   { title: "Payments", href: "/payments", icon: ArrowLeftRight, resource: "payments", group: "Finance" },
@@ -60,4 +62,18 @@ export const showInNav = (role: Role, item: NavItem) => role === "DEV" || item.g
 
 export function isActive(pathname: string, href: string) {
   return href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`)
+}
+
+/** The sidebar items a role sees (permission + sidebar visibility) — also everything in the phone drawer ("More"). */
+export const navFor = (role: Role) => NAV_ITEMS.filter((i) => can(role, i.resource) && showInNav(role, i))
+
+/**
+ * The phone tab bar: four of the role's own sidebar items (those marked `mobile` first), in sidebar order. Dev:
+ * Dashboard / Trips / Diesel / Invoices; Owner and Employee: Fuel Stations / Diesel / Diesel Tankers / AdBlue.
+ * Everything else stays one tap away under "More" (the full drawer). Pinned in `npm run check:roles`.
+ */
+export function mobileTabs(role: Role) {
+  const items = navFor(role)
+  const picked = new Set([...items.filter((i) => i.mobile), ...items.filter((i) => !i.mobile)].slice(0, 4))
+  return items.filter((i) => picked.has(i))
 }

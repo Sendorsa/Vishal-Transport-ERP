@@ -139,6 +139,54 @@
   html {
     @apply font-sans;
   }
+  /* Phones: the page itself never scrolls sideways; a wide table or strip scrolls inside its own container. */
+  body {
+    overflow-x: clip;
+  }
+  /* Phones: a focused field or anchor scrolls clear of the bottom tab bar and a form's fixed Save bar. */
+  @media (width < 48rem) {
+    html {
+      scroll-padding-bottom: calc(8.5rem + env(safe-area-inset-bottom));
+    }
+  }
+}
+
+/*
+ * Touch screens (phones, tablets): comfortable tap targets of about 44 px, without changing the desktop density.
+ * Uses the components' data-slot attributes, so every screen gets it without per-page changes.
+ */
+@media (pointer: coarse) {
+  [data-slot="button"],
+  [data-slot="select-trigger"],
+  [data-slot="input"],
+  [data-slot="input-group"],
+  [data-slot="tabs-trigger"],
+  [data-slot="sidebar-menu-button"],
+  [data-slot="dropdown-menu-item"],
+  [data-slot="dropdown-menu-sub-trigger"],
+  [data-slot="select-item"],
+  [data-slot="command-item"] {
+    min-height: 2.75rem;
+  }
+  [data-slot="button"][data-size^="icon"],
+  [data-slot="sidebar-trigger"] {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+  [data-slot="tabs-list"] {
+    height: auto;
+  }
+  /* Small controls keep their look; their touch area grows invisibly. */
+  [data-slot="checkbox"],
+  [data-slot="switch"] {
+    position: relative;
+  }
+  [data-slot="checkbox"]::after,
+  [data-slot="switch"]::after {
+    content: "";
+    position: absolute;
+    inset: -0.75rem;
+  }
 }
 @layer utilities {
   .num {

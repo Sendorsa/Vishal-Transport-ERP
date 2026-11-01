@@ -102,7 +102,7 @@ export function AppHeader() {
   // Diesel is organised by customer company only — the VT / VTHPL selector doesn't apply there.
   const showEntitySwitcher = !pathname.startsWith("/diesel") && !pathname.startsWith("/fuel-stations") && !pathname.startsWith("/adblue") && !pathname.startsWith("/tanker")
   return (
-    <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 border-b bg-background/95 px-3 backdrop-blur supports-[backdrop-filter]:bg-background/80 md:px-4">
+    <header className="sticky top-0 z-20 flex min-h-12 shrink-0 items-center gap-2 border-b bg-background/95 px-3 pt-[env(safe-area-inset-top)] backdrop-blur supports-[backdrop-filter]:bg-background/80 md:px-4">
       <SidebarTrigger className="-ml-1" />
       <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
       <span className="hidden text-sm font-medium text-muted-foreground sm:inline">Vishal Transport ERP</span>

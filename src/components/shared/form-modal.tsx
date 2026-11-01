@@ -12,7 +12,10 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 
-/** Dialog wrapping a <form>. Keeps footer actions consistent across modules. */
+/**
+ * Dialog wrapping a <form>. Keeps footer actions consistent across modules. On phones it opens as a bottom sheet and
+ * the Cancel / Save buttons stay pinned at its bottom while the fields scroll (and above the on-screen keyboard).
+ */
 export function FormModal({
   open,
   onOpenChange,
@@ -41,7 +44,7 @@ export function FormModal({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className={cn("max-h-[90svh] overflow-y-auto sm:max-w-lg", className)}>
+      <DialogContent className={cn("max-h-[90svh] overflow-y-auto sm:max-w-lg max-sm:max-h-[92dvh]", className)}>
         <form
           onSubmit={(e) => {
             e.preventDefault()
@@ -54,7 +57,7 @@ export function FormModal({
             {description && <DialogDescription>{description}</DialogDescription>}
           </DialogHeader>
           {children}
-          <DialogFooter>
+          <DialogFooter className="max-sm:sticky max-sm:bottom-0 max-sm:z-10 max-sm:-mb-[max(1rem,env(safe-area-inset-bottom))] max-sm:flex-row max-sm:rounded-none max-sm:bg-popover max-sm:pb-[max(1rem,env(safe-area-inset-bottom))] max-sm:[&>*]:flex-1">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>

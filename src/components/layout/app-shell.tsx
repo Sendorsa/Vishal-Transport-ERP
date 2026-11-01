@@ -23,7 +23,7 @@ export function AppShell({ session, children }: { session: VerifiedSession | nul
         <AppSidebar />
         <SidebarInset className="min-w-0">
           <AppHeader />
-          <main className="mx-auto w-full max-w-[1600px] flex-1 px-3 pt-4 pb-24 md:px-6 md:pt-6 md:pb-10">
+          <main className="mx-auto w-full max-w-[1600px] flex-1 px-3 pt-4 pb-[calc(5.5rem+env(safe-area-inset-bottom))] md:px-6 md:pt-6 md:pb-10">
             <Fragment key={month}>{children}</Fragment>
           </main>
         </SidebarInset>

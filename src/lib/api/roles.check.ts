@@ -52,6 +52,20 @@ async function main() {
   assert.deepEqual(shown("OWNER"), [...fuel, "Audit Log"], "OWNER sidebar")
   assert.deepEqual(shown("EMPLOYEE"), fuel, "EMPLOYEE sidebar")
   assert.deepEqual(shown("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"])
+
+  // Phone tab bar: four of the role's own items; "More" (the drawer) holds the rest of that same list.
+  const { mobileTabs, navFor, isActive } = await import("@/components/layout/nav")
+  const tabs = (role: (typeof ROLES)[number]["value"]) => mobileTabs(role).map((i) => i.title)
+  assert.deepEqual(tabs("DEV"), ["Dashboard", "Trips", "Diesel", "Invoices"], "Dev's tabs")
+  assert.deepEqual(tabs("OWNER"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"], "Owner's tabs (Audit Log is under More)")
+  assert.deepEqual(tabs("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"], "Employee's tabs")
+  for (const r of ROLES) {
+    assert.equal(mobileTabs(r.value).length, 4, `${r.label}: four tabs`)
+    for (const t of mobileTabs(r.value)) assert.ok(can(r.value, t.resource) && navFor(r.value).includes(t), `${r.label}: tab ${t.title} is one of its own sidebar items`)
+    assert.deepEqual(navFor(r.value).map((i) => i.title), shown(r.value), `${r.label}: the drawer behind More is the full sidebar`)
+  }
+  assert.ok(isActive("/diesel/minda/2026-11", "/diesel") && isActive("/fuel-stations/dv_tanker", "/fuel-stations"), "a tab stays active on its sub-pages")
+  assert.ok(!isActive("/dashboard", "/diesel") && isActive("/dashboard", "/dashboard"), "…and only its own pages")
   // The Monthly Sheet Lock bypass is the Owner's alone.
   assert.equal(canEditMonth("OWNER", "2020-01", todayISO(), []), true)
   assert.equal(canEditMonth("DEV", "2020-01", todayISO(), []), false)

@@ -10,7 +10,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { Field, FormSection } from "@/components/shared/misc"
+import { Field, FormActionBar, FormSection } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { useCreateDriverByName, useCreateVehicleType, useCustomers, useDrivers, useSaveVehicle, useSettings } from "@/lib/api/hooks"
 import { CreatableSelect } from "@/components/shared/creatable-select"
@@ -276,7 +276,7 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
           </FormSection>
         </CardContent>
       </Card>
-      <div className="sticky bottom-16 mt-4 flex justify-end gap-2 md:bottom-4">
+      <FormActionBar className="mt-4 md:sticky md:bottom-4">
         <Button type="button" variant="outline" onClick={() => (onDone ? onDone() : router.back())}>
           Cancel
         </Button>
@@ -284,7 +284,7 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
           {save.isPending && <Loader2 className="animate-spin" />}
           {vehicle ? "Save changes" : "Add vehicle"}
         </Button>
-      </div>
+      </FormActionBar>
     </form>
   )
 }

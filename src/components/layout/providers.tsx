@@ -46,7 +46,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       <TooltipProvider delayDuration={200}>
         <StorageSync client={client} />
         {children}
-        <Toaster position="bottom-right" richColors closeButton />
+        <Toaster position="bottom-right" richColors closeButton mobileOffset={{ bottom: "calc(8.5rem + env(safe-area-inset-bottom))" }} /> {/* phones: above the tab bar and a form's fixed Save bar */}
       </TooltipProvider>
     </QueryClientProvider>
   )

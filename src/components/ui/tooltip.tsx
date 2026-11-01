@@ -17,16 +17,57 @@ function TooltipProvider({
   )
 }
 
+// Touch screens have no hover: a tap on the trigger toggles the tooltip (mouse hover and keyboard focus are unchanged).
+const TapToggle = React.createContext<(() => void) | null>(null)
+
 function Tooltip({
+  open: openProp,
+  defaultOpen,
+  onOpenChange,
   ...props
 }: React.ComponentProps<typeof TooltipPrimitive.Root>) {
-  return <TooltipPrimitive.Root data-slot="tooltip" {...props} />
+  const [uncontrolled, setUncontrolled] = React.useState(defaultOpen ?? false)
+  const open = openProp ?? uncontrolled
+  const setOpen = React.useCallback(
+    (next: boolean) => {
+      if (openProp === undefined) setUncontrolled(next)
+      onOpenChange?.(next)
+    },
+    [openProp, onOpenChange]
+  )
+  const toggle = React.useCallback(() => setOpen(!open), [open, setOpen])
+  return (
+    <TapToggle.Provider value={toggle}>
+      <TooltipPrimitive.Root data-slot="tooltip" open={open} onOpenChange={setOpen} {...props} />
+    </TapToggle.Provider>
+  )
 }
 
 function TooltipTrigger({
+  onPointerDown,
+  onClick,
+  tap = true,
   ...props
-}: React.ComponentProps<typeof TooltipPrimitive.Trigger>) {
-  return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />
+}: React.ComponentProps<typeof TooltipPrimitive.Trigger> & {
+  /** Toggle on tap (touch screens). Off for action buttons, whose tap does the action. */
+  tap?: boolean
+}) {
+  const toggle = React.useContext(TapToggle)
+  const touch = React.useRef(false)
+  return (
+    <TooltipPrimitive.Trigger
+      data-slot="tooltip-trigger"
+      onPointerDown={(e) => {
+        touch.current = e.pointerType === "touch" || e.pointerType === "pen"
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        onClick?.(e)
+        if (tap && touch.current) toggle?.()
+      }}
+      {...props}
+    />
+  )
 }
 
 function TooltipContent({

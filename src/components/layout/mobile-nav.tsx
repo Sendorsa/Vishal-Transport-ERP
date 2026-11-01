@@ -4,45 +4,51 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { Menu } from "lucide-react"
 import { useSidebar } from "@/components/ui/sidebar"
-import { useCan, useRole } from "@/lib/app-state"
+import { useRole } from "@/lib/app-state"
 import { cn } from "@/lib/utils"
-import { NAV_ITEMS, isActive, showInNav } from "./nav"
+import { isActive, mobileTabs } from "./nav"
 
-/** Bottom tab bar on phones; "More" opens the full sidebar sheet. */
+/**
+ * Phones: a bottom tab bar within thumb reach. Four tabs from what this role sees in the sidebar (the items marked
+ * `mobile` first, e.g. Dashboard / Trips / Diesel / Invoices for Dev; Fuel Stations / Diesel / Tankers / AdBlue for
+ * the Fuel-only roles), in sidebar order. "More" opens the full sidebar drawer with every other item — nothing is
+ * removed. The active tab is highlighted; "More" is highlighted when the current page lives in the drawer.
+ */
 export function MobileNav() {
   const pathname = usePathname()
-  const can = useCan()
   const [role] = useRole()
   const { setOpenMobile } = useSidebar()
-  const items = NAV_ITEMS.filter((i) => i.mobile && can(i.resource) && showInNav(role, i)).slice(0, 4)
+  const tabs = mobileTabs(role)
+  const inDrawer = !tabs.some((i) => isActive(pathname, i.href))
+
+  const tab = (active: boolean) =>
+    cn(
+      "flex min-h-14 w-full flex-col items-center justify-center gap-0.5 px-1 text-[11px] leading-tight",
+      active ? "font-semibold text-primary" : "text-muted-foreground"
+    )
+  const icon = (active: boolean) => cn("flex h-7 w-12 items-center justify-center rounded-full transition-colors", active && "bg-primary/10")
 
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-30 border-t bg-background/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
+    <nav aria-label="Main" className="fixed inset-x-0 bottom-0 z-30 border-t bg-background/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
       <ul className="grid grid-cols-5">
-        {items.map((item) => {
+        {tabs.map((item) => {
           const active = isActive(pathname, item.href)
           return (
             <li key={item.href}>
-              <Link
-                href={item.href}
-                className={cn(
-                  "flex flex-col items-center gap-0.5 py-2 text-[11px]",
-                  active ? "font-medium text-foreground" : "text-muted-foreground"
-                )}
-              >
-                <item.icon className="size-5" />
-                {item.title}
+              <Link href={item.href} aria-current={active ? "page" : undefined} className={tab(active)}>
+                <span className={icon(active)}>
+                  <item.icon className="size-5" />
+                </span>
+                <span className="max-w-full truncate">{item.short ?? item.title}</span>
               </Link>
             </li>
           )
         })}
-        <li className={cn(items.length < 4 && "col-start-5")}>
-          <button
-            type="button"
-            onClick={() => setOpenMobile(true)}
-            className="flex w-full flex-col items-center gap-0.5 py-2 text-[11px] text-muted-foreground"
-          >
-            <Menu className="size-5" />
+        <li className="col-start-5">
+          <button type="button" onClick={() => setOpenMobile(true)} className={tab(inDrawer)} aria-label="More: all sections">
+            <span className={icon(inDrawer)}>
+              <Menu className="size-5" />
+            </span>
             More
           </button>
         </li>

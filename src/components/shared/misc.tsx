@@ -11,6 +11,7 @@ import { formatAxisINR, formatINR } from "@/lib/format"
 import { useCan } from "@/lib/app-state"
 import type { Action, Resource } from "@/lib/permissions"
 import { cn } from "@/lib/utils"
+import { useKeepFocusAboveBar, useKeyboardInset } from "@/lib/keyboard"
 
 export function EmptyState({
   icon: Icon,
@@ -103,6 +104,34 @@ export function Field({
         <p className="text-xs text-muted-foreground">{hint}</p>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * Save / Cancel of a full-page form (New Trip, Invoice, Customer, Vehicle). Phones: fixed just above the bottom tab
+ * bar (iPhone safe area respected), with a spacer of its height so it never covers the last fields. While an
+ * on-screen keyboard is open (iPhone: Visual Viewport API, src/lib/keyboard.ts) the bar rides on top of the keyboard
+ * and the focused field is kept visible above it. md and up: in place, exactly as before (`className` adds the
+ * desktop placement, e.g. "md:sticky md:bottom-4").
+ */
+export function FormActionBar({ children, className }: { children: React.ReactNode; className?: string }) {
+  const keyboard = useKeyboardInset()
+  useKeepFocusAboveBar(keyboard, 64)
+  return (
+    <>
+      <div aria-hidden className="h-16 md:hidden" />
+      <div
+        // On the keyboard: no tab bar or home indicator below it any more (the keyboard covers both).
+        style={keyboard ? { bottom: keyboard, paddingBottom: "0.5rem" } : undefined}
+        className={cn(
+          "flex flex-wrap justify-end gap-2",
+          "max-md:fixed max-md:inset-x-0 max-md:bottom-[calc(3.5rem+1px+env(safe-area-inset-bottom))] max-md:z-20 max-md:flex-nowrap max-md:border-t max-md:bg-background/95 max-md:px-3 max-md:py-2 max-md:backdrop-blur max-md:[&>*]:min-w-0 max-md:[&>*]:flex-1",
+          className
+        )}
+      >
+        {children}
+      </div>
+    </>
   )
 }
 
