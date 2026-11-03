@@ -22,6 +22,7 @@ import { useCan, useRole } from "@/lib/app-state"
 import { useUnreviewedDeletions } from "@/lib/api/hooks"
 import { NAV_GROUPS, NAV_ITEMS, isActive, showInNav } from "./nav"
 import { hasOwnerAuthority } from "@/lib/permissions"
+import { isSharedBackend } from "@/lib/api/client"
 
 const GROUPS = NAV_GROUPS
 
@@ -85,7 +86,7 @@ export function AppSidebar() {
       </SidebarContent>
       <SidebarFooter>
         <p className="px-2 pb-1 text-[11px] leading-snug text-muted-foreground group-data-[collapsible=icon]:hidden">
-          Prototype · data stored in this browser
+          {isSharedBackend ? "Shared database · synced across devices" : "Prototype · data stored in this browser"}
         </p>
       </SidebarFooter>
       <SidebarRail />

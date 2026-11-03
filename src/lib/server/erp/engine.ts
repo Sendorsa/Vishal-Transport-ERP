@@ -35,8 +35,8 @@ const EVENTS = "vt:auditEvents"
 const REVIEWS = "vt:auditReviews"
 
 async function begin(sql: Sql, identity: RequestIdentity, write: boolean) {
-  await sql(`set local role authenticated`)
-  await sql(`select set_config('request.jwt.claim.sub', $1, true), set_config('request.jwt.claims', $2, true), set_config('timezone', 'UTC', true), set_config('statement_timeout', '20s', true)`, [
+  // One round trip: set_config('role', …, true) is SET LOCAL ROLE — RLS applies to everything after it.
+  await sql(`select set_config('role', 'authenticated', true), set_config('request.jwt.claim.sub', $1, true), set_config('request.jwt.claims', $2, true), set_config('timezone', 'UTC', true), set_config('statement_timeout', '20s', true)`, [
     identity.userId,
     JSON.stringify({ sub: identity.userId, role: "authenticated" }),
   ])

@@ -1,7 +1,8 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { isServer, MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { isServer, MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { toast } from "sonner"
 import { ConflictError } from "@/lib/versions"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "@/components/ui/sonner"
@@ -14,6 +15,9 @@ function makeQueryClient() {
     // A stale edit was refused (someone else saved first): load their version in the background. The open dialog keeps
     // what the user typed, so they can re-apply it on top of the newer record.
     mutationCache: new MutationCache({ onError: (e) => void (e instanceof ConflictError && client.invalidateQueries()) }),
+    // Shared database: a read that fails (offline, session ended, server error) is said out loud — never an empty
+    // page that looks like "no data". One toast per message (sonner id), not one per query.
+    queryCache: new QueryCache({ onError: (e) => void (isSharedBackend && toast.error(e instanceof Error ? e.message : "Couldn't load data from the server.", { id: e instanceof Error ? e.message : "load-error" })) }),
     defaultOptions: {
       queries: {
         staleTime: isSharedBackend ? 15_000 : 60_000,
