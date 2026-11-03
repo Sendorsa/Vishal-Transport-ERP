@@ -19,7 +19,7 @@ import type { AuditLogRow } from "@/lib/api"
 import { useAuditLog, useMarkReviewed, useRestoreCheck, useRestoreDeleted } from "@/lib/api/hooks"
 import { useCan, useRole } from "@/lib/app-state"
 import { formatDate, formatINR } from "@/lib/format"
-import { LEGACY_ROLES, ROLES, roleLabel } from "@/lib/permissions"
+import { LEGACY_ROLES, ROLES, hasOwnerAuthority, roleLabel } from "@/lib/permissions"
 import type { AuditAction } from "@/lib/types"
 
 /** Where a record lives in the app (only offered while it still exists). */
@@ -93,7 +93,7 @@ export function AuditLog() {
   const can = useCan()
   const allowed = can("audit")
   const [role] = useRole()
-  const isOwner = role === "OWNER"
+  const isOwner = hasOwnerAuthority(role) // review, badge and restore: the Owner and Dev
   const log = useAuditLog(allowed)
   const ref = useRefLookup()
   const [f, setF] = useState<AuditFilter>({})

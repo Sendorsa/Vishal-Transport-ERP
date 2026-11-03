@@ -170,16 +170,17 @@ async function main() {
 
   /* ---------------------------------------------------------------- 6. Month lock */
   const old = (await api.diesel.list()).find((e) => e.date.startsWith(lastMonth) && e.vendorId !== "dv_tanker")!
-  setRole("DEV") // may delete fuel records, but not in a locked month
-  await assert.rejects(api.diesel.remove(old.id, "Check: test record"), /is locked/)
+  setRole("EMPLOYEE") // may edit fuel records, but not in a locked month (Dev and the Owner may)
+  await assert.rejects(api.diesel.update(old.id, { date: old.date, vendorId: old.vendorId, litres: old.litres + 1, rate: old.rate, odometerKm: old.odometerKm, billNo: old.billNo, paymentMode: old.paymentMode }), /is locked/)
+  await assert.rejects(api.diesel.remove(old.id, "Check: test record"), /can't delete/) // …and deletes nothing
   setRole("OWNER") // the Owner can change any month (Monthly Sheet Lock)…
   assert.ok(await api.diesel.get(old.id))
   await api.diesel.remove(old.id, "Owner correction")
   assert.deepEqual(await events(old.id), ["DELETED"])
-  // Station payments follow the same Monthly Sheet Lock (no grace period since 31 Oct 2026): Dev can't change an old one.
+  // Station payments: only the Owner and Dev handle money; the Employee is refused outright.
   const oldPay = (await api.payments.list()).find((p) => p.categoryCode === "DIESEL_SETTLEMENT" && p.date < `${lastMonth}-01`)!
-  setRole("DEV")
-  await assert.rejects(api.fuelStationPayments.remove(oldPay.id, "Check: test record"), /is locked/)
+  setRole("EMPLOYEE")
+  await assert.rejects(api.fuelStationPayments.remove(oldPay.id, "Check: test record"), /can't/)
   setRole("OWNER")
   assert.ok(await api.payments.get(oldPay.id))
 
@@ -245,12 +246,14 @@ async function main() {
   await api.diesel.remove(again.id, "Duplicate entry again")
   await Promise.all([api.diesel.remove(again.id, "Double click"), api.diesel.remove(again.id, "Double click")]) // already gone: no event
   assert.equal(await count(), c0 + 2)
-  // Only the Owner sees or clears the count.
-  for (const role of ["EMPLOYEE", "DEV", "ACCOUNTANT"] as const) {
+  // Only the Owner and Dev see or clear the count.
+  for (const role of ["EMPLOYEE", "ACCOUNTANT"] as const) {
     setRole(role)
-    await assert.rejects(count(), /Only the Owner/)
-    await assert.rejects(api.audit.markReviewed([x.id]), /Only the Owner/)
+    await assert.rejects(count(), /Only the Owner or Dev/)
+    await assert.rejects(api.audit.markReviewed([x.id]), /Only the Owner or Dev/)
   }
+  setRole("DEV")
+  assert.equal(await count(), c0 + 2) // Dev sees the same count (reviewing is tested below as the Owner)
   setRole("OWNER")
   // Opening the log reviews nothing.
   await api.audit.list()

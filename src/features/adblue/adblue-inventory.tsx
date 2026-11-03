@@ -13,6 +13,8 @@ import { DeleteDialog, RowActions, monthLockedReason } from "@/components/shared
 import { FormModal } from "@/components/shared/form-modal"
 import { Field, NoAccess, PageSkeleton } from "@/components/shared/misc"
 import { PageHeader } from "@/components/shared/page-header"
+import { AdBlueOpeningDialog } from "@/features/go-live/opening-dialogs"
+import { hasOwnerAuthority } from "@/lib/permissions"
 import { StatsCard } from "@/components/shared/stats-card"
 import { inventoryLedger, isDirectAdBlue, purchasedIn, stockDraws, stockFor, valueInventory, vendorAnalytics } from "@/domain/adblue-inventory"
 import { SimpleSelect } from "@/components/shared/simple-select"
@@ -51,6 +53,7 @@ export function AdBlueInventory() {
   const [editing, setEditing] = useState<{ purchase?: AdBluePurchase } | null>(null)
   const [deleting, setDeleting] = useState<AdBluePurchase | null>(null)
   const [direct, setDirect] = useState<{ vehicle?: Vehicle } | null>(null)
+  const [openingOpen, setOpeningOpen] = useState(false)
 
   const d = useMemo(() => {
     if (!purchases.data || !entries.data) return null
@@ -89,6 +92,12 @@ export function AdBlueInventory() {
         actions={
           can("diesel", "create") && (
             <div className="flex flex-wrap gap-2">
+              {/* Go-live opening (owner, 3 Nov 2026): Owner / Dev, once, before any other AdBlue record. */}
+              {hasOwnerAuthority(role) && !(purchases.data ?? []).some((p) => p.opening) && (
+                <Button variant="outline" onClick={() => setOpeningOpen(true)}>
+                  <PackagePlus /> Record Opening Stock
+                </Button>
+              )}
               <Button variant="outline" onClick={() => setDirect({})}>
                 <Store /> Direct Vendor Purchase
               </Button>
@@ -288,6 +297,7 @@ export function AdBlueInventory() {
         />
       </section>
 
+      {openingOpen && <AdBlueOpeningDialog onOpenChange={setOpeningOpen} />}
       {direct && !direct.vehicle && (
         <FormModal open onOpenChange={(o) => !o && setDirect(null)} title="Direct Vendor Purchase" description="AdBlue bought from a vendor straight into one vehicle — bulk stock is not changed." submitLabel="Next" onSubmit={() => undefined}>
           <Field label="Vehicle" required>
@@ -309,7 +319,7 @@ export function AdBlueInventory() {
           impact={`Stock goes down by ${L(deleting.totalLitres)}; AdBlue Purchased, the stock ledger, carry-forward, Inventory Value and the cost of later draws are recalculated. Refused if that AdBlue has already been used.`}
           pending={del.isPending}
           onConfirm={async (reason) => {
-            await del.mutateAsync({ id: deleting.id, reason })
+            await del.mutateAsync({ id: deleting.id, version: deleting.updatedAt, reason })
             toast.success("AdBlue purchase deleted")
           }}
           onClose={() => setDeleting(null)}
@@ -348,7 +358,7 @@ function PurchaseDialog({ purchase, vendors, onOpenChange }: { purchase?: AdBlue
     if (!(buckets > 0) || !(perBucket > 0)) return setError("Enter the number of buckets and litres per bucket")
     if (!(price >= 0) || f.pricePerBucket === "") return setError("Enter the price per bucket")
     await save.mutateAsync({
-      id: purchase?.id,
+      id: purchase?.id, version: purchase?.updatedAt,
       data: { date: f.date, vendorName: f.vendorName, product: f.product, buckets, litresPerBucket: perBucket, pricePerBucket: price, invoiceNo: f.invoiceNo.trim(), notes: f.notes.trim() },
       reason,
     })

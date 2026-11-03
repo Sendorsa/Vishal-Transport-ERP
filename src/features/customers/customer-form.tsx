@@ -107,7 +107,7 @@ export function CustomerForm({ customer, onDone }: { customer?: Customer; onDone
   const onSubmit = handleSubmit(async (values) => {
     const stateCode = STATES.find((s) => s.name === values.state)?.code ?? ""
     const shortName = values.shortName || values.name.split(/[—(-]/)[0].trim().slice(0, 16)
-    const saved = await save.mutateAsync({ id: customer?.id, data: { ...values, shortName, stateCode } })
+    const saved = await save.mutateAsync({ id: customer?.id, version: customer?.updatedAt, data: { ...values, shortName, stateCode } })
     toast.success(customer ? "Customer updated" : `Customer ${saved.code} created`)
     if (onDone) onDone(saved)
     else router.push(`/customers/${saved.id}`)

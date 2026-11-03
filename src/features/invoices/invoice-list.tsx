@@ -13,7 +13,9 @@ import { CompanyBadge, StatusBadge } from "@/components/shared/status-badge"
 import { invoiceViews, type InvoiceView } from "@/domain/analytics"
 import { inRange, rangeForPreset, type PeriodPreset } from "@/domain/periods"
 import { useDataset } from "@/lib/api/hooks"
-import { useCan, useCompanyScope } from "@/lib/app-state"
+import { useCan, useCompanyScope, useRole } from "@/lib/app-state"
+import { OpeningInvoiceDialog } from "@/features/go-live/opening-dialogs"
+import { hasOwnerAuthority } from "@/lib/permissions"
 import { formatINR, formatDate, formatMonthKey, todayISO } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
@@ -29,6 +31,8 @@ const STATUS_OPTIONS = [
 
 export function InvoiceList({ initialStatus }: { initialStatus?: string }) {
   const can = useCan()
+  const [role] = useRole()
+  const [openingOpen, setOpeningOpen] = useState(false)
   const [scope] = useCompanyScope()
   const { data: ds, isLoading } = useDataset()
   const [period, setPeriod] = useState<PeriodPreset>("fy_to_date")
@@ -82,6 +86,7 @@ export function InvoiceList({ initialStatus }: { initialStatus?: string }) {
         <div>
           <div className="flex items-center gap-1.5">
             <span className="font-medium">{v.invoiceNo}</span>
+            {v.opening && <StatusBadge status="OPENING" tone="gray" label="Opening" />}
             {scope === "GROUP" && <CompanyBadge code={v.companyCode} />}
           </div>
           <div className="text-xs text-muted-foreground">{formatDate(v.date)}</div>
@@ -122,6 +127,12 @@ export function InvoiceList({ initialStatus }: { initialStatus?: string }) {
         actions={
           <>
             <PeriodSelect value={period} onChange={setPeriod} />
+            {/* Go-live opening (owner, 3 Nov 2026): invoices still unpaid when records began — Owner / Dev. */}
+            {can("invoices", "create") && hasOwnerAuthority(role) && (
+              <Button variant="outline" onClick={() => setOpeningOpen(true)}>
+                Opening invoice
+              </Button>
+            )}
             {can("invoices", "create") && (
               <Button asChild>
                 <Link href="/invoices/new">
@@ -166,6 +177,7 @@ export function InvoiceList({ initialStatus }: { initialStatus?: string }) {
         pageSize={50}
         emptyMessage="No invoices match these filters."
       />
+      {openingOpen && <OpeningInvoiceDialog onOpenChange={setOpeningOpen} />}
     </div>
   )
 }

@@ -109,7 +109,7 @@ export function TripForm({ trip, defaultCustomerId, onDone }: { trip?: Trip; def
   const [reason, setReason] = useState("")
   const onSubmit = handleSubmit(async (values) => {
     const saved = await save.mutateAsync({
-      id: trip?.id,
+      id: trip?.id, version: trip?.updatedAt,
       data: { ...values, driverId: values.driverId === NONE ? null : values.driverId },
       reason,
     })

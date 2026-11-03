@@ -11,6 +11,10 @@ export interface ServerAuth {
   email: string | null
   status: AccountStatus | null
   role: ErpRole | null
+  /** The verified JWT subject (auth.users id) and the account (public.profiles) — for the database session and audit. */
+  userId: string | null
+  profileId: string | null
+  fullName: string | null
 }
 
 /**
@@ -23,12 +27,12 @@ export const getServerAuth = cache(async (): Promise<ServerAuth> => {
   try {
     supabase = await createClient()
   } catch {
-    return { configured: false, signedIn: false, email: null, status: null, role: null }
+    return { configured: false, signedIn: false, email: null, status: null, role: null, userId: null, profileId: null, fullName: null }
   }
   const { data, error } = await supabase.auth.getClaims()
   const claims = error ? null : (data?.claims ?? null)
-  if (!claims) return { configured: true, signedIn: false, email: null, status: null, role: null }
+  if (!claims) return { configured: true, signedIn: false, email: null, status: null, role: null, userId: null, profileId: null, fullName: null }
   const email = typeof claims.email === "string" ? claims.email : null
   const account = await readAccount(supabase, claims.sub)
-  return { configured: true, signedIn: true, email, status: account?.status ?? null, role: account?.role ?? null }
+  return { configured: true, signedIn: true, email, status: account?.status ?? null, role: account?.role ?? null, userId: claims.sub, profileId: account?.id ?? null, fullName: account?.fullName ?? null }
 })

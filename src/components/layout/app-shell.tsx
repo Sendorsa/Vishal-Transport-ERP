@@ -10,7 +10,7 @@ import { MobileNav } from "./mobile-nav"
 
 export function AppShell({ session, children }: { session: VerifiedSession | null; children: React.ReactNode }) {
   const pathname = usePathname()
-  setVerifiedRole(session?.role ?? null) // the API's currentRole() follows the signed-in account
+  setVerifiedRole(session?.role ?? null, session?.email ?? null) // the API's currentRole() / audit actor follow the signed-in account
   // A new India month remounts the page: the default month, month lists, lock labels and "this month" figures are
   // recalculated without a reload. Saves never rely on this — the API checks today's date itself.
   const month = useCurrentMonth()

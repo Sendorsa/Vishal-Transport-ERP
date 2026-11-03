@@ -15,7 +15,9 @@ import { Field, NoAccess, PageSkeleton } from "@/components/shared/misc"
 import { PageHeader } from "@/components/shared/page-header"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { StatusBadge } from "@/components/shared/status-badge"
-import { fetchBackup, useAdminAction, useDrivers, useRestoreBackup, useSetDriverStatus, useSettings, useUpdateSettings } from "@/lib/api/hooks"
+import { fetchBackup, useAdminAction, useDrivers, useRestoreBackup, useSetDriverStatus, useSettings, useSetupTankerMasters, useUpdateSettings } from "@/lib/api/hooks"
+import { isSharedBackend } from "@/lib/api/client"
+import { can as roleCan, hasOwnerAuthority } from "@/lib/permissions"
 import { useCan, useRole, useSession } from "@/lib/app-state"
 import { STATES } from "@/lib/constants"
 import { formatDate } from "@/lib/format"
@@ -100,7 +102,7 @@ export function SettingsView() {
         </TabsContent>
 
         <TabsContent value="data" className="mt-4">
-          <DataPanel />
+          {isSharedBackend ? <SharedDataPanel /> : <DataPanel />}
         </TabsContent>
       </Tabs>
     </div>
@@ -258,7 +260,7 @@ function DriverManager({ editable }: { editable: boolean }) {
                 value={d.status}
                 disabled={!editable}
                 onChange={async (status) => {
-                  await setStatus.mutateAsync({ id: d.id, status })
+                  await setStatus.mutateAsync({ id: d.id, version: d.updatedAt, status })
                   toast.success(`${d.name} ${status === "ARCHIVED" ? "archived — history kept" : status === "ACTIVE" ? "restored" : "set inactive"}`)
                 }}
               />
@@ -467,6 +469,49 @@ async function downloadBackup(prefix = "vishal-erp-backup") {
   a.href = URL.createObjectURL(blob)
   a.download = `${prefix}-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`
   a.click()
+}
+
+/**
+ * Shared database (Supabase): business data is the same for every approved user. Nothing here can wipe, reset or
+ * replace it — recovery uses the database's backups / point-in-time recovery (D-9). Dev may export a read-only copy
+ * (system administration; also the rollback path). Go-live setup adds the three company tankers if missing.
+ */
+function SharedDataPanel() {
+  const [role] = useRole()
+  const setup = useSetupTankerMasters()
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <Card size="sm">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm font-semibold">
+            <Database className="size-4" /> Shared database
+          </CardTitle>
+          <CardDescription>Business data is stored centrally. Every approved user sees the same records on every device; changes by others appear within about 20 seconds.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <p className="text-xs text-muted-foreground">Reset, Clear all data and Restore from file aren&apos;t available on the shared database. Recovery uses the database&apos;s own backups.</p>
+          {roleCan(role, "system") && (
+            <Button variant="outline" size="sm" onClick={() => downloadBackup("vishal-erp-shared-export")}>
+              <Download /> Export (read-only copy)
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+      {hasOwnerAuthority(role) && (
+        <Card size="sm">
+          <CardHeader>
+            <CardTitle className="text-sm font-semibold">Go-live setup</CardTitle>
+            <CardDescription>Adds the three company tankers — JIO (TN70AX9480), Office (KA53C0538), Mini (KA51AF1429) — with their vehicle records, if they are missing. Vehicle details the books don&apos;t record stay blank.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button variant="outline" size="sm" disabled={setup.isPending} onClick={() => setup.mutate(undefined, { onSuccess: (n) => toast.success(n ? `${n} tanker record${n === 1 ? "" : "s"} added` : "The three tankers are already set up") })}>
+              Set up tanker masters
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  )
 }
 
 function DataPanel() {

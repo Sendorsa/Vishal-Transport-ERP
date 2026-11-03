@@ -149,7 +149,7 @@ export function TripDetail({ id }: { id: string }) {
           impact="Its revenue leaves the customer, vehicle and profit totals, and it can no longer be billed."
           pending={del.isPending}
           onConfirm={async (reason) => {
-            await del.mutateAsync({ id: t.id, reason })
+            await del.mutateAsync({ id: t.id, version: t.updatedAt, reason })
             toast.success("Trip deleted")
             router.push("/trips")
           }}

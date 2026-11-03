@@ -6,6 +6,8 @@
 import type { BaseEntity, CollectionKey, CollectionMap, NewEntity } from "@/lib/types"
 import { readCollection, writeCollection } from "@/lib/storage/local-store"
 import { ensureSeeded } from "./bootstrap"
+import { requestScope } from "@/lib/request-scope"
+import { assertVersion } from "@/lib/versions"
 
 export interface Repository<T extends BaseEntity> {
   list(): Promise<T[]>
@@ -23,7 +25,7 @@ export class NotFoundError extends Error {
 
 /** Simulated network latency so loading states are visible and realistic. */
 const LATENCY_MS = 60
-export const latency = () => new Promise((r) => setTimeout(r, LATENCY_MS))
+export const latency = () => (requestScope() ? Promise.resolve() : new Promise((r) => setTimeout(r, LATENCY_MS)))
 
 export function newId(prefix: string) {
   const rand =
@@ -63,6 +65,7 @@ export function createLocalRepository<K extends CollectionKey>(
       const items = all()
       const idx = items.findIndex((x) => x.id === id)
       if (idx < 0) throw new NotFoundError(key, id)
+      assertVersion(items[idx]) // a stale screen never overwrites someone else's newer change
       const updated = { ...items[idx], ...patch, id, updatedAt: new Date().toISOString() } as T
       const next = items.slice()
       next[idx] = updated
@@ -71,6 +74,8 @@ export function createLocalRepository<K extends CollectionKey>(
     },
     async remove(id) {
       await latency()
+      const current = all().find((x) => x.id === id)
+      if (current) assertVersion(current)
       writeCollection(
         key,
         all().filter((x) => x.id !== id)

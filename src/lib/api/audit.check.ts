@@ -141,10 +141,10 @@ async function main() {
   setRole("OWNER")
   await api.diesel.update(old.id, { date: old.date, vendorId: old.vendorId, litres: old.litres + 1, rate: old.rate, odometerKm: old.odometerKm, billNo: old.billNo, paymentMode: old.paymentMode }, "Odometer correction")
   assert.deepEqual([(await log())[0].recordId, (await log())[0].actor.role], [old.id, "OWNER"])
-  //   c) A station payment back-dated into a locked month is refused to Dev (Monthly Sheet Lock) and records nothing.
+  //   c) A refused station payment (Employee: no payment permission) records nothing.
   const n3 = await count()
-  setRole("DEV")
-  await assert.rejects(api.fuelStationPayments.create({ stationId: "dv_raghuveer", paymentDate: `${twoMonthsAgo}-10`, amount: 1, paymentMode: "NEFT", notes: "", companyCode: "VT" }), /is locked/)
+  setRole("EMPLOYEE")
+  await assert.rejects(api.fuelStationPayments.create({ stationId: "dv_raghuveer", paymentDate: `${twoMonthsAgo}-10`, amount: 1, paymentMode: "NEFT", notes: "", companyCode: "VT" }), /can't/)
   setRole("OWNER")
   assert.equal(await count(), n3)
   //   d) If the audit write itself fails, the record change is rolled back too —

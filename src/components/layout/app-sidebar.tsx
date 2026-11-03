@@ -21,6 +21,7 @@ import {
 import { useCan, useRole } from "@/lib/app-state"
 import { useUnreviewedDeletions } from "@/lib/api/hooks"
 import { NAV_GROUPS, NAV_ITEMS, isActive, showInNav } from "./nav"
+import { hasOwnerAuthority } from "@/lib/permissions"
 
 const GROUPS = NAV_GROUPS
 
@@ -31,7 +32,7 @@ export function AppSidebar() {
   const { setOpenMobile } = useSidebar()
   const items = NAV_ITEMS.filter((i) => can(i.resource) && showInNav(role, i))
   // Owner only: deletion events not yet reviewed, shown on the Audit Log item (hidden at 0).
-  const unreviewed = useUnreviewedDeletions(role === "OWNER").data ?? 0
+  const unreviewed = useUnreviewedDeletions(hasOwnerAuthority(role)).data ?? 0
   const badgeFor = (href: string) => (href === "/audit" && unreviewed > 0 ? unreviewed : null)
 
   return (

@@ -7,9 +7,11 @@
 import { useMemo } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { api } from "@/lib/api"
+import { api } from "./client"
+import { withVersions } from "@/lib/versions"
 import { useCompanyScope, useRole } from "@/lib/app-state"
 import { monthLockInfo } from "@/domain/month-lock"
+import { hasOwnerAuthority } from "@/lib/permissions"
 import { todayISO } from "@/lib/format"
 import { scopeDataset, type Dataset } from "@/domain/analytics"
 import { withRuns } from "@/domain/adblue"
@@ -37,6 +39,28 @@ export const queryKeys = {
   payments: ["payments"] as const,
   settings: ["settings"] as const,
   audit: ["audit"] as const,
+}
+
+/**
+ * Which queries to refresh when another user changed a module (the audit trail's module names): shared-database sync.
+ * Unknown modules refresh nothing but the audit log.
+ */
+const MODULE_KEYS: Record<string, (keyof typeof queryKeys)[]> = {
+  Diesel: ["diesel_entries", "vehicles"],
+  AdBlue: ["adblue_entries", "adblue_purchases"],
+  "Diesel Tanker": ["tankers", "tanker_loads", "tanker_transfers", "tanker_adjustments", "tanker_dispenses", "diesel_entries"],
+  "Fuel Stations": ["fuel_stations", "payments"],
+  Payments: ["payments", "invoices"],
+  Customers: ["customers"],
+  Vehicles: ["vehicles", "vehicle_assignments", "diesel_entries", "adblue_entries"],
+  Drivers: ["drivers"],
+  Trips: ["trips"],
+  Invoices: ["invoices", "trips"],
+  Settings: ["settings"],
+  "Month Lock": ["month_locks"],
+}
+export function keysForModules(modules: string[]) {
+  return [...new Set([...modules.flatMap((m) => MODULE_KEYS[m] ?? []), "audit" as const])]
 }
 
 /* ------------------------------------------------------------------ Reads */
@@ -128,11 +152,18 @@ function useInvalidate() {
 
 const onError = (e: unknown) => toast.error(e instanceof Error ? e.message : "Something went wrong")
 
+/**
+ * Runs an API call carrying the version (`updatedAt`) of the record the user's screen showed — optimistic concurrency
+ * (src/lib/versions.ts): if someone else saved it since, the server refuses with a clear message instead of
+ * overwriting their change. No version (a new record) = no check.
+ */
+const v = <T,>(id: string | undefined, version: string | undefined, call: () => T) => withVersions(id ? { [id]: version } : {}, call)
+
 export function useSaveCustomer() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, data }: { id?: string; data: NewEntity<Customer> }) =>
-      id ? api.customers.update(id, data) : api.customers.create(data),
+    mutationFn: ({ id, data, version }: { id?: string; data: NewEntity<Customer>; version?: string }) =>
+      v(id, version, () => id ? api.customers.update(id, data) : api.customers.create(data)),
     onSuccess: () => invalidate("customers"),
     onError,
   })
@@ -141,7 +172,7 @@ export function useSaveCustomer() {
 export function useUpdateCustomer() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: Partial<NewEntity<Customer>> }) => api.customers.update(id, patch),
+    mutationFn: ({ id, patch, version }: { id: string; patch: Partial<NewEntity<Customer>>; version?: string }) => v(id, version, () => api.customers.update(id, patch)),
     onSuccess: () => invalidate("customers"),
     onError,
   })
@@ -151,7 +182,7 @@ export function useUpdateCustomer() {
 export function useArchiveCustomer() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, restore }: { id: string; restore?: boolean }) => (restore ? api.customers.restore(id) : api.customers.archive(id)),
+    mutationFn: ({ id, restore, version }: { id: string; restore?: boolean; version?: string }) => v(id, version, () => (restore ? api.customers.restore(id) : api.customers.archive(id))),
     onSuccess: () => invalidate("customers"),
     onError,
   })
@@ -160,8 +191,8 @@ export function useArchiveCustomer() {
 export function useSaveVehicle() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, data }: { id?: string; data: Partial<NewEntity<Vehicle>> }) =>
-      id ? api.vehicles.update(id, data) : api.vehicles.create(data as NewEntity<Vehicle>),
+    mutationFn: ({ id, data, version }: { id?: string; data: Partial<NewEntity<Vehicle>> & { assignedSince?: string }; version?: string }) =>
+      v(id, version, () => id ? api.vehicles.update(id, data) : api.vehicles.create(data as NewEntity<Vehicle>)),
     // A customer change is a transfer: assignments change, and so do the entries' customers from today.
     onSuccess: () => invalidate("vehicles", "vehicle_assignments", "diesel_entries", "adblue_entries"),
     onError,
@@ -173,7 +204,7 @@ export function useMonthLock(month: string) {
   const [role] = useRole()
   const locks = useMonthLocks()
   const info = monthLockInfo(month, todayISO(), locks.data ?? [])
-  const isOwner = role === "OWNER"
+  const isOwner = hasOwnerAuthority(role) // Owner-level control: the Owner and Dev
   return { info, isOwner, canEdit: isOwner || info.state === "OPEN" }
 }
 
@@ -191,7 +222,7 @@ export function useSetMonthLock() {
 export function useTransferVehicle() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, customerId, effectiveDate, reason }: { id: string; customerId: string | null; effectiveDate: string; reason?: string }) => api.vehicles.transfer(id, customerId, effectiveDate, reason),
+    mutationFn: ({ id, customerId, effectiveDate, reason, version }: { id: string; customerId: string | null; effectiveDate: string; reason?: string; version?: string }) => v(id, version, () => api.vehicles.transfer(id, customerId, effectiveDate, reason)),
     onSuccess: () => invalidate("vehicles", "vehicle_assignments", "diesel_entries", "adblue_entries"),
     onError,
   })
@@ -200,7 +231,7 @@ export function useTransferVehicle() {
 export function useArchiveVehicle() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, restore }: { id: string; restore?: boolean }) => (restore ? api.vehicles.restore(id) : api.vehicles.archive(id)),
+    mutationFn: ({ id, restore, version }: { id: string; restore?: boolean; version?: string }) => v(id, version, () => (restore ? api.vehicles.restore(id) : api.vehicles.archive(id))),
     onSuccess: () => invalidate("vehicles"),
     onError,
   })
@@ -210,7 +241,7 @@ export function useArchiveVehicle() {
 export function useSetDriverStatus() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, status }: { id: string; status: EntityStatus }) => api.drivers.update(id, { status }),
+    mutationFn: ({ id, status, version }: { id: string; status: EntityStatus; version?: string }) => v(id, version, () => api.drivers.update(id, { status })),
     onSuccess: () => invalidate("drivers"),
     onError,
   })
@@ -228,8 +259,8 @@ export function useSaveDriver() {
 export function useSaveTrip() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, data, reason }: { id?: string; data: TripInput; reason?: string }) =>
-      id ? api.trips.update(id, data, reason) : api.trips.create(data),
+    mutationFn: ({ id, data, reason, version }: { id?: string; data: TripInput; reason?: string; version?: string }) =>
+      v(id, version, () => id ? api.trips.update(id, data, reason) : api.trips.create(data)),
     onSuccess: () => invalidate("trips"),
     onError,
   })
@@ -237,13 +268,13 @@ export function useSaveTrip() {
 
 export function useDeleteTrip() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: ({ id, reason }: { id: string; reason: string }) => api.trips.remove(id, reason), onSuccess: () => invalidate("trips"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.trips.remove(id, reason)), onSuccess: () => invalidate("trips"), onError })
 }
 
 export function useUpdateDiesel() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, data, reason }: { id: string; data: Parameters<typeof api.diesel.update>[1]; reason?: string }) => api.diesel.update(id, data, reason),
+    mutationFn: ({ id, data, reason, version }: { id: string; data: Parameters<typeof api.diesel.update>[1]; reason?: string; version?: string }) => v(id, version, () => api.diesel.update(id, data, reason)),
     onSuccess: () => invalidate("diesel_entries"),
     onError,
   })
@@ -261,7 +292,7 @@ export function useCreateDiesel() {
 export function useDeleteDiesel() {
   const invalidate = useInvalidate()
   // Tanker fills return litres to the tanker; vehicles' "last known km" is unaffected.
-  return useMutation({ mutationFn: ({ id, reason }: { id: string; reason: string }) => api.diesel.remove(id, reason), onSuccess: () => invalidate("diesel_entries"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.diesel.remove(id, reason)), onSuccess: () => invalidate("diesel_entries"), onError })
 }
 
 export function useCreateInvoice() {
@@ -276,8 +307,8 @@ export function useCreateInvoice() {
 export function useInvoiceAction() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, action, reason }: { id: string; action: "issue" | "cancel"; reason?: string }) =>
-      action === "issue" ? api.invoices.issue(id) : api.invoices.cancel(id, reason),
+    mutationFn: ({ id, action, reason, version }: { id: string; action: "issue" | "cancel"; reason?: string; version?: string }) =>
+      v(id, version, () => action === "issue" ? api.invoices.issue(id) : api.invoices.cancel(id, reason)),
     onSuccess: () => invalidate("invoices", "trips"),
     onError,
   })
@@ -294,7 +325,7 @@ export function useCreatePayment() {
 
 export function useDeletePayment() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: ({ id, reason }: { id: string; reason: string }) => api.payments.remove(id, reason), onSuccess: () => invalidate("payments"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.payments.remove(id, reason)), onSuccess: () => invalidate("payments"), onError })
 }
 
 export function useUpdateSettings() {
@@ -370,7 +401,7 @@ export function useCreateFuelStation() {
 export function useUpdateFuelStation() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: { name: string; location: string; creditDays: number } }) => api.fuelStations.update(id, patch),
+    mutationFn: ({ id, patch, version }: { id: string; patch: { name: string; location: string; creditDays: number }; version?: string }) => v(id, version, () => api.fuelStations.update(id, patch)),
     onSuccess: () => invalidate("fuel_stations"),
     onError,
   })
@@ -383,7 +414,7 @@ export function useUpdateFuelStation() {
 export function useSetStationOpeningBalance() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, amount, date }: { id: string; amount: number; date: string }) => api.fuelStations.setOpeningBalance(id, { amount, date }),
+    mutationFn: ({ id, amount, date, version }: { id: string; amount: number; date: string; version?: string }) => v(id, version, () => api.fuelStations.setOpeningBalance(id, { amount, date })),
     onSuccess: () => invalidate("fuel_stations"),
     onError,
   })
@@ -405,7 +436,7 @@ export function useAddFuelStationPayment() {
 export function useUpdateFuelStationPayment() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, patch, reason }: { id: string; patch: Parameters<typeof api.fuelStationPayments.update>[1]; reason?: string }) => api.fuelStationPayments.update(id, patch, reason),
+    mutationFn: ({ id, patch, reason, version }: { id: string; patch: Parameters<typeof api.fuelStationPayments.update>[1]; reason?: string; version?: string }) => v(id, version, () => api.fuelStationPayments.update(id, patch, reason)),
     onSuccess: () => invalidate("payments"),
     onError,
   })
@@ -419,39 +450,39 @@ export function useRecordStationTds() {
 
 export function useDeleteFuelStationPayment() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: ({ id, reason }: { id: string; reason: string }) => api.fuelStationPayments.remove(id, reason), onSuccess: () => invalidate("payments"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.fuelStationPayments.remove(id, reason)), onSuccess: () => invalidate("payments"), onError })
 }
 
 /** Diesel Tanker: loads in, external dispenses out. Tanker-sourced fills' cost changes too (diesel_entries). */
 export function useSaveTankerLoad() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, data, reason }: { id?: string; data: TankerLoadInput; reason?: string }) => (id ? api.tankerLoads.update(id, data, reason) : api.tankerLoads.create(data)),
+    mutationFn: ({ id, data, reason, version }: { id?: string; data: TankerLoadInput; reason?: string; version?: string }) => v(id, version, () => (id ? api.tankerLoads.update(id, data, reason) : api.tankerLoads.create(data))),
     onSuccess: () => invalidate("tanker_loads", "diesel_entries"),
     onError,
   })
 }
 export function useDeleteTankerLoad() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: ({ id, reason }: { id: string; reason: string }) => api.tankerLoads.remove(id, reason), onSuccess: () => invalidate("tanker_loads", "diesel_entries"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.tankerLoads.remove(id, reason)), onSuccess: () => invalidate("tanker_loads", "diesel_entries"), onError })
 }
 export function useDeleteTankerDispense() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: ({ id, reason }: { id: string; reason: string }) => api.tankerDispenses.remove(id, reason), onSuccess: () => invalidate("tanker_dispenses", "diesel_entries"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.tankerDispenses.remove(id, reason)), onSuccess: () => invalidate("tanker_dispenses", "diesel_entries"), onError })
 }
 
 /** Tanker master: add / edit, archive / restore. */
 export function useSaveTanker() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, data }: { id?: string; data: TankerInput }) => (id ? api.tankers.update(id, data) : api.tankers.create(data)),
+    mutationFn: ({ id, data, version }: { id?: string; data: TankerInput; version?: string }) => v(id, version, () => (id ? api.tankers.update(id, data) : api.tankers.create(data))),
     onSuccess: () => invalidate("tankers"),
     onError,
   })
 }
 export function useArchiveTanker() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: ({ id, restore }: { id: string; restore?: boolean }) => (restore ? api.tankers.restore(id) : api.tankers.archive(id)), onSuccess: () => invalidate("tankers"), onError })
+  return useMutation({ mutationFn: ({ id, restore, version }: { id: string; restore?: boolean; version?: string }) => v(id, version, () => (restore ? api.tankers.restore(id) : api.tankers.archive(id))), onSuccess: () => invalidate("tankers"), onError })
 }
 /** Diesel moved between tankers (never a purchase). */
 export function useCreateTankerTransfer() {
@@ -460,7 +491,7 @@ export function useCreateTankerTransfer() {
 }
 export function useDeleteTankerTransfer() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: ({ id, reason }: { id: string; reason: string }) => api.tankerTransfers.remove(id, reason), onSuccess: () => invalidate("tanker_transfers", "diesel_entries"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.tankerTransfers.remove(id, reason)), onSuccess: () => invalidate("tanker_transfers", "diesel_entries"), onError })
 }
 /** Stock corrections with a mandatory reason. */
 export function useCreateTankerAdjustment() {
@@ -469,14 +500,14 @@ export function useCreateTankerAdjustment() {
 }
 export function useDeleteTankerAdjustment() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: ({ id, reason }: { id: string; reason: string }) => api.tankerAdjustments.remove(id, reason), onSuccess: () => invalidate("tanker_adjustments", "diesel_entries"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.tankerAdjustments.remove(id, reason)), onSuccess: () => invalidate("tanker_adjustments", "diesel_entries"), onError })
 }
 
 /** AdBlue bulk purchase (add / edit). Stock and the weighted-average cost of every draw change too. */
 export function useSaveAdBluePurchase() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, data, reason }: { id?: string; data: AdBluePurchaseInput; reason?: string }) => (id ? api.adbluePurchases.update(id, data, reason) : api.adbluePurchases.create(data)),
+    mutationFn: ({ id, data, reason, version }: { id?: string; data: AdBluePurchaseInput; reason?: string; version?: string }) => v(id, version, () => (id ? api.adbluePurchases.update(id, data, reason) : api.adbluePurchases.create(data))),
     onSuccess: () => invalidate("adblue_purchases", "adblue_entries"),
     onError,
   })
@@ -484,14 +515,14 @@ export function useSaveAdBluePurchase() {
 
 export function useDeleteAdBluePurchase() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: ({ id, reason }: { id: string; reason: string }) => api.adbluePurchases.remove(id, reason), onSuccess: () => invalidate("adblue_purchases", "adblue_entries"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.adbluePurchases.remove(id, reason)), onSuccess: () => invalidate("adblue_purchases", "adblue_entries"), onError })
 }
 
 /** Archive (soft delete) or restore a fuel station. */
 export function useArchiveFuelStation() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, restore }: { id: string; restore?: boolean }) => (restore ? api.fuelStations.restore(id) : api.fuelStations.archive(id)),
+    mutationFn: ({ id, restore, version }: { id: string; restore?: boolean; version?: string }) => v(id, version, () => (restore ? api.fuelStations.restore(id) : api.fuelStations.archive(id))),
     onSuccess: () => invalidate("fuel_stations"),
     onError,
   })
@@ -499,14 +530,41 @@ export function useArchiveFuelStation() {
 
 export function useDeleteAdBlue() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: ({ id, reason }: { id: string; reason: string }) => api.adblue.remove(id, reason), onSuccess: () => invalidate("adblue_entries"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.adblue.remove(id, reason)), onSuccess: () => invalidate("adblue_entries"), onError })
 }
 
 export function useSaveAdBlue() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, data, reason }: { id?: string; data: AdBlueInput; reason?: string }) => (id ? api.adblue.update(id, data, reason) : api.adblue.create(data)),
+    mutationFn: ({ id, data, reason, version }: { id?: string; data: AdBlueInput; reason?: string; version?: string }) => v(id, version, () => (id ? api.adblue.update(id, data, reason) : api.adblue.create(data))),
     onSuccess: () => invalidate("adblue_entries"),
     onError,
   })
+}
+
+/* ------------------------------------------------------------------ Go-live openings (owner, 3 Nov 2026) — Owner / Dev */
+
+/** AdBlue already on hand when records begin (stock and value; never "AdBlue Purchased"). */
+export function useCreateAdBlueOpening() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: (input: Parameters<typeof api.adbluePurchases.createOpening>[0]) => api.adbluePurchases.createOpening(input), onSuccess: () => invalidate("adblue_purchases", "adblue_entries"), onError })
+}
+/** An invoice still unpaid when records begin: original number and dates, the amount outstanding. */
+export function useCreateOpeningInvoice() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: (input: Parameters<typeof api.invoices.createOpening>[0]) => api.invoices.createOpening(input), onSuccess: () => invalidate("invoices"), onError })
+}
+/** The odometer at the vehicle's last fill before records begin (the first fill's KM Run starts from it). */
+export function useSetOpeningOdometer() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, km, date, version }: { id: string; km: number | null; date: string; version?: string }) => v(id, version, () => api.vehicles.setOpeningOdometer(id, { km, date })),
+    onSuccess: () => invalidate("vehicles", "diesel_entries"),
+    onError,
+  })
+}
+/** Go-live setup: the three company tankers and their vehicle records, if missing. */
+export function useSetupTankerMasters() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: () => api.admin.setupTankerMasters(), onSuccess: () => invalidate("tankers", "vehicles"), onError })
 }

@@ -10,6 +10,7 @@ import { inferAssignments } from "@/domain/assignments"
 import { CONFIRMED_TANKERS, DEFAULT_TANKER_ID, isTankerFill, normReg } from "@/domain/tanker"
 import { buildEvent } from "@/domain/audit"
 import { todayISO } from "@/lib/format"
+import { NeedData, requestScope } from "@/lib/request-scope"
 import type { AuditEvent, AuditReview, CollectionKey, CollectionMap, Settings, Tanker } from "@/lib/types"
 
 export const STORAGE_PREFIX = "vt:"
@@ -74,10 +75,24 @@ interface Encoded {
   rows: unknown[][]
 }
 
-const cache = new Map<string, unknown>()
+const browserCache = new Map<string, unknown>()
+
+/**
+ * Where data lives for this call. Browser: localStorage (+ an in-memory parse cache). Server (Supabase backend): the
+ * request scope — collections loaded from the database for this request; writes are only recorded in memory and turned
+ * into SQL by the unit of work (src/lib/server/erp) inside one database transaction.
+ */
+const cacheOf = () => requestScope()?.cache ?? browserCache
 
 export function isBrowser() {
-  return typeof window !== "undefined" && typeof window.localStorage !== "undefined"
+  return !!requestScope() || (typeof window !== "undefined" && typeof window.localStorage !== "undefined")
+}
+
+/** localStorage, or the request scope's write recorder on the server (nothing is serialised there). */
+function ls(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
+  const scope = requestScope()
+  if (!scope) return window.localStorage
+  return { getItem: () => null, setItem: (k) => void scope.written.add(k), removeItem: (k) => void scope.written.add(k) }
 }
 
 function encode<T extends object>(items: T[]): Encoded {
@@ -112,7 +127,7 @@ export class StorageQuotaError extends Error {
 let txOriginals: Map<string, string | null> | null = null
 
 function remember(key: string) {
-  if (txOriginals && !txOriginals.has(key)) txOriginals.set(key, window.localStorage.getItem(key))
+  if (txOriginals && !txOriginals.has(key)) txOriginals.set(key, ls().getItem(key))
 }
 
 /**
@@ -122,7 +137,8 @@ function remember(key: string) {
  * Callers must not overlap transactions — the API serialises them (see `tx` in lib/api/index.ts).
  */
 export async function runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
-  if (!isBrowser()) return fn()
+  // Server: the database transaction around the whole request rolls everything back on error.
+  if (!isBrowser() || requestScope()) return fn()
   if (txOriginals) throw new Error("Nested storage transaction")
   txOriginals = new Map()
   const originals = txOriginals
@@ -132,7 +148,7 @@ export async function runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
     return result
   } catch (e) {
     txOriginals = null
-    cache.clear()
+    browserCache.clear()
     // Restore every key on its own: one failed restore must not stop the others.
     for (const [key, raw] of originals) {
       try {
@@ -149,7 +165,7 @@ export async function runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
 function setItem(key: string, value: string) {
   remember(key)
   try {
-    window.localStorage.setItem(key, value)
+    ls().setItem(key, value)
   } catch (e) {
     if (e instanceof DOMException && (e.name === "QuotaExceededError" || e.code === 22)) throw new StorageQuotaError()
     throw e
@@ -158,7 +174,7 @@ function setItem(key: string, value: string) {
 
 function removeItem(key: string) {
   remember(key)
-  window.localStorage.removeItem(key)
+  ls().removeItem(key)
 }
 
 /* ------------------------------------------------------------------ Audit events (append-only) */
@@ -168,10 +184,11 @@ export const AUDIT_KEY = `${STORAGE_PREFIX}auditEvents`
 /** All audit events, oldest first. */
 export function readAuditEvents(): AuditEvent[] {
   if (!isBrowser()) return []
-  if (cache.has(AUDIT_KEY)) return cache.get(AUDIT_KEY) as AuditEvent[]
-  const raw = window.localStorage.getItem(AUDIT_KEY)
+  if (cacheOf().has(AUDIT_KEY)) return cacheOf().get(AUDIT_KEY) as AuditEvent[]
+  if (requestScope()) throw new NeedData(AUDIT_KEY)
+  const raw = ls().getItem(AUDIT_KEY)
   const items = raw ? decode<AuditEvent>(JSON.parse(raw) as Encoded) : []
-  cache.set(AUDIT_KEY, items)
+  cacheOf().set(AUDIT_KEY, items)
   return items
 }
 
@@ -182,62 +199,86 @@ const KEPT_KEYS = new Set([AUDIT_KEY, AUDIT_REVIEWS_KEY])
 /** The Owner's reviews of deletion events, oldest first. */
 export function readAuditReviews(): AuditReview[] {
   if (!isBrowser()) return []
-  if (cache.has(AUDIT_REVIEWS_KEY)) return cache.get(AUDIT_REVIEWS_KEY) as AuditReview[]
-  const raw = window.localStorage.getItem(AUDIT_REVIEWS_KEY)
+  if (cacheOf().has(AUDIT_REVIEWS_KEY)) return cacheOf().get(AUDIT_REVIEWS_KEY) as AuditReview[]
+  if (requestScope()) throw new NeedData(AUDIT_REVIEWS_KEY)
+  const raw = ls().getItem(AUDIT_REVIEWS_KEY)
   const items = raw ? (JSON.parse(raw) as AuditReview[]) : []
-  cache.set(AUDIT_REVIEWS_KEY, items)
+  cacheOf().set(AUDIT_REVIEWS_KEY, items)
   return items
 }
 
 /** Append-only, like the events themselves. */
 export function appendAuditReviews(reviews: AuditReview[]) {
+  const scope = requestScope()
+  if (scope) {
+    // Server: the request's new reviews (inserted in its transaction); the loaded list, if any, sees them too.
+    scope.newReviews.push(...reviews)
+    if (scope.cache.has(AUDIT_REVIEWS_KEY)) scope.cache.set(AUDIT_REVIEWS_KEY, [...(scope.cache.get(AUDIT_REVIEWS_KEY) as AuditReview[]), ...reviews])
+    return
+  }
   const next = [...readAuditReviews(), ...reviews]
   setItem(AUDIT_REVIEWS_KEY, JSON.stringify(next))
-  cache.set(AUDIT_REVIEWS_KEY, next)
+  cacheOf().set(AUDIT_REVIEWS_KEY, next)
 }
 
 /** The only write path for audit events: append. There is no update or delete. */
 export function appendAuditEvent(event: AuditEvent) {
+  const scope = requestScope()
+  if (scope) {
+    // Server: never needs the whole trail to append (it isn't loaded for ordinary writes).
+    scope.newEvents.push(event)
+    if (scope.cache.has(AUDIT_KEY)) scope.cache.set(AUDIT_KEY, [...(scope.cache.get(AUDIT_KEY) as AuditEvent[]), event])
+    return
+  }
   const next = [...readAuditEvents(), event]
   setItem(AUDIT_KEY, JSON.stringify(encode(next)))
-  cache.set(AUDIT_KEY, next)
+  cacheOf().set(AUDIT_KEY, next)
 }
 
 export function readCollection<K extends CollectionKey>(key: K): CollectionMap[K][] {
   if (!isBrowser()) return []
   const full = STORAGE_PREFIX + STORAGE_NAME[key]
-  if (cache.has(full)) return cache.get(full) as CollectionMap[K][]
-  const raw = window.localStorage.getItem(full)
+  if (cacheOf().has(full)) return cacheOf().get(full) as CollectionMap[K][]
+  if (requestScope()) throw new NeedData(full)
+  const raw = ls().getItem(full)
   const items = raw ? decode<CollectionMap[K]>(JSON.parse(raw) as Encoded) : []
-  cache.set(full, items)
+  cacheOf().set(full, items)
   return items
 }
 
 export function writeCollection<K extends CollectionKey>(key: K, items: CollectionMap[K][]) {
   const full = STORAGE_PREFIX + STORAGE_NAME[key]
-  setItem(full, JSON.stringify(encode(items)))
-  cache.set(full, items)
+  if (requestScope() && !cacheOf().has(full)) throw new NeedData(full) // never write a collection without its original
+  setItem(full, requestScope() ? "" : JSON.stringify(encode(items)))
+  cacheOf().set(full, items)
 }
 
 /** Settings as one object; vehicle types and petrol pumps are stored in their own keys. */
 export function readSettings(): Settings | null {
   if (!isBrowser()) return null
-  if (cache.has(SETTINGS_KEY)) return cache.get(SETTINGS_KEY) as Settings
+  if (cacheOf().has(SETTINGS_KEY)) return cacheOf().get(SETTINGS_KEY) as Settings
+  if (requestScope()) throw new NeedData(SETTINGS_KEY)
   const raw = window.localStorage.getItem(SETTINGS_KEY)
   if (!raw) return null
   const ls = window.localStorage
   const s = JSON.parse(raw) as Settings
   s.vehicleTypes = JSON.parse(ls.getItem(VEHICLE_TYPES_KEY) ?? "null") ?? s.vehicleTypes ?? []
   delete (s as Partial<Record<"dieselVendors", unknown>>).dieselVendors // lives in vt:fuelStations now
-  cache.set(SETTINGS_KEY, s)
+  cacheOf().set(SETTINGS_KEY, s)
   return s
 }
 
 export function writeSettings(settings: Settings) {
+  if (requestScope()) {
+    if (!cacheOf().has(SETTINGS_KEY)) throw new NeedData(SETTINGS_KEY)
+    setItem(SETTINGS_KEY, "")
+    cacheOf().set(SETTINGS_KEY, settings)
+    return
+  }
   const { vehicleTypes, ...rest } = settings
   setItem(VEHICLE_TYPES_KEY, JSON.stringify(vehicleTypes))
   setItem(SETTINGS_KEY, JSON.stringify(rest))
-  cache.set(SETTINGS_KEY, settings)
+  cacheOf().set(SETTINGS_KEY, settings)
 }
 
 /**
@@ -254,7 +295,8 @@ let migrated = false
 
 /** `force`: run again after data was replaced in this session (a restored backup may be an older shape). */
 export function migrateStorage(force = false) {
-  if (!isBrowser() || (migrated && !force)) return
+  // Never on the shared database: its schema migrations are SQL (supabase/migrations), never browser code.
+  if (!isBrowser() || requestScope() || (migrated && !force)) return
   migrated = true
   const ls = window.localStorage
   const legacy = `${STORAGE_PREFIX}diesel_entries`
@@ -277,7 +319,7 @@ export function migrateStorage(force = false) {
     }
   }
   if (raw && (ls.getItem(VEHICLE_TYPES_KEY) === null || "vehicleTypes" in JSON.parse(raw) || "dieselVendors" in JSON.parse(raw))) {
-    cache.delete(SETTINGS_KEY)
+    cacheOf().delete(SETTINGS_KEY)
     const s = readSettings()
     if (s) writeSettings(s)
   }
@@ -412,7 +454,7 @@ const systemEvent = (input: Parameters<typeof buildEvent>[0], at: string) =>
   buildEvent(input, { kind: "SYSTEM", userId: null, name: null, role: null }, `aud_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`, at)
 
 export function readMeta(): StorageMeta | null {
-  if (!isBrowser()) return null
+  if (!isBrowser() || requestScope()) return null
   const raw = window.localStorage.getItem(META_KEY)
   return raw ? (JSON.parse(raw) as StorageMeta) : null
 }
@@ -429,16 +471,17 @@ const keptByReset = (k: string) => KEPT_KEYS.has(k) || k.startsWith(`${STORAGE_P
 
 /** Removes every data key this app owns — never the audit trail or the session. */
 export function clearAll() {
+  if (requestScope()) throw new Error("The shared database is never cleared or reset from the application.")
   if (!isBrowser()) return
   Object.keys(window.localStorage)
     .filter((k) => k.startsWith(STORAGE_PREFIX) && !keptByReset(k))
     .forEach(removeItem)
-  for (const k of [...cache.keys()]) if (!keptByReset(k)) cache.delete(k)
+  for (const k of [...browserCache.keys()]) if (!keptByReset(k)) browserCache.delete(k)
 }
 
 /** Approximate bytes used by this app (UTF-16 → 2 bytes per char). */
 export function storageUsage() {
-  if (!isBrowser()) return 0
+  if (!isBrowser() || requestScope()) return 0
   return Object.keys(window.localStorage)
     .filter((k) => k.startsWith(STORAGE_PREFIX))
     .reduce((s, k) => s + (window.localStorage.getItem(k)?.length ?? 0) * 2, 0)
@@ -449,10 +492,10 @@ export function subscribeExternal(cb: (name: string) => void) {
   if (!isBrowser()) return () => {}
   const handler = (e: StorageEvent) => {
     if (!e.key || !e.key.startsWith(STORAGE_PREFIX)) return
-    cache.delete(e.key)
+    cacheOf().delete(e.key)
     const name = e.key.slice(STORAGE_PREFIX.length)
     if (name === "vehicleTypes") {
-      cache.delete(SETTINGS_KEY)
+      cacheOf().delete(SETTINGS_KEY)
       return cb("settings")
     }
     cb((Object.keys(STORAGE_NAME) as CollectionKey[]).find((k) => STORAGE_NAME[k] === name) ?? name)

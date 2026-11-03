@@ -92,7 +92,7 @@ export function AddAdBlueDialog({
     setErrors(errs)
     if (Object.keys(errs).length) return
     await save.mutateAsync({
-      id: entry?.id,
+      id: entry?.id, version: entry?.updatedAt,
       data: {
         vehicleId: vehicle.id,
         customerId: entry ? entry.customerId : (customer?.id ?? null),

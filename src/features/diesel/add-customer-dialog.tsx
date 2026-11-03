@@ -72,7 +72,7 @@ export function AddCustomerDialog({ open, onOpenChange, customer }: { open: bool
 
     const details = { name, shortName, code, logoDataUrl: logo, city: f.city.trim(), contactName: f.contactName.trim(), phone: f.phone.trim(), notes: f.notes.trim() }
     if (customer) {
-      await update.mutateAsync({ id: customer.id, patch: details })
+      await update.mutateAsync({ id: customer.id, version: customer.updatedAt, patch: details })
       toast.success(`${shortName} updated`)
       close()
       return

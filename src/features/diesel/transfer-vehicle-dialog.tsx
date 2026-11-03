@@ -31,7 +31,7 @@ export function TransferVehicleDialog({ vehicle, onOpenChange }: { vehicle: Vehi
     setError(null)
     if (!to) return setError("Choose the new customer")
     if (!date || date > today || (minDate && date < minDate)) return setError(minDate ? `Pick a date from ${formatDate(minDate)} to today` : "Pick a date up to today")
-    await transfer.mutateAsync({ id: vehicle.id, customerId: to, effectiveDate: date })
+    await transfer.mutateAsync({ id: vehicle.id, version: vehicle.updatedAt, customerId: to, effectiveDate: date })
     toast.success(`${vehicle.regNo} transferred to ${names.get(to)} from ${formatDate(date)}`)
     onOpenChange(false)
   }
@@ -64,7 +64,7 @@ export function TransferVehicleDialog({ vehicle, onOpenChange }: { vehicle: Vehi
               .map((c) => ({ value: c.id, label: c.shortName || c.name }))}
           />
         </Field>
-        <Field label="Effective date" required error={error && to ? error : undefined} hint="First day the vehicle works for the new customer">
+        <Field label={current ? "Effective date" : "Assigned since"} required error={error && to ? error : undefined} hint={current ? "First day the vehicle works for the new customer" : "The day it started working for this customer (may be back-dated at go-live)"}>
           <Input type="date" value={date} min={minDate} max={today} onChange={(e) => setDate(e.target.value)} />
         </Field>
       </div>

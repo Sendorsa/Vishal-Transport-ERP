@@ -7,7 +7,8 @@
  * Company scope stays a per-browser preference.
  */
 import { createContext, useCallback, useContext, useSyncExternalStore } from "react"
-import type { AuditActor, CompanyScope, LegacyRole, Role } from "./types"
+import type { CompanyScope, Role } from "./types"
+import { currentActor, currentRole, readStoredRole, setVerifiedSession } from "./identity"
 import { can, type Action, type Resource } from "./permissions"
 import { monthKey, msUntilIndiaMidnight, todayISO } from "./format"
 
@@ -38,9 +39,7 @@ function read<T extends string>(key: string, allowed: readonly T[], fallback: T)
   }
 }
 
-const ROLES = ["OWNER", "DEV", "EMPLOYEE"] as const
 const SCOPES = ["GROUP", "VT", "VTHPL"] as const
-const LEGACY: readonly LegacyRole[] = ["ACCOUNTANT", "OPS_MANAGER"]
 
 /** The signed-in account, verified on the server for this page load (null on /login and in the offline checks). */
 export interface VerifiedSession {
@@ -51,45 +50,15 @@ const SessionContext = createContext<VerifiedSession | null>(null)
 export const SessionProvider = SessionContext.Provider
 export const useSession = () => useContext(SessionContext)
 
-// The verified role for code outside React (the API's currentRole). Browser only: on the server, module state
-// would be shared between requests.
-let verifiedRole: Role | null = null
-export function setVerifiedRole(role: Role | null) {
-  if (typeof window !== "undefined") verifiedRole = role
-}
-
-/**
- * The stored session role. A removed role (Accountant / Operations Manager, 31 Oct 2026) reads as Employee — never
- * the unknown-role fallback to Owner, which would promote it. The stored value itself is left as it is.
- */
-function readRole(): Role {
-  if (verifiedRole) return verifiedRole
-  try {
-    if (LEGACY.includes(window.localStorage.getItem(ROLE_KEY) as LegacyRole)) return "EMPLOYEE"
-  } catch {
-    /* storage unavailable */
-  }
-  return read<Role>(ROLE_KEY, ROLES, "OWNER")
-}
-
-/** Current role outside React (the API's "who is calling"). Becomes the session's role with real auth. */
-export function currentRole(): Role {
-  return typeof window === "undefined" ? "OWNER" : readRole()
-}
-
-/**
- * Who is acting, for the audit trail. The prototype has no login, so there is no user id or name —
- * only the mock-session role. They stay null rather than being invented; real auth fills them here.
- */
-export function currentActor(): AuditActor {
-  return { kind: "SESSION", userId: null, name: null, role: currentRole() }
-}
+/** Kept for existing callers: the identity of API calls lives in src/lib/identity.ts. */
+export { currentActor, currentRole }
+export const setVerifiedRole = (role: Role | null, email: string | null = null) => setVerifiedSession(role ? { role, email } : null)
 
 export function useRole(): [Role, (r: Role) => void] {
   const session = useContext(SessionContext)
   const stored = useSyncExternalStore(
     subscribe,
-    readRole,
+    readStoredRole,
     () => "OWNER" as Role
   )
   // A signed-in account's role can't be switched from the browser.

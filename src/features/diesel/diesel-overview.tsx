@@ -278,7 +278,7 @@ export function DieselOverview() {
               onRestore={
                 can("customers", "delete")
                   ? async (cu) => {
-                      await archive.mutateAsync({ id: cu.id, restore: true })
+                      await archive.mutateAsync({ id: cu.id, version: cu.updatedAt, restore: true })
                       toast.success(`${cu.shortName} restored`)
                     }
                   : undefined
@@ -300,7 +300,7 @@ export function DieselOverview() {
           destructive
           pending={archive.isPending}
           onSubmit={async () => {
-            await archive.mutateAsync({ id: archiving.id })
+            await archive.mutateAsync({ id: archiving.id, version: archiving.updatedAt })
             toast.success(`${archiving.shortName} archived — history kept`)
             setArchiving(null)
           }}

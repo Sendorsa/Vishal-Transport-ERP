@@ -54,11 +54,11 @@ export const NAV_ITEMS: NavItem[] = [
 ]
 
 /**
- * Sidebar visibility only — not a permission. Dev sees every item its role can use; every other role
- * sees only the Fuel section, and the Owner also the Audit Log (System), where the deletion badge is.
- * Hidden modules keep their routes and permissions (src/lib/permissions.ts).
+ * Sidebar visibility only — not a permission. Dev and the Owner see every item their role can use (owner's decision,
+ * 3 Nov 2026: the Owner runs every business module); the Employee sees only the Fuel section. Hidden modules keep
+ * their routes and permissions (src/lib/permissions.ts).
  */
-export const showInNav = (role: Role, item: NavItem) => role === "DEV" || item.group === "Fuel" || (role === "OWNER" && item.resource === "audit")
+export const showInNav = (role: Role, item: NavItem) => role !== "EMPLOYEE" || item.group === "Fuel"
 
 export function isActive(pathname: string, href: string) {
   return href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`)

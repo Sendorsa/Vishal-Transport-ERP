@@ -184,8 +184,9 @@ assert.equal(canEditMonth("OWNER", "2026-09", "2026-10-06", []), true)
 const unlockedSep = [{ month: "2026-09", state: "OPEN", changedBy: "OWNER" }] as never
 assert.equal(canEditMonth("EMPLOYEE", "2026-09", "2026-10-06", unlockedSep), true) // Owner unlocked September
 const lockedOct = [{ month: "2026-10", state: "LOCKED", changedBy: "OWNER" }] as never
-assert.equal(canEditMonth("DEV", "2026-10", "2026-10-06", lockedOct), false) // Owner locked October early — Dev follows the lock
-assert.equal(canEditMonth("DEV", "2026-09", "2026-10-06", []), false) // Dev is a non-Owner for month locks
+assert.equal(canEditMonth("EMPLOYEE", "2026-10", "2026-10-06", lockedOct), false) // Owner locked October early — the Employee follows the lock
+assert.equal(canEditMonth("DEV", "2026-10", "2026-10-06", lockedOct), true) // Dev has the Owner's month-lock authority (owner, 3 Nov 2026)
+assert.equal(canEditMonth("DEV", "2026-09", "2026-10-06", []), true)
 assert.equal(canEditMonth("OWNER", "2026-10", "2026-10-06", lockedOct), true)
 
 // Fuel station report: derived from transactions; fuel type from the vehicle; AdBlue separate.

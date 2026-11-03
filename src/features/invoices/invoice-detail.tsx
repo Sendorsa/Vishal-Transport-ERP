@@ -73,7 +73,7 @@ export function InvoiceDetail({ id }: { id: string }) {
                 variant="outline"
                 disabled={action.isPending}
                 onClick={async () => {
-                  await action.mutateAsync({ id: inv.id, action: "issue" })
+                  await action.mutateAsync({ id: inv.id, version: inv.updatedAt, action: "issue" })
                   toast.success("Invoice issued")
                 }}
               >
@@ -264,7 +264,7 @@ export function InvoiceDetail({ id }: { id: string }) {
         destructive
         pending={action.isPending}
         onSubmit={async () => {
-          await action.mutateAsync({ id: inv.id, action: "cancel", reason: cancelReason })
+          await action.mutateAsync({ id: inv.id, version: inv.updatedAt, action: "cancel", reason: cancelReason })
           toast.success("Invoice cancelled")
           setConfirmCancel(false)
         }}

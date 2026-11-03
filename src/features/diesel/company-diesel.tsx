@@ -120,7 +120,7 @@ export function CompanyDiesel({ slug }: { slug: string }) {
     try {
       const logoDataUrl = await readLogoFile(file)
       await updateCustomer.mutateAsync({
-        id: group.customer.id,
+        id: group.customer.id, version: group.customer.updatedAt,
         patch: { logoDataUrl },
       })
       toast.success("Logo updated")
@@ -303,7 +303,7 @@ export function CompanyDiesel({ slug }: { slug: string }) {
                               <DropdownMenuItem
                                 onSelect={async () => {
                                   await archiveVehicle.mutateAsync({
-                                    id: v.vehicle.id,
+                                    id: v.vehicle.id, version: v.vehicle.updatedAt,
                                     restore: true,
                                   })
                                   toast.success(`${v.vehicle.regNo} restored`)
@@ -367,7 +367,7 @@ export function CompanyDiesel({ slug }: { slug: string }) {
           destructive
           pending={archiveVehicle.isPending}
           onSubmit={async () => {
-            await archiveVehicle.mutateAsync({ id: archivingVehicle.id })
+            await archiveVehicle.mutateAsync({ id: archivingVehicle.id, version: archivingVehicle.updatedAt })
             toast.success(`${archivingVehicle.regNo} archived — history kept`)
             setArchivingVehicle(null)
           }}

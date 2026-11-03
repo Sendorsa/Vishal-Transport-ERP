@@ -189,7 +189,7 @@ export function FuelStations() {
                         {v.status === "ARCHIVED" ? (
                           <DropdownMenuItem
                             onSelect={async () => {
-                              await archive.mutateAsync({ id: v.id, restore: true })
+                              await archive.mutateAsync({ id: v.id, version: v.updatedAt, restore: true })
                               toast.success(`${v.name} restored`)
                             }}
                           >
@@ -310,7 +310,7 @@ export function FuelStations() {
           destructive
           pending={archive.isPending}
           onSubmit={async () => {
-            await archive.mutateAsync({ id: archiving.id })
+            await archive.mutateAsync({ id: archiving.id, version: archiving.updatedAt })
             toast.success(`${archiving.name} archived — history kept`)
             setArchiving(null)
           }}
@@ -347,7 +347,7 @@ function StationDialog({ station, onOpenChange }: { station?: FuelStation; onOpe
     setPending(true)
     try {
       const details = { name: f.name, location: f.location, creditDays: Number(f.creditDays) || 0 }
-      if (station) await update.mutateAsync({ id: station.id, patch: details })
+      if (station) await update.mutateAsync({ id: station.id, version: station.updatedAt, patch: details })
       else await create(f.name, details)
       toast.success(`${f.name.trim()} ${station ? "updated" : "added — also available in Diesel entries"}`)
       onOpenChange(false)
@@ -670,7 +670,7 @@ export function FuelStationDetail({ id }: { id: string }) {
           impact="The station's Payments Made, closing balance and every later month's opening balance go back up by this amount; it also leaves Payments."
           pending={del.isPending}
           onConfirm={async (reason) => {
-            await del.mutateAsync({ id: deleting.id, reason })
+            await del.mutateAsync({ id: deleting.id, version: deleting.updatedAt, reason })
             toast.success(`${deleting.paymentNo} deleted`)
           }}
           onClose={() => setDeleting(null)}
@@ -700,7 +700,7 @@ function OpeningBalanceDialog({ station, onOpenChange }: { station: FuelStation;
     setError(null)
     if (!f.date) return setError("Enter the date the balance applies on")
     if (!f.amount.trim() || !(Number(f.amount) >= 0)) return setError("Enter the balance (0 removes it)")
-    await save.mutateAsync({ id: station.id, amount, date: f.date })
+    await save.mutateAsync({ id: station.id, version: station.updatedAt, amount, date: f.date })
     toast.success(amount ? `Opening balance saved — ${formatINR(Math.abs(amount))} ${amount > 0 ? "Debit (we owe)" : "Credit"} as of ${formatDate(f.date)}` : "Opening balance removed")
     onOpenChange(false)
   }
@@ -754,7 +754,7 @@ function PaymentDialog({ station, payment, forMonth, onOpenChange }: { station: 
     if (!isTds && !f.forMonth) return setError("Choose the month this payment is against")
     if (!isTds && f.forMonth > f.date.slice(0, 7)) return setError("The month paid against can't be after the payment date")
     const forMonth = isTds ? undefined : f.forMonth
-    if (payment) await update.mutateAsync({ id: payment.id, patch: { paymentDate: f.date, amount, paymentMode: f.mode, notes: f.notes.trim(), forMonth }, reason })
+    if (payment) await update.mutateAsync({ id: payment.id, version: payment.updatedAt, patch: { paymentDate: f.date, amount, paymentMode: f.mode, notes: f.notes.trim(), forMonth }, reason })
     else await add.mutateAsync({ stationId: station.id, paymentDate: f.date, amount, paymentMode: f.mode, notes: f.notes.trim(), companyCode: f.company, forMonth })
     toast.success(payment ? `${payment.paymentNo} updated` : `Payment of ${formatINR(amount)} to ${station.name} recorded`)
     onOpenChange(false)

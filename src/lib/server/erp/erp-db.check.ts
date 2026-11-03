@@ -1,0 +1,291 @@
+/**
+ * Integration check of the shared database backend:  npm run check:erp-db
+ * The real `api.*` runs through the real server engine (src/lib/server/erp/engine.ts) on a real PostgreSQL (PGlite)
+ * with every migration in supabase/migrations/, as three signed-in accounts (DEV, OWNER, EMPLOYEE) — RLS, triggers and
+ * deferred checks all apply. Never touches a real project. Single connection: genuinely simultaneous sessions (row /
+ * advisory locks) are designed, not exercised here; stale screens and sequential races are.
+ */
+import assert from "node:assert/strict"
+import { readdirSync, readFileSync } from "node:fs"
+import { PGlite } from "@electric-sql/pglite"
+import { btree_gist } from "@electric-sql/pglite/contrib/btree_gist"
+import type { RequestIdentity } from "@/lib/request-scope"
+import type { Customer } from "@/lib/types"
+
+const U = { DEV: "00000000-0000-0000-0000-0000000000d1", OWNER: "00000000-0000-0000-0000-0000000000d2", EMP: "00000000-0000-0000-0000-0000000000d3" }
+const P = { DEV: "10000000-0000-0000-0000-0000000000d1", OWNER: "10000000-0000-0000-0000-0000000000d2", EMP: "10000000-0000-0000-0000-0000000000d3" }
+
+async function main() {
+  const { runInDatabase, changesSince } = await import("./engine")
+  const { api, ConflictError } = await import("@/lib/api")
+  const { withVersions } = await import("@/lib/versions")
+  const { currentRole } = await import("@/lib/identity")
+  const { todayISO, round2 } = await import("@/lib/format")
+  const { stationLedger, ledgerFor, openingOf } = await import("@/domain/station-ledger")
+  const { loadsAsStationPurchases, valueTankers } = await import("@/domain/tanker")
+  const { valueInventory, stockDraws, purchasedIn } = await import("@/domain/adblue-inventory")
+  const { settlementIndex, invoiceOutstanding, revenueInRange } = await import("@/domain/analytics")
+  const { buildDieselIndex, fillRow } = await import("@/domain/diesel")
+
+  /* ---------------------------------------------------------------- a real PostgreSQL with every migration */
+  const db = new PGlite({ extensions: { btree_gist } })
+  await db.exec(`
+    create role anon nologin; create role authenticated nologin; create role service_role nologin bypassrls;
+    create schema auth;
+    create table auth.users (id uuid primary key, email text);
+    create table auth.identities (id uuid primary key default gen_random_uuid(), user_id uuid references auth.users (id), provider text, identity_data jsonb, created_at timestamptz default now());
+    create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+    grant usage on schema public, auth to anon, authenticated, service_role;
+    grant execute on function auth.uid() to anon, authenticated;
+    alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+  `)
+  const dir = new URL("../../../../supabase/migrations/", import.meta.url)
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) await db.exec(readFileSync(new URL(f, dir), "utf8"))
+  await db.exec(`
+    insert into auth.users values ('${U.DEV}', 'dev@example.com'), ('${U.OWNER}', 'owner@example.com'), ('${U.EMP}', 'staff@example.com');
+    insert into public.profiles (id, user_id, email, full_name, role, status, activated_at) values
+      ('${P.DEV}', '${U.DEV}', 'dev@example.com', 'Dev Person', 'DEV', 'ACTIVE', now()),
+      ('${P.OWNER}', '${U.OWNER}', 'owner@example.com', 'Owner Person', 'OWNER', 'ACTIVE', now()),
+      ('${P.EMP}', '${U.EMP}', 'staff@example.com', null, 'EMPLOYEE', 'ACTIVE', now());
+    insert into audit.events (actor_kind, action, module, record_type, record_id) values
+      ('SYSTEM', 'CREATED', 'Accounts', 'User account', '${P.DEV}'), ('SYSTEM', 'CREATED', 'Accounts', 'User account', '${P.OWNER}'), ('SYSTEM', 'CREATED', 'Accounts', 'User account', '${P.EMP}');
+  `)
+  const transact = <T,>(fn: (sql: (t: string, p?: unknown[]) => Promise<never[]>) => Promise<T>) => db.transaction(async (tx) => fn(async (text, params) => (await tx.query(text, params ?? [])).rows as never[]))
+  const who = (k: keyof typeof U, role: RequestIdentity["role"], name: string | null): RequestIdentity => ({ profileId: P[k], userId: U[k], role, email: `${k.toLowerCase()}@example.com`, name })
+  const DEV = who("DEV", "DEV", "Dev Person")
+  const OWNER = who("OWNER", "OWNER", "Owner Person")
+  const EMP = who("EMP", "EMPLOYEE", null)
+  /** One API call as a signed-in account, in its own transaction (what the /api/erp route does per request). */
+  const as = <T,>(id: RequestIdentity, call: () => Promise<T>, write = true, expected: Record<string, string> = {}) => runInDatabase(transact as never, id, write, expected, call)
+  const read = <T,>(id: RequestIdentity, call: () => Promise<T>) => as(id, call, false)
+  const sqlAs = async (id: RequestIdentity, text: string) => {
+    await db.exec("begin")
+    try {
+      await db.exec(`set local role authenticated; select set_config('request.jwt.claim.sub', '${id.userId}', true);`)
+      await db.exec(text)
+      await db.exec("commit")
+    } catch (e) {
+      await db.exec("rollback").catch(() => undefined)
+      throw e
+    }
+  }
+
+  const today = todayISO()
+  const B = "2026-10-31" // the go-live baseline (31 Oct 2026)
+  assert.ok(today >= "2026-11-01", "this check assumes the clock is in November 2026 or later (October locked)")
+
+  /* ---------------------------------------------------------------- 0. no verified account on the server = no identity (never Owner) */
+  assert.throws(() => currentRole(), /Not signed in/)
+
+  /* ---------------------------------------------------------------- 1. go-live setup by DEV appears for OWNER and EMPLOYEE */
+  assert.equal(await as(DEV, () => api.admin.setupTankerMasters()), 6) // 3 tanker vehicles + 3 tankers
+  assert.equal(await as(DEV, () => api.admin.setupTankerMasters()), 0) // idempotent
+  const tk = await read(OWNER, () => api.tankers.list())
+  assert.deepEqual(tk.map((t) => `${t.id} ${t.name} ${t.regNo} ${t.vehicleId}`).sort(), ["tnk_ka51af1429 Mini KA51AF1429 veh_ka51af1429", "tnk_ka53c0538 Office KA53C0538 veh_ka53c0538", "tnk_tn70ax9480 JIO TN70AX9480 veh_tn70ax9480"], "the confirmed tanker ids, linked to their vehicles")
+  const tv = await read(EMP, () => api.vehicles.list())
+  assert.deepEqual(tv.map((v) => [v.regNo, v.make, v.model, v.typeCode]).sort(), [["KA51AF1429", "", "", ""], ["KA53C0538", "", "", ""], ["TN70AX9480", "", "", ""]], "no invented make / model / type")
+  const JIO = tk.find((t) => t.name === "JIO")!.id
+
+  /* ---------------------------------------------------------------- 2. masters by OWNER, visible to EMPLOYEE; Assigned since */
+  const station = await as(OWNER, () => api.fuelStations.create({ name: "Raghuveer Fuel Station", location: "Krishnagiri" }))
+  const minda: Customer = await as(OWNER, () =>
+    api.customers.create({ code: "MINDA", shortName: "Minda", name: "Minda Industries", legalName: "Minda Industries Ltd", companyCode: "VT", businessUnit: "STAFF_BUS", gstin: "33AAACM1234A1Z5", state: "Tamil Nadu", stateCode: "33", city: "Hosur", contactName: "", phone: "", email: "", creditDays: 30, pricing: { model: "PER_TRIP", rate: 1500, includedKm: 0, extraKmRate: 0, driverBata: 0, routes: [{ route: "Hosur–Bidadi", distanceKm: 80, rate: 2000 }] }, status: "ACTIVE", notes: "" })
+  )
+  const tepl = await as(OWNER, () => api.customers.create({ ...minda, code: "TEPL", shortName: "TEPL", name: "TEPL" } as never))
+  const bus = await as(OWNER, () =>
+    api.vehicles.create({ regNo: "TN70AK1869", companyCode: "VT", typeCode: "BUS_55", make: "", model: "", year: 0, seats: 55, fuelType: "DIESEL", mileageKmpl: 4.3, ownership: "OWNED", ownerName: null, status: "ACTIVE", odometerKm: 0, assignedCustomerId: minda.id, defaultDriverId: null, insurance: { provider: "", policyNo: "", validTill: "", premium: 0 }, roadTax: { validTill: "", amount: 0, period: "ANNUAL" }, fitnessValidTill: "", permitValidTill: "", emiAmount: 0, notes: "", assignedSince: "2026-10-01" })
+  )
+  const empCustomers = await read(EMP, () => api.customers.list())
+  assert.equal(empCustomers.find((c) => c.id === minda.id)!.pricing.rate, 1500, "an Employee sees pricing it needs to price trips")
+  assert.equal((await read(OWNER, () => api.customers.list())).find((c) => c.id === minda.id)!.pricing.routes[0].rate, 2000)
+  const asg = (await read(EMP, () => api.assignments.list())).filter((a) => a.vehicleId === bus.id)
+  assert.deepEqual(asg.map((a) => [a.customerId, a.startDate, a.endDate]), [[minda.id, "2026-10-01", null]], "Assigned since back-dates the first assignment")
+  await assert.rejects(as(EMP, () => api.customers.create({ ...minda, code: "X" } as never)), /can't create customer/)
+  await assert.rejects(as(OWNER, () => api.vehicles.create({ ...bus, regNo: "TN70ZZ0001", assignedSince: "2099-01-01" } as never)), /future/)
+
+  /* ---------------------------------------------------------------- 3. openings at the baseline (Owner-level) */
+  await assert.rejects(as(EMP, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })), /Only the Owner or Dev/)
+  await as(OWNER, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })) // we owe ₹50,000 at 31 Oct
+  await as(DEV, () => api.tankerLoads.createOpening({ tankerId: JIO, date: B, litres: 1000, value: 95000, notes: "Dip at go-live" }))
+  await as(OWNER, () => api.adbluePurchases.createOpening({ date: B, litres: 100, value: 9000, notes: "" }))
+  await as(OWNER, () => api.vehicles.setOpeningOdometer(bus.id, { km: 120000, date: "2026-10-28" }))
+  await assert.rejects(as(EMP, () => api.vehicles.setOpeningOdometer(bus.id, { km: 1, date: B })), /Only the Owner or Dev/)
+  const oldInv = await as(OWNER, () => api.invoices.createOpening({ customerId: minda.id, invoiceNo: "VT/2026-27/045", date: "2026-10-05", dueDate: "2026-11-04", outstanding: 118000, notes: "Unpaid at go-live" }))
+  assert.deepEqual([oldInv.opening, oldInv.status, oldInv.total, oldInv.lines.length], [true, "ISSUED", 118000, 0])
+
+  /* ---------------------------------------------------------------- 4. EMPLOYEE fills; OWNER sees them; KM Run from the opening odometer */
+  const fill = (litres: number, odometerKm: number, extra: object = {}) => ({ date: today, vehicleId: bus.id, customerId: minda.id, vendorId: station.id, litres, rate: 94.8, odometerKm, billNo: "", paymentMode: "CREDIT" as const, ...extra })
+  const f1 = await as(EMP, () => api.diesel.create(fill(100, 120400)))
+  assert.equal(f1.amount, 9480)
+  const f2 = await as(EMP, () => api.diesel.create(fill(37.64, 120500, { paymentMode: "CASH" })))
+  const ownerFills = await read(OWNER, () => api.diesel.list())
+  assert.deepEqual(ownerFills.map((e) => e.amount).sort(), [3568.27, 9480], "exact paise from the database (37.64 × 94.80 = 3,568.272)")
+  const ds = { vehicles: await read(OWNER, () => api.vehicles.list()), drivers: [], diesel: ownerFills, trips: [], customers: await read(OWNER, () => api.customers.list()), assignments: await read(OWNER, () => api.assignments.list()) } as never
+  const idx = buildDieselIndex(ds)
+  assert.equal(fillRow(idx, ownerFills.find((e) => e.id === f1.id)!).kmSince, 400, "first fill after go-live: KM Run from the opening odometer")
+  // A tanker fill from JIO: stock falls, never a station purchase.
+  const tf = await as(EMP, () => api.diesel.create(fill(300, 120700, { vendorId: "dv_tanker", tankerId: JIO, rate: 95 })))
+  await assert.rejects(as(EMP, () => api.diesel.create(fill(800, 120900, { vendorId: "dv_tanker", tankerId: JIO, rate: 95 }))), /Insufficient tanker inventory in JIO. Available: 700 L/)
+  // …and the database refuses it even if the API check were bypassed (deferred stock check at COMMIT).
+  await assert.rejects(sqlAs(EMP, `insert into fuel.diesel_entries (company_code, date, vehicle_id, station_id, tanker_id, litres, rate, odometer_km) values ('VT', '${today}', '${bus.id}', 'dv_tanker', '${JIO}', 800, 95, 120950); insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) select 'SESSION', '${P.EMP}', 'EMPLOYEE', 'CREATED', 'Diesel', 'Diesel entry', id from fuel.diesel_entries where litres = 800;`), /Insufficient tanker inventory/)
+  const load = await as(OWNER, () => api.tankerLoads.create({ tankerId: JIO, date: today, stationId: station.id, invoiceNo: "L1", litres: 500, rate: 95.1, notes: "" }))
+  const loads = await read(OWNER, () => api.tankerLoads.list())
+  const fills = await read(OWNER, () => api.diesel.list())
+  const v = valueTankers({ loads, fills, external: [], transfers: [], adjustments: [] })
+  assert.equal(v.stock.get(JIO)!.litres, 1200, "JIO: 1,000 opening + 500 loaded − 300 filled")
+
+  /* ---------------------------------------------------------------- 5. station ledger: Opening + Purchased − Paid = Closing; partial payment */
+  await assert.rejects(as(EMP, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 1000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" })), /can't create payment/)
+  const pay = await as(OWNER, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 20000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }))
+  const st = (await read(OWNER, () => api.fuelStations.list())).find((s) => s.id === station.id)!
+  const purchases = [...fills, ...loadsAsStationPurchases(loads)]
+  const led = stationLedger(station.id, purchases, await read(OWNER, () => api.payments.list()), today.slice(0, 7), openingOf(st))
+  const nov = ledgerFor(led, [today.slice(0, 7)])
+  const bought = round2(9480 + 3568.27 + round2(500 * 95.1)) // pump fills + the tanker load; never the tanker fill
+  const paid = round2(20000 + 3568.27) // the voucher + cash at pump
+  assert.deepEqual([nov.opening, nov.purchased, nov.paid, nov.closing], [50000, bought, paid, round2(50000 + bought - paid)])
+  assert.equal(ledgerFor(led, ["2026-10"]).closing, 50000, "October closing = the opening balance, carried into November")
+  // The payment never touched a fuel entry.
+  assert.deepEqual((await read(OWNER, () => api.diesel.list())).map((e) => [e.id, e.updatedAt]).sort(), fills.map((e) => [e.id, e.updatedAt]).sort())
+
+  /* ---------------------------------------------------------------- 6. AdBlue: opening + bulk, weighted-average draw */
+  await as(OWNER, () => api.adbluePurchases.create({ date: today, vendorName: "Bulk Vendor", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" }))
+  const draw = await as(EMP, () => api.adblue.create({ date: today, vehicleId: bus.id, customerId: minda.id, closingKm: 120600, quantityLitres: 15, invoiceNo: "", notes: "", source: "STOCK" }))
+  const ap = await read(OWNER, () => api.adbluePurchases.list())
+  const inv = valueInventory(ap, stockDraws(await read(OWNER, () => api.adblue.list())))
+  assert.deepEqual([inv.stockLitres, inv.stockValue, inv.costOf.get(draw.id)], [285, 17100, 900])
+  assert.deepEqual([purchasedIn(ap, (p) => p.date.startsWith("2026-10")).cost, purchasedIn(ap, () => true).cost], [0, 9000], "opening stock is never AdBlue Purchased")
+
+  /* ---------------------------------------------------------------- 7. trips → invoice → receipts (allocations) */
+  const trip = (n: number) => ({ date: today, customerId: minda.id, vehicleId: bus.id, driverId: null, route: "Hosur–Bidadi", startKm: 1000 * n, endKm: 1000 * n + 80, tollParking: 0, status: "COMPLETED" as const, notes: "" })
+  const t1 = await as(EMP, () => api.trips.create(trip(1)))
+  const t2 = await as(EMP, () => api.trips.create(trip(2)))
+  assert.equal(t1.revenue, 2000, "priced from the route rate on the server")
+  const invoice = await as(OWNER, () => api.invoices.create({ customerId: minda.id, date: today, periodFrom: today, periodTo: today, tripIds: [t1.id, t2.id], extraLines: [], taxRate: 18, notes: "", status: "ISSUED" }))
+  assert.deepEqual([invoice.subtotal, round2(invoice.cgst + invoice.sgst + invoice.igst), invoice.total], [4000, 720, 4720])
+  const ownerTrips = await read(OWNER, () => api.trips.list())
+  assert.ok(ownerTrips.filter((t) => t.invoiceId === invoice.id).length === 2, "trips are locked to the invoice")
+  await assert.rejects(as(EMP, () => api.trips.update(t1.id, trip(1))), /Invoiced trips are locked/)
+  assert.equal((await read(EMP, () => api.invoices.list())).length, 0, "an Employee reads no invoices (RLS)")
+  const receipt = (amount: number, invoiceId: string, alloc: number) => ({ companyCode: "VT" as const, direction: "IN" as const, date: today, partyType: "CUSTOMER" as const, customerId: minda.id, vendorId: null, vehicleId: null, partyName: "Minda", categoryCode: null, amount, tdsAmount: 0, mode: "NEFT" as const, reference: "", allocations: [{ invoiceId, amount: alloc }], notes: "" })
+  await as(OWNER, () => api.payments.create(receipt(2000, invoice.id, 2000))) // partial
+  await assert.rejects(as(OWNER, () => api.payments.create(receipt(3000, invoice.id, 3000))), /exceeds outstanding/)
+  await as(DEV, () => api.payments.create(receipt(100000, oldInv.id, 100000))) // the opening invoice, part paid
+  const allPay = await read(OWNER, () => api.payments.list())
+  const settled = settlementIndex(allPay)
+  assert.deepEqual([invoiceOutstanding(invoice, settled.get(invoice.id) ?? 0), invoiceOutstanding(oldInv, settled.get(oldInv.id) ?? 0)], [2720, 18000])
+  const numbers = allPay.map((p) => p.paymentNo)
+  assert.equal(new Set(numbers).size, numbers.length, "voucher numbers never collide")
+  assert.equal(revenueInRange({ trips: ownerTrips } as never, { from: "2026-10-01", to: today }), 4000, "revenue comes from trips — the opening invoice is never revenue")
+  assert.equal((await read(EMP, () => api.payments.list())).some((p) => p.direction === "IN"), false, "an Employee never sees receipts")
+
+  /* ---------------------------------------------------------------- 8. optimistic concurrency: a stale screen never overwrites */
+  const seen = (await read(OWNER, () => api.diesel.list())).find((e) => e.id === f1.id)! // OWNER opens the edit dialog
+  await as(EMP, () => withVersions({ [f1.id]: seen.updatedAt }, () => api.diesel.update(f1.id, { ...fill(101, 120400), vendorId: station.id }, "Employee correction")), true, { [f1.id]: seen.updatedAt })
+  const n0 = (await read(DEV, () => api.audit.list())).length
+  await assert.rejects(as(OWNER, () => api.diesel.update(f1.id, { ...fill(150, 120400), vendorId: station.id }), true, { [f1.id]: seen.updatedAt }), (e: unknown) => e instanceof ConflictError)
+  assert.equal((await read(OWNER, () => api.diesel.get(f1.id)))!.litres, 101, "the newer change is kept")
+  assert.equal((await read(DEV, () => api.audit.list())).length, n0, "a refused edit records nothing")
+  const fresh = (await read(OWNER, () => api.diesel.list())).find((e) => e.id === f1.id)!
+  await as(OWNER, () => api.diesel.update(f1.id, { ...fill(102, 120400), vendorId: station.id }, "Owner after reload"), true, { [f1.id]: fresh.updatedAt })
+  await assert.rejects(as(OWNER, () => api.diesel.remove(f1.id, "Stale delete"), true, { [f1.id]: fresh.updatedAt }), (e: unknown) => e instanceof ConflictError, "a stale delete is refused too")
+  // Two payments in a row (one write at a time): distinct, gap-free numbers.
+  const [pa, pb] = [await as(OWNER, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 1, paymentMode: "UPI", notes: "", companyCode: "VT", forMonth: "2026-11" })), await as(DEV, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 2, paymentMode: "UPI", notes: "", companyCode: "VT", forMonth: "2026-11" }))]
+  assert.notEqual(pa.paymentNo, pb.paymentNo)
+
+  /* ---------------------------------------------------------------- 9. month lock: Employee refused, Dev and Owner allowed; recorded as who did it */
+  const octFill = await as(OWNER, () => api.diesel.create({ ...fill(10, 119000), date: "2026-10-30" }))
+  await assert.rejects(as(EMP, () => api.diesel.update(octFill.id, { ...fill(11, 119000), date: "2026-10-30", vendorId: station.id })), /October 2026 is locked/)
+  await as(DEV, () => api.diesel.update(octFill.id, { ...fill(12, 119000), date: "2026-10-30", vendorId: station.id }, "Dev correction in a closed month"))
+  const lock = await as(DEV, () => api.monthLocks.set(today.slice(0, 7), "LOCKED"))
+  assert.equal(lock.changedBy, "DEV")
+  await assert.rejects(as(EMP, () => api.diesel.create(fill(5, 121000))), /is locked/)
+  await assert.rejects(as(EMP, () => api.monthLocks.set(today.slice(0, 7), "OPEN")), /Only the Owner or Dev/)
+  await as(OWNER, () => api.monthLocks.set(today.slice(0, 7), "OPEN"))
+
+  /* ---------------------------------------------------------------- 10. delete with reason; Dev restores; audit identity */
+  await assert.rejects(as(EMP, () => api.diesel.remove(f2.id, "Employee attempt")), /can't delete/)
+  await as(OWNER, () => api.diesel.remove(f2.id, "Entered twice"))
+  const log = await read(DEV, () => api.audit.list())
+  const del = log.find((e) => e.recordId === f2.id && e.action === "DELETED")!
+  assert.deepEqual([del.actor.userId, del.actor.name, del.actor.role, del.reason], [P.OWNER, "Owner Person", "OWNER", "Entered twice"])
+  assert.equal(await read(DEV, () => api.audit.unreviewedDeletions()), 1)
+  await as(DEV, () => api.audit.restoreDeleted(del.id, "Not a duplicate after all"))
+  assert.ok(await read(OWNER, () => api.diesel.get(f2.id)), "restored with its original id")
+  const after = await read(OWNER, () => api.audit.list())
+  const restored = after.find((e) => e.restoresEventId === del.id)!
+  assert.deepEqual([restored.actor.userId, restored.actor.role], [P.DEV, "DEV"])
+  await assert.rejects(as(DEV, () => api.audit.restoreDeleted(del.id, "Again")), /Already restored/)
+  const empEvent = after.find((e) => e.recordId === f1.id && e.action === "CREATED")!
+  assert.deepEqual([empEvent.actor.userId, empEvent.actor.role, empEvent.actor.name], [P.EMP, "EMPLOYEE", "emp@example.com"], "the Employee's own identity — never another user's")
+  // An Employee can't write an event in someone else's name, even straight to the database.
+  await assert.rejects(sqlAs(EMP, `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', '${P.OWNER}', 'OWNER', 'CREATED', 'Diesel', 'Diesel entry', 'x')`), /row-level security/)
+  await assert.rejects(read(EMP, () => api.audit.list()), /Only the Owner and Dev/)
+
+  /* ---------------------------------------------------------------- 11. transfer: entries after the effective date follow the new customer */
+  await as(OWNER, () => api.vehicles.transfer(bus.id, tepl.id, today, "Moved to TEPL"))
+  const newer = await as(EMP, () => api.diesel.create({ ...fill(20, 121500), customerId: tepl.id }))
+  const resolvedList = await read(OWNER, () => api.diesel.list())
+  assert.equal(resolvedList.find((e) => e.id === octFill.id)!.customerId, minda.id, "an October fill stays under Minda")
+  assert.equal(resolvedList.find((e) => e.id === newer.id)!.customerId, tepl.id)
+  await assert.rejects(as(EMP, () => api.diesel.create({ ...fill(20, 121600), customerId: minda.id })), /assigned to TEPL/)
+
+  /* ---------------------------------------------------------------- 12. 20-second polling cursor: what changed, per role */
+  const c0 = await changesSince(transact as never, EMP, null)
+  await as(OWNER, () => api.payments.create(receipt(10, oldInv.id, 10)))
+  await as(OWNER, () => api.diesel.create(fill(5, 122000, { customerId: tepl.id })))
+  const empSees = await changesSince(transact as never, EMP, c0.cursor)
+  assert.ok(empSees.modules.includes("Diesel"), "an Employee is told about new diesel entries")
+  assert.ok(!empSees.modules.includes("Payments"), "…never about receipts it can't see")
+  assert.ok((await changesSince(transact as never, OWNER, c0.cursor)).modules.includes("Payments"))
+
+  /* ---------------------------------------------------------------- 13. the shared database is never reset from the app */
+  for (const id of [DEV, OWNER]) {
+    await assert.rejects(as(id, () => api.admin.clearAllData()), /isn't available on the shared database/)
+    await assert.rejects(as(id, () => api.admin.resetDemoData()), /isn't available on the shared database/)
+  }
+  await assert.rejects(read(OWNER, () => api.admin.exportBackup()), /Only Dev/)
+  const backup = await read(DEV, () => api.admin.exportBackup())
+  assert.ok((backup.collections.diesel_entries ?? []).length >= 5 && backup.format === "vishal-erp-backup", "Dev's read-only export (the rollback path)")
+  void tf
+  void load
+  void pay
+
+  /* ---------------------------------------------------------------- 14. the go-live scripts: backup, then reset (supabase/scripts) */
+  await db.exec(`insert into auth.identities (user_id, provider, identity_data) values ('${U.DEV}', 'google', '{"email_verified": "true"}'), ('${U.OWNER}', 'google', '{}'), ('${U.EMP}', 'google', '{}')`)
+  const scripts = new URL("../../../../supabase/scripts/", import.meta.url)
+  const backupSql = readFileSync(new URL("02-backup-business-data.sql", scripts), "utf8")
+  const backupRes = await db.exec(backupSql)
+  const doc = (backupRes.at(-1)!.rows[0] as { backup: { row_counts: Record<string, number>; tables: Record<string, unknown[] | null> } }).backup
+  for (const [t, n] of Object.entries(doc.row_counts)) assert.equal((doc.tables[t] ?? []).length, n, `backup complete: ${t}`)
+  assert.ok(doc.row_counts["fuel.diesel_entries"] >= 5 && doc.row_counts["billing.invoices"] === 2 && doc.row_counts["core.customers"] === 2)
+  const count = async (t: string) => Number(((await db.query<{ n: number }>(`select count(*)::int as n from ${t}`)).rows[0]).n)
+  const before = { profiles: await count("public.profiles"), identities: await count("auth.identities"), users: await count("auth.users"), events: await count("audit.events"), reviews: await count("audit.reviews") }
+  const resetSql = readFileSync(new URL("03-reset-business-data.sql", scripts), "utf8")
+  const resetTx = resetSql.slice(resetSql.indexOf("\nbegin;") + 1, resetSql.indexOf("\ncommit;") + 8)
+  await assert.rejects(db.exec(resetTx), /Not confirmed/, "the reset refuses to run without the typed confirmation")
+  await db.exec("rollback").catch(() => undefined)
+  assert.equal(await count("fuel.diesel_entries"), doc.row_counts["fuel.diesel_entries"], "…and changed nothing")
+  await db.exec(`select set_config('vt.confirm_reset', 'dqnoducqiootfvkzskhu', false); ${resetTx}`)
+  for (const t of ["core.customers", "core.vehicles", "core.drivers", "core.vehicle_assignments", "fuel.tankers", "fuel.diesel_entries", "fuel.tanker_loads", "fuel.adblue_purchases", "fuel.adblue_entries", "finance.payments", "finance.payment_allocations", "ops.trips", "billing.invoices", "billing.invoice_lines"])
+    assert.equal(await count(t), 0, `reset cleared ${t}`)
+  assert.deepEqual((await db.query<{ id: string }>(`select id from fuel.fuel_stations`)).rows.map((x) => x.id), ["dv_tanker"], "the internal tanker source is kept")
+  assert.deepEqual([await count("public.profiles"), await count("auth.identities"), await count("auth.users"), await count("audit.reviews")], [before.profiles, before.identities, before.users, before.reviews], "accounts, Google identities, users and reviews untouched")
+  assert.ok((await count("core.vehicle_types")) >= 9 && (await count("core.companies")) === 2 && (await count("core.app_settings")) === 1, "reference configuration kept")
+  const resetEvents = await count("audit.events")
+  assert.ok(resetEvents > before.events + 20, "every removed row has its DELETED event (the audit trail only grows)")
+  const snap = (await db.query<{ before: { reg_no: string } }>(`select before from audit.events where action = 'DELETED' and record_type = 'core.vehicles' and record_id = '${bus.id}'`)).rows[0]
+  assert.equal(snap.before.reg_no, "TN70AK1869", "…with the row's full snapshot")
+  // The accounts still work after the reset, and nothing deleted by it can be "restored".
+  assert.equal(await as(DEV, () => api.admin.setupTankerMasters()), 6)
+  assert.equal((await read(OWNER, () => api.vehicles.list())).length, 3)
+  const resetDel = (await read(DEV, () => api.audit.list())).find((e) => e.action === "DELETED" && e.recordId === bus.id && e.actor.kind === "SYSTEM")!
+  assert.ok(!(await read(DEV, () => api.audit.checkRestore(resetDel.id))).ok, "records cleared by the go-live reset can't be pushed back")
+
+  console.log("shared database (engine + RLS + every migration, three accounts): all checks passed")
+}
+
+main().catch((e) => {
+  console.error(e)
+  process.exit(1)
+})

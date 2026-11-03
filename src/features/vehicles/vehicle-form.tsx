@@ -43,6 +43,8 @@ const schema = z
     status: z.enum(["ACTIVE", "MAINTENANCE", "INACTIVE", "ARCHIVED"]),
     odometerKm: z.number({ invalid_type_error: "Required" }).min(0),
     assignedCustomerId: z.string(),
+    /** New vehicles only: the day it started working for the customer (go-live may back-date it). */
+    assignedSince: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a date"),
     defaultDriverId: z.string(),
     insurance: z.object({ provider: z.string().trim(), policyNo: z.string().trim(), validTill: date, premium: money }),
     roadTax: z.object({ validTill: date, amount: money, period: z.enum(["QUARTERLY", "ANNUAL"]) }),
@@ -71,6 +73,7 @@ function defaults(v: Vehicle | undefined, company: "VT" | "VTHPL"): FormValues {
     status: v?.status ?? "ACTIVE",
     odometerKm: v?.odometerKm ?? 0,
     assignedCustomerId: v?.assignedCustomerId ?? NONE,
+    assignedSince: todayISO(),
     defaultDriverId: v?.defaultDriverId ?? NONE,
     insurance: v?.insurance ?? { provider: "", policyNo: "", validTill: nextYear, premium: 0 },
     roadTax: v?.roadTax ?? { validTill: nextYear, amount: 0, period: "QUARTERLY" },
@@ -97,17 +100,20 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
   const errors = formState.errors
   const company = useWatch({ control, name: "companyCode" })
   const ownership = useWatch({ control, name: "ownership" })
+  const assignedCustomerId = useWatch({ control, name: "assignedCustomerId" })
   const num = { valueAsNumber: true } as const
 
-  const onSubmit = handleSubmit(async (values) => {
+  const onSubmit = handleSubmit(async ({ assignedSince, ...values }) => {
     const data = {
       ...values,
+      // An existing vehicle changes customer through Transfer (dated); a new one starts on its "Assigned since" date.
+      ...(vehicle || values.assignedCustomerId === NONE ? {} : { assignedSince }),
       ownerName: values.ownership === "ATTACHED" ? values.ownerName : null,
       assignedCustomerId: values.assignedCustomerId === NONE ? null : values.assignedCustomerId,
       defaultDriverId: values.defaultDriverId === NONE ? null : values.defaultDriverId,
       seats: values.seats && !Number.isNaN(values.seats) ? values.seats : null,
     }
-    const saved = await save.mutateAsync({ id: vehicle?.id, data })
+    const saved = await save.mutateAsync({ id: vehicle?.id, version: vehicle?.updatedAt, data })
     toast.success(vehicle ? "Vehicle updated" : `${saved.regNo} added to fleet`)
     if (onDone) onDone()
     else router.push(`/vehicles/${saved.id}`)
@@ -219,6 +225,11 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
                 )}
               />
             </Field>
+            {!vehicle && assignedCustomerId !== NONE && (
+              <Field label="Assigned since" required error={errors.assignedSince?.message} hint="The day it started working for this customer — entries from then on are costed to it">
+                <Input type="date" max={todayISO()} {...register("assignedSince")} />
+              </Field>
+            )}
             <Field label="Default driver">
               <Controller
                 control={control}

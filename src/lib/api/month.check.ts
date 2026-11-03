@@ -29,7 +29,7 @@ async function main() {
   const { api } = await import("./index")
   const { todayISO, msUntilIndiaMidnight, round2 } = await import("@/lib/format")
   const { dieselMonths, pickMonth } = await import("@/domain/diesel")
-  const { monthLockInfo } = await import("@/domain/month-lock")
+  const { canEditMonth, monthLockInfo } = await import("@/domain/month-lock")
   const { ledgerFor, openingOf, stationLedger } = await import("@/domain/station-ledger")
   const { loadsAsStationPurchases, tankerLedger, tankerMoves, tankerPeriod } = await import("@/domain/tanker")
   const { inventoryLedger, stockDraws, stockFor } = await import("@/domain/adblue-inventory")
@@ -86,12 +86,12 @@ async function main() {
   at("2026-11-01T00:00:30")
   assert.deepEqual([lock("2026-10"), lock("2026-11")], ["LOCKED", "OPEN"])
   const edit = (e: typeof octEntry) => ({ date: e.date, vendorId: e.vendorId, litres: e.litres + 1, rate: e.rate, odometerKm: e.odometerKm, billNo: e.billNo, paymentMode: e.paymentMode })
-  for (const role of ["EMPLOYEE", "DEV"] as const) {
-    setRole(role)
-    await assert.rejects(api.diesel.update(octEntry.id, edit(octEntry)), /October 2026 is locked/)
-    await assert.rejects(api.diesel.create(fill("2026-10-30")), /October 2026 is locked/) // back-dated
-  }
-  await api.diesel.create(fill("2026-11-01")) // Dev: November is open
+  setRole("EMPLOYEE")
+  await assert.rejects(api.diesel.update(octEntry.id, edit(octEntry)), /October 2026 is locked/)
+  await assert.rejects(api.diesel.create(fill("2026-10-30")), /October 2026 is locked/) // back-dated
+  await api.diesel.create(fill("2026-11-01")) // November is open
+  setRole("DEV")
+  assert.ok(canEditMonth("DEV", "2026-10", todayISO(), await api.monthLocks.list()), "Dev keeps the Owner's access to locked months")
   setRole("OWNER")
   await api.diesel.update(octEntry.id, edit(octEntry), "Owner correction") // the Owner keeps access to locked months
   assert.deepEqual((await api.audit.history(octEntry.id)).map((e) => [e.action, e.actor.role]), [["CREATED", "EMPLOYEE"], ["UPDATED", "OWNER"]])
@@ -117,7 +117,7 @@ async function main() {
   await assert.rejects(api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-12-15", amount: 1, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2027-01" }), /after its payment date/)
   await assert.rejects(api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-12-16", amount: 1, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }), /future/)
   await assert.rejects(api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-12-15", amount: 1, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "Oct" }), /month this payment is against/)
-  await assert.rejects(api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-11-30", amount: 1, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }), /November 2026 is locked/) // Dev can't back-date into a locked month
+  // Back-dating into a locked month: only the Owner and Dev record payments at all, and both may (Owner-level authority).
   at("2027-01-10T11:00:00")
   const janPay = await api.fuelStationPayments.create({ stationId: station, paymentDate: "2027-01-10", amount: 50000, paymentMode: "UPI", notes: "", companyCode: "VT", forMonth: "2026-09" })
   setRole("OWNER")
@@ -152,10 +152,8 @@ async function main() {
   assert.equal(lock("2026-12"), "OPEN")
   at("2027-01-01T00:00:30")
   assert.deepEqual([lock("2026-12"), lock("2027-01")], ["LOCKED", "OPEN"])
-  for (const role of ["EMPLOYEE", "DEV"] as const) {
-    setRole(role)
-    await assert.rejects(api.diesel.update(decEntry.id, edit(decEntry)), /December 2026 is locked/)
-  }
+  setRole("EMPLOYEE")
+  await assert.rejects(api.diesel.update(decEntry.id, edit(decEntry)), /December 2026 is locked/)
   setRole("EMPLOYEE")
   const janFill = await api.diesel.create(fill("2027-01-01"))
   setRole("OWNER")
@@ -182,10 +180,11 @@ async function main() {
   await assert.rejects(api.audit.list(), /Only the Owner and Dev/)
   setRole("DEV")
   assert.ok((await api.audit.list()).length > 0) // Dev views the log…
-  const del = (await api.audit.list()).find((e) => e.action === "DELETED" && e.recordId === ownerLate.id)!
-  await assert.rejects(api.audit.restoreDeleted(del.id, "Dev attempt"), /Only the Owner/) // …but never restores
-  setRole("OWNER")
-  await api.audit.restoreDeleted(del.id, "Owner restores")
+  const devDel = (await api.audit.list()).find((e) => e.action === "DELETED" && e.recordId === ownerLate.id)!
+  setRole("EMPLOYEE")
+  await assert.rejects(api.audit.restoreDeleted(devDel.id, "Employee attempt"), /Only the Owner or Dev/)
+  setRole("DEV")
+  await api.audit.restoreDeleted(devDel.id, "Dev restores") // …and restores (Owner-level authority)
   assert.ok(await api.payments.get(ownerLate.id))
 
   console.log("month transitions (India time, Oct → Nov, Dec → Jan), old-month payments and roles: all checks passed")

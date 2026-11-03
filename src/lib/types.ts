@@ -131,6 +131,12 @@ export interface Vehicle extends BaseEntity {
   permitValidTill: string
   emiAmount: number
   notes?: string
+  /**
+   * Go-live opening (Owner / Dev): the odometer at the vehicle's last diesel fill before records begin, and that fill's
+   * date. The first fill on or after it measures its KM Run from this reading (src/domain/diesel.ts buildDieselIndex).
+   */
+  openingOdometerKm?: number | null
+  openingOdometerDate?: string | null
 }
 
 export interface Driver extends BaseEntity {
@@ -235,6 +241,11 @@ export interface Invoice extends BaseEntity {
   total: number
   status: InvoiceDocStatus
   notes: string
+  /**
+   * Go-live opening (Owner / Dev): an invoice still unpaid when records begin — its original number, dates and the
+   * amount outstanding, no lines and no tax. Receipts settle it like any invoice; it is never revenue of the period.
+   */
+  opening?: boolean
 }
 
 /* ----------------------------------------------------------------------------- Payments */

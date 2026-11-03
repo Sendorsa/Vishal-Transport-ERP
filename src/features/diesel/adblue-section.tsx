@@ -86,7 +86,7 @@ export function AdBlueSection({ vehicle, customer, month, canEdit, canDelete }: 
               : "The litres go back into AdBlue inventory, and the vehicle, customer and monthly AdBlue totals, stock ledger and carry-forward are recalculated. A later entry's KM Run then covers the gap."
           }
           pending={del.isPending}
-          onConfirm={(reason) => del.mutateAsync({ id: deleting.id, reason })}
+          onConfirm={(reason) => del.mutateAsync({ id: deleting.id, version: deleting.updatedAt, reason })}
           onClose={() => setDeleting(null)}
         />
       )}

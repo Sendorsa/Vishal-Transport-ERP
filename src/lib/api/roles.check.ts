@@ -1,14 +1,15 @@
 /**
  * Runnable check for roles and permission boundaries:  npm run check:roles
- * Dev = every module and action (like the Owner), including viewing the audit log, never the Owner-only controls. Existing roles'
- * permissions are pinned so a change to one role can't silently move another. Real API, in-memory data.
+ * Dev = every Owner permission, including the Owner-level controls (month lock, locked-month edits, deletion review,
+ * restore), plus the Dev-only resources (accounts, system) that no other role can ever reach (owner, 3 Nov 2026).
+ * Existing roles' permissions are pinned so a change to one role can't silently move another. Real API, in-memory data.
  */
 import assert from "node:assert/strict"
 import { checkTanker, setRole, storage } from "./test-browser"
 
 async function main() {
   const { api } = await import("./index")
-  const { can, RESOURCES, OWNER_ONLY, ROLES, roleLabel } = await import("@/lib/permissions")
+  const { can, RESOURCES, DEV_ONLY, ROLES, roleLabel, hasOwnerAuthority } = await import("@/lib/permissions")
   const { currentRole } = await import("@/lib/app-state")
   const { canEditMonth } = await import("@/domain/month-lock")
   const { actorLabel } = await import("@/domain/audit")
@@ -18,12 +19,14 @@ async function main() {
   /* ---------------------------------------------------------------- 1–4. Permission matrix */
   for (const r of RESOURCES)
     for (const a of actions) {
-      // Dev = Owner on every module…
-      if (!OWNER_ONLY.includes(r)) assert.equal(can("DEV", r, a), can("OWNER", r, a), `DEV ${r}:${a}`)
-      // …but never an Owner-only resource.
-      else assert.equal(can("DEV", r, a), false, `DEV must not have ${r}:${a}`)
+      assert.ok(can("DEV", r, a), `DEV has ${r}:${a}`) // Dev: everything
+      // The Owner: every business module, never a Dev-only resource (account / system administration).
+      assert.equal(can("OWNER", r, a), !DEV_ONLY.includes(r), `OWNER ${r}:${a}`)
     }
-  assert.ok(can("OWNER", "audit") && can("DEV", "audit")) // Dev views the audit log; review / restore stay Owner-only below
+  assert.deepEqual([...DEV_ONLY], ["accounts", "system"])
+  for (const role of ["OWNER", "EMPLOYEE"] as const) for (const r of DEV_ONLY) assert.equal(can(role, r, "view"), false, `${role} never reaches ${r}`)
+  assert.ok(hasOwnerAuthority("OWNER") && hasOwnerAuthority("DEV") && !hasOwnerAuthority("EMPLOYEE"))
+  assert.ok(can("OWNER", "audit") && can("DEV", "audit"))
   // Employee is exactly as before (pinned); it gained nothing when Accountant and Operations Manager were removed.
   const before: Record<string, string[]> = {
     EMPLOYEE: ["dashboard:view", "vehicles:view", "trips:view", "trips:create", "trips:edit", "diesel:view", "diesel:create", "diesel:edit"],
@@ -31,7 +34,6 @@ async function main() {
   for (const [role, perms] of Object.entries(before))
     for (const r of RESOURCES)
       for (const a of actions) assert.equal(can(role as never, r, a), perms.includes(`${r}:*`) || perms.includes(`${r}:${a}`), `${role} ${r}:${a} changed`)
-  for (const r of RESOURCES) for (const a of actions) assert.ok(can("OWNER", r, a)) // Owner still everything
   // Only three roles (owner, 31 Oct 2026); the removed ones still label the audit events recorded under them.
   assert.deepEqual(ROLES.map((r) => r.value), ["OWNER", "DEV", "EMPLOYEE"])
   assert.equal(roleLabel("DEV"), "Dev")
@@ -43,13 +45,12 @@ async function main() {
     assert.equal(storage.getItem("vt:ui:role"), legacy) // the stored value is left as it was
   }
   setRole("OWNER")
-  // Sidebar: Dev sees every module; the Owner the Fuel section and the Audit Log (its deletion badge); every other role
-  // only the Fuel section. Visibility only — permissions above are unchanged.
+  // Sidebar: Dev and the Owner see every module their role can use; the Employee only the Fuel section.
   const { NAV_ITEMS, showInNav } = await import("@/components/layout/nav")
   const shown = (role: (typeof ROLES)[number]["value"]) => NAV_ITEMS.filter((i) => can(role, i.resource) && showInNav(role, i)).map((i) => i.title)
   const fuel = NAV_ITEMS.filter((i) => i.group === "Fuel").map((i) => i.title)
   assert.deepEqual(shown("DEV"), NAV_ITEMS.map((i) => i.title))
-  assert.deepEqual(shown("OWNER"), [...fuel, "Audit Log"], "OWNER sidebar")
+  assert.deepEqual(shown("OWNER"), NAV_ITEMS.map((i) => i.title), "OWNER sidebar: every business module (no Dev-only item exists in the sidebar)")
   assert.deepEqual(shown("EMPLOYEE"), fuel, "EMPLOYEE sidebar")
   assert.deepEqual(shown("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"])
 
@@ -57,7 +58,7 @@ async function main() {
   const { mobileTabs, navFor, isActive } = await import("@/components/layout/nav")
   const tabs = (role: (typeof ROLES)[number]["value"]) => mobileTabs(role).map((i) => i.title)
   assert.deepEqual(tabs("DEV"), ["Dashboard", "Trips", "Diesel", "Invoices"], "Dev's tabs")
-  assert.deepEqual(tabs("OWNER"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"], "Owner's tabs (Audit Log is under More)")
+  assert.deepEqual(tabs("OWNER"), ["Dashboard", "Trips", "Diesel", "Invoices"], "Owner's tabs")
   assert.deepEqual(tabs("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"], "Employee's tabs")
   for (const r of ROLES) {
     assert.equal(mobileTabs(r.value).length, 4, `${r.label}: four tabs`)
@@ -66,9 +67,10 @@ async function main() {
   }
   assert.ok(isActive("/diesel/minda/2026-11", "/diesel") && isActive("/fuel-stations/dv_tanker", "/fuel-stations"), "a tab stays active on its sub-pages")
   assert.ok(!isActive("/dashboard", "/diesel") && isActive("/dashboard", "/dashboard"), "…and only its own pages")
-  // The Monthly Sheet Lock bypass is the Owner's alone.
+  // The Monthly Sheet Lock bypass: the Owner and Dev, never the Employee.
   assert.equal(canEditMonth("OWNER", "2020-01", todayISO(), []), true)
-  assert.equal(canEditMonth("DEV", "2020-01", todayISO(), []), false)
+  assert.equal(canEditMonth("DEV", "2020-01", todayISO(), []), true)
+  assert.equal(canEditMonth("EMPLOYEE", "2020-01", todayISO(), []), false)
 
   /* ---------------------------------------------------------------- 6. Role persistence (mock session) */
   setRole("DEV")
@@ -108,32 +110,31 @@ async function main() {
   await api.trips.remove(trip.id, "Dev check cleanup")
   assert.ok(st.id)
 
-  /* ---------------------------------------------------------------- 2 / 7. Owner-only actions are refused to Dev in the API */
+  /* ---------------------------------------------------------------- 2 / 7. Dev holds every Owner-level control, recorded as DEV */
   const lastMonthEntry = (await api.diesel.list()).find((e) => e.date < `${month}-01` && e.vendorId !== "dv_tanker")!
-  for (const [call, msg] of [
-    [() => api.audit.unreviewedDeletions(), /Only the Owner/],
-    [() => api.audit.markReviewed(["x"]), /Only the Owner/],
-    [() => api.audit.restoreDeleted("x", "Dev attempt"), /Only the Owner/],
-    [() => api.monthLocks.set(month, "LOCKED"), /Only the Owner can lock or unlock/],
-    [() => api.diesel.update(lastMonthEntry.id, { date: lastMonthEntry.date, vendorId: lastMonthEntry.vendorId, litres: lastMonthEntry.litres + 1, rate: lastMonthEntry.rate, odometerKm: lastMonthEntry.odometerKm, billNo: lastMonthEntry.billNo, paymentMode: lastMonthEntry.paymentMode }), /is locked/],
-    [() => api.diesel.remove(lastMonthEntry.id, "Dev attempt"), /is locked/],
-  ] as const)
-    await assert.rejects(call(), msg)
-  const dry = await api.audit.checkRestore("x")
-  assert.ok(!dry.ok && /Only the Owner/.test(dry.reason))
-  assert.equal((await api.diesel.get(lastMonthEntry.id))!.litres, lastMonthEntry.litres) // nothing changed
-  // Record history follows module access, so Dev sees a diesel record's history like other diesel users.
+  assert.equal(typeof (await api.audit.unreviewedDeletions()), "number") // the deletion badge
+  const lock = await api.monthLocks.set(month, "LOCKED")
+  assert.equal(lock.changedBy, "DEV", "a Dev lock is recorded as Dev, never Owner")
+  await api.monthLocks.set(month, "OPEN")
+  // Dev changes data in a locked (past) month, like the Owner.
+  await api.diesel.update(lastMonthEntry.id, { date: lastMonthEntry.date, vendorId: lastMonthEntry.vendorId, litres: lastMonthEntry.litres + 1, rate: lastMonthEntry.rate, odometerKm: lastMonthEntry.odometerKm, billNo: lastMonthEntry.billNo, paymentMode: lastMonthEntry.paymentMode }, "Dev correcting a closed month")
+  assert.equal((await api.diesel.get(lastMonthEntry.id))!.litres, lastMonthEntry.litres + 1)
+  await api.diesel.update(lastMonthEntry.id, { date: lastMonthEntry.date, vendorId: lastMonthEntry.vendorId, litres: lastMonthEntry.litres, rate: lastMonthEntry.rate, odometerKm: lastMonthEntry.odometerKm, billNo: lastMonthEntry.billNo, paymentMode: lastMonthEntry.paymentMode }, "Dev undoing the check")
   assert.ok((await api.audit.history(entry.id)).length >= 3)
-  // Dev views the whole central log — every module, deletions with reasons, roles and IDs — but can't review or restore.
+  // Dev reviews and restores a deletion (the same Owner-level control the Owner has).
   const devLog = await api.audit.list()
   assert.ok(new Set(devLog.map((e) => e.module)).size >= 5)
   const devDel = devLog.find((e) => e.recordId === entry.id && e.action === "DELETED")!
   assert.deepEqual([devDel.reason, devDel.actor.role], ["Dev check cleanup", "DEV"])
-  await assert.rejects(api.audit.markReviewed([devDel.id]), /Only the Owner/)
-  await assert.rejects(api.audit.restoreDeleted(devDel.id, "Dev attempt"), /Only the Owner/)
-  assert.ok(!(await api.audit.checkRestore(devDel.id)).ok)
-  assert.equal((await api.audit.list()).find((e) => e.id === devDel.id)!.review, null) // the refused review left nothing behind
-  assert.equal(await api.diesel.get(entry.id), null)
+  assert.ok((await api.audit.checkRestore(devDel.id)).ok)
+  assert.equal(await api.audit.markReviewed([devDel.id]), 1)
+  const devReview = (await api.audit.list()).find((e) => e.id === devDel.id)!.review!
+  assert.equal(devReview.actor.role, "DEV", "the review is recorded as Dev")
+  await api.audit.restoreDeleted(devDel.id, "Dev restoring the deletion")
+  assert.ok(await api.diesel.get(entry.id))
+  const restoredEv = (await api.audit.list()).find((e) => e.restoresEventId === devDel.id)!
+  assert.equal(restoredEv.actor.role, "DEV")
+  await api.diesel.remove(entry.id, "Dev check cleanup again")
 
   /* ---------------------------------------------------------------- 8. Audit events name Dev — never Owner or another role */
   setRole("OWNER")
@@ -143,9 +144,9 @@ async function main() {
   assert.ok(devEvents.filter((e) => e.actor.kind === "SESSION").every((e) => e.actor.role === "DEV"), "every Dev action is recorded as DEV")
   assert.equal(actorLabel(devEvents[0].actor), "Dev (unverified session)")
   assert.deepEqual([...new Set(devEvents.map((e) => e.action))].sort(), ["ARCHIVED", "CREATED", "DELETED", "PAYMENT_RECORDED", "RESTORED", "UPDATED"])
-  // The Owner can still do every Owner-only action.
+  // The Owner keeps every Owner-level control too.
   assert.ok(typeof (await api.audit.unreviewedDeletions()) === "number")
-  const delEntry = log.find((e) => e.recordId === entry.id && e.action === "DELETED")!
+  const delEntry = log.filter((e) => e.recordId === entry.id && e.action === "DELETED").at(0)!
   assert.equal(delEntry.actor.role, "DEV")
   await api.audit.restoreDeleted(delEntry.id, "Owner restoring the Dev deletion")
   assert.ok(await api.diesel.get(entry.id))
@@ -183,7 +184,11 @@ async function main() {
   setRole("DEV")
   await api.admin.resetDemoData()
   assert.equal(currentRole(), "DEV")
-  await assert.rejects(api.audit.unreviewedDeletions(), /Only the Owner/)
+  assert.equal(typeof (await api.audit.unreviewedDeletions()), "number") // still Dev, still Owner-level authority
+  setRole("EMPLOYEE")
+  await assert.rejects(api.audit.unreviewedDeletions(), /Only the Owner or Dev/)
+  await assert.rejects(api.monthLocks.set(month, "LOCKED"), /Only the Owner or Dev/)
+  await assert.rejects(api.audit.restoreDeleted("x", "Employee attempt"), /Only the Owner or Dev/)
   setRole("OWNER")
   const reset = (await api.audit.list())[0]
   assert.deepEqual([reset.action, reset.actor.role], ["DATA_RESET", "DEV"])

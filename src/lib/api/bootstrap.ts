@@ -15,6 +15,7 @@ import {
   writeSettings,
 } from "@/lib/storage/local-store"
 import type { CollectionKey, CollectionMap, Settings } from "@/lib/types"
+import { requestScope } from "@/lib/request-scope"
 import { DEFAULT_SETTINGS, cleanWorkspace, generateSeedData } from "@/lib/storage/seed"
 
 /** Seeds demo data on first use (or after a schema change). Idempotent and synchronous. */
@@ -25,7 +26,8 @@ import { DEFAULT_SETTINGS, cleanWorkspace, generateSeedData } from "@/lib/storag
  * of unknown origin are kept and only migrated (migrateStorage) when the data format changes.
  */
 export function ensureSeeded() {
-  if (!isBrowser()) return
+  // The shared database is never seeded or migrated by app code (schema: supabase/migrations; data: the users).
+  if (!isBrowser() || requestScope()) return
   migrateStorage()
   const meta = readMeta()
   if (meta && meta.version === SCHEMA_VERSION && meta.source !== "DEMO") return // the common case, without reading the audit log

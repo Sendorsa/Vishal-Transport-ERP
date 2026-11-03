@@ -34,7 +34,7 @@ async function main() {
   const { ledgerFor, stationLedger, openingOf } = await import("@/domain/station-ledger")
   const { inventoryLedger, stockFor, purchasedIn, vendorAnalytics, valueInventory, stockDraws } = await import("@/domain/adblue-inventory")
   const { buildDieselIndex, statsOf } = await import("@/domain/diesel")
-  const { writeCollection, readCollection, AUDIT_KEY } = await import("@/lib/storage/local-store")
+  const { writeCollection, AUDIT_KEY } = await import("@/lib/storage/local-store")
   assert.equal(todayISO(), "2026-11-10")
   const OCT = "2026-10-31"
   const NOV = "2026-11"
@@ -64,8 +64,6 @@ async function main() {
   const octPurchasedBefore = await stationsPurchased("2026-10")
   setRole("EMPLOYEE")
   await assert.rejects(api.tankerLoads.createOpening({ tankerId: jio.id, date: OCT, litres: 1000, value: 95000, notes: "" }), /Only the Owner or Dev/)
-  setRole("DEV")
-  await assert.rejects(api.tankerLoads.createOpening({ tankerId: jio.id, date: OCT, litres: 1000, value: 95000, notes: "" }), /October 2026 is locked/) // October closed for Dev
   setRole("OWNER")
   await assert.rejects(api.tankerLoads.createOpening({ tankerId: "tnk_default", date: OCT, litres: 1000, value: 0, notes: "" }), /Choose the tanker/) // no hidden pool absorbs it
   await assert.rejects(api.tankerLoads.createOpening({ tankerId: jio.id, date: "2026-11-11", litres: 1000, value: 0, notes: "" }), /future/)
@@ -224,9 +222,6 @@ async function main() {
   await assert.rejects(api.fuelStations.setOpeningBalance("dv_vishal", { amount: 1000, date: OCT }), /already has records before October 2026/) // would be ignored by the ledger
   const fresh = await api.fuelStations.create({ name: "Fresh Start Pump" })
   const credit = await api.fuelStations.create({ name: "Advance Paid Pump" })
-  setRole("DEV")
-  await assert.rejects(api.fuelStations.setOpeningBalance(fresh.id, { amount: 50000, date: OCT }), /October 2026 is locked/)
-  setRole("OWNER")
   await api.fuelStations.setOpeningBalance(fresh.id, { amount: 50000, date: OCT }) // we owe it ₹50,000 on 31 Oct
   await api.fuelStations.setOpeningBalance(credit.id, { amount: -5000, date: OCT }) // it owes us (advance)
   await api.diesel.create({ ...fill(10, null, 100), vendorId: fresh.id }) // ₹1,000 bought in November
@@ -244,27 +239,29 @@ async function main() {
   await api.fuelStations.setOpeningBalance(credit.id, { amount: 0, date: OCT }) // 0 removes it
   assert.equal(openingOf((await api.fuelStations.get(credit.id))!), undefined)
 
-  /* ---------------------------------------------------------------- 6. AdBlue: no manual opening stock (owner, 31 Oct 2026) */
-  assert.ok(!("createOpening" in api.adbluePurchases), "AdBlue opening stock can't be recorded any more")
-  const adbluePage = readFileSync("src/features/adblue/adblue-inventory.tsx", "utf8")
-  assert.ok(!/Record Opening Stock|AdBlueOpeningDialog|useCreateAdBlueOpening/.test(adbluePage), "no Record Opening Stock button or dialog on the AdBlue page")
-  assert.ok(!("useCreateAdBlueOpening" in (await import("./hooks"))), "no AdBlue opening hook")
-  // Bulk purchases still add stock and are "AdBlue Purchased"; draws are costed at the weighted average.
+  /* ---------------------------------------------------------------- 6. AdBlue opening stock (owner, 3 Nov 2026 — reverses the 31 Oct removal) */
   writeCollection("adblue_purchases", [])
   writeCollection("adblue_entries", [])
+  setRole("EMPLOYEE")
+  await assert.rejects(api.adbluePurchases.createOpening({ date: OCT, litres: 100, value: 9000, notes: "" }), /Only the Owner or Dev/)
+  setRole("OWNER")
+  await assert.rejects(api.adbluePurchases.createOpening({ date: OCT, litres: 100, value: 0, notes: "" }), /value of the stock/) // draws are costed from it
+  await assert.rejects(api.adbluePurchases.createOpening({ date: "2026-11-11", litres: 100, value: 9000, notes: "" }), /future/)
+  const abOpen = await api.adbluePurchases.createOpening({ date: OCT, litres: 100, value: 9000, notes: "On hand at go-live" })
+  assert.deepEqual([abOpen.opening, abOpen.totalLitres, abOpen.totalCost, abOpen.vendorName], [true, 100, 9000, ""])
+  await assert.rejects(api.adbluePurchases.createOpening({ date: OCT, litres: 1, value: 1, notes: "" }), /already recorded/)
+  await assert.rejects(api.adbluePurchases.update(abOpen.id, { date: OCT, vendorName: "X", product: "", buckets: 1, litresPerBucket: 1, pricePerBucket: 1, invoiceNo: "", notes: "" }), /can't be edited/)
+  // Bulk purchases still add stock and are "AdBlue Purchased"; draws are costed at the weighted average (opening included).
   const bulk = await api.adbluePurchases.create({ date: "2026-11-02", vendorName: "Bulk Vendor", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" })
   assert.deepEqual([bulk.totalLitres, bulk.totalCost], [200, 9000])
   const draw = await api.adblue.create({ date: todayISO(), vehicleId: vehicle.id, customerId: null, closingKm: odo + 10, quantityLitres: 15, invoiceNo: "", notes: "", source: "STOCK" })
   let purchases = await api.adbluePurchases.list()
   let draws = stockDraws(await api.adblue.list())
   const v = valueInventory(purchases, draws)
-  assert.deepEqual([v.stockLitres, v.stockValue, v.costOf.get(draw.id)], [185, 8325, 675])
+  assert.deepEqual([v.stockLitres, v.stockValue, v.costOf.get(draw.id)], [285, 17100, 900]) // (9,000 + 9,000) / 300 L = ₹60/L
   const novBought = purchasedIn(purchases, (p) => p.date.startsWith(NOV))
   assert.deepEqual([novBought.litres, novBought.cost], [200, 9000])
-  // An opening-stock record saved before the removal is kept and still reported as stock, never as a purchase.
-  const now = new Date().toISOString()
-  writeCollection("adblue_purchases", [...readCollection("adblue_purchases"), { id: "abp_open_legacy", date: OCT, vendorName: "", product: "Opening stock", buckets: 1, litresPerBucket: 100, totalLitres: 100, pricePerBucket: 9000, totalCost: 9000, invoiceNo: "", notes: "", opening: true, createdAt: now, updatedAt: now }])
-  await assert.rejects(api.adbluePurchases.update("abp_open_legacy", { date: OCT, vendorName: "X", product: "", buckets: 1, litresPerBucket: 1, pricePerBucket: 1, invoiceNo: "", notes: "" }), /can't be edited/)
+  // Opening stock is stock, never a purchase.
   purchases = await api.adbluePurchases.list()
   draws = stockDraws(await api.adblue.list())
   const led = inventoryLedger(purchases, draws, NOV)

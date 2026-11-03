@@ -99,13 +99,15 @@ async function main() {
   assert.equal((await log()).length, n0)
   assert.equal(await api.diesel.get(e3.id), null)
 
-  /* ---------------------------------------------------------------- 11. Only the Owner restores */
-  for (const role of ["EMPLOYEE", "DEV", "ACCOUNTANT"] as const) {
+  /* ---------------------------------------------------------------- 11. Only the Owner and Dev restore */
+  for (const role of ["EMPLOYEE", "ACCOUNTANT"] as const) {
     setRole(role)
-    await assert.rejects(restore(del3.id), /Only the Owner/)
+    await assert.rejects(restore(del3.id), /Only the Owner or Dev/)
     const c = await api.audit.checkRestore(del3.id)
-    assert.ok(!c.ok && /Only the Owner/.test(c.reason))
+    assert.ok(!c.ok && /Only the Owner or Dev/.test(c.reason))
   }
+  setRole("DEV")
+  assert.ok((await api.audit.checkRestore(del3.id)).ok, "Dev may restore (owner, 3 Nov 2026)")
   setRole("OWNER")
   assert.equal(await api.diesel.get(e3.id), null)
 

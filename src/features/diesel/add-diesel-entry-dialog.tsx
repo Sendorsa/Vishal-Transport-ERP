@@ -140,7 +140,7 @@ export function AddDieselEntryDialog({
     setErrors(errs)
     if (Object.keys(errs).length) return
     const data = { date: f.date, vendorId: f.vendorId, litres, rate, odometerKm: odo, billNo: f.billNo.trim(), paymentMode: (fromTanker ? "CREDIT" : f.paymentMode) as "CREDIT" | "CASH", tankerId: fromTanker ? tankerId : undefined }
-    if (entry) await update.mutateAsync({ id: entry.id, data, reason })
+    if (entry) await update.mutateAsync({ id: entry.id, version: entry.updatedAt, data, reason })
     else await create.mutateAsync({ ...data, vehicleId: vehicle.id, customerId: customer?.id ?? null })
     toast.success(`Diesel entry ${entry ? "updated" : "saved"} — ${formatINR(amount)}`)
     close()

@@ -2,8 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js"
 import type { AccountStatus, Database, ErpRole } from "@/lib/supabase/database.types"
 
 export interface Account {
+  /** public.profiles.id — the audit trail's actor id. */
+  id: string
   role: ErpRole
   status: AccountStatus
+  fullName: string | null
 }
 
 /**
@@ -13,6 +16,6 @@ export interface Account {
  * Any error means "no account".
  */
 export async function readAccount(supabase: SupabaseClient<Database>, userId: string): Promise<Account | null> {
-  const { data, error } = await supabase.from("profiles").select("role, status").eq("user_id", userId).maybeSingle()
-  return error || !data ? null : { role: data.role, status: data.status }
+  const { data, error } = await supabase.from("profiles").select("id, role, status, full_name").eq("user_id", userId).maybeSingle()
+  return error || !data ? null : { id: data.id, role: data.role, status: data.status, fullName: data.full_name }
 }

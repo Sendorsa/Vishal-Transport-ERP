@@ -10,9 +10,9 @@ import { CreatableSelect } from "@/components/shared/creatable-select"
 import { FormModal } from "@/components/shared/form-modal"
 import { Field } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
-import { useCreateDriverByName, useCreateVehicleType, useCustomers, useDrivers, useSaveVehicle, useSettings, useVehicles } from "@/lib/api/hooks"
+import { useCreateDriverByName, useCreateVehicleType, useCustomers, useDrivers, useSaveVehicle, useSettings, useTransferVehicle, useVehicleAssignments, useVehicles } from "@/lib/api/hooks"
 import { FUEL_TYPES, VEHICLE_REG_REGEX } from "@/lib/constants"
-import { toISODate, todayDate } from "@/lib/format"
+import { formatDate, toISODate, todayDate, todayISO } from "@/lib/format"
 import type { Customer, NewEntity, Vehicle } from "@/lib/types"
 
 const NONE = "__none__"
@@ -27,6 +27,10 @@ export function AddVehicleDialog({ open, onOpenChange, customer, vehicle }: { op
   const drivers = useDrivers()
   const settings = useSettings()
   const save = useSaveVehicle()
+  const transfer = useTransferVehicle()
+  const assignments = useVehicleAssignments()
+  /** "Assigned since" (owner, 3 Nov 2026): when the vehicle started working for the customer — back-dated at go-live. */
+  const [since, setSince] = useState(todayISO())
   const createType = useCreateVehicleType()
   const createDriver = useCreateDriverByName()
   const [mode, setMode] = useState<"existing" | "new">(vehicle ? "new" : "existing")
@@ -59,9 +63,17 @@ export function AddVehicleDialog({ open, onOpenChange, customer, vehicle }: { op
     if (mode === "existing") {
       const v = all.find((x) => x.id === vehicleId)
       if (!v) return setError("Choose a vehicle")
+      const firstAssignment = !(assignments.data ?? []).some((a) => a.vehicleId === v.id)
+      if (since !== todayISO() && firstAssignment) {
+        // A spare vehicle's first assignment may start in the past ("Assigned since"); a dated transfer records it.
+        if (v.status === "INACTIVE") await save.mutateAsync({ id: v.id, version: v.updatedAt, data: { status: "ACTIVE" } })
+        await transfer.mutateAsync({ id: v.id, customerId: customer.id, effectiveDate: since })
+        toast.success(`${v.regNo} with ${customer.shortName} since ${formatDate(since)}`)
+        return close()
+      }
       // Assigning an inactive vehicle brings it back into service (archived ones must be restored first).
       await save.mutateAsync({
-        id: v.id,
+        id: v.id, version: v.updatedAt,
         data: {
           assignedCustomerId: customer.id,
           ...(v.status === "INACTIVE" ? { status: "ACTIVE" as const } : {}),
@@ -85,7 +97,7 @@ export function AddVehicleDialog({ open, onOpenChange, customer, vehicle }: { op
     }
 
     if (vehicle) {
-      await save.mutateAsync({ id: vehicle.id, data: details })
+      await save.mutateAsync({ id: vehicle.id, version: vehicle.updatedAt, data: details })
       toast.success(`${regNo} updated`)
       return close()
     }
@@ -114,7 +126,7 @@ export function AddVehicleDialog({ open, onOpenChange, customer, vehicle }: { op
       permitValidTill: nextYear,
       emiAmount: 0,
     }
-    await save.mutateAsync({ data })
+    await save.mutateAsync({ data: assignedCustomerId ? { ...data, assignedSince: since } : data })
     toast.success(`${regNo} added${assignedCustomerId ? ` to ${customerName.get(assignedCustomerId) ?? customer.shortName}` : ""}`)
     close()
   }
@@ -126,7 +138,7 @@ export function AddVehicleDialog({ open, onOpenChange, customer, vehicle }: { op
       title={vehicle ? `Edit ${vehicle.regNo}` : `Add vehicle to ${customer.shortName}`}
       description={vehicle ? "Changes apply everywhere this vehicle appears." : "Vehicles deployed with this customer appear in its monthly diesel view."}
       submitLabel={vehicle ? "Save changes" : mode === "existing" ? "Assign vehicle" : "Add vehicle"}
-      pending={save.isPending}
+      pending={save.isPending || transfer.isPending}
       onSubmit={submit}
     >
       {!vehicle && (
@@ -207,6 +219,11 @@ export function AddVehicleDialog({ open, onOpenChange, customer, vehicle }: { op
           </Field>
           <p className="text-xs text-muted-foreground sm:col-span-2">Insurance, road tax and other documents are under Vehicles → vehicle record.</p>
         </div>
+      )}
+      {!vehicle && (mode === "new" ? n.customerId !== NONE : !!vehicleId && !(assignments.data ?? []).some((a) => a.vehicleId === vehicleId)) && (
+        <Field label="Assigned since" required hint="The day it started working for this customer — entries from then on are costed to it. Back-date it for go-live.">
+          <Input type="date" value={since} max={todayISO()} onChange={(e) => setSince(e.target.value || todayISO())} />
+        </Field>
       )}
     </FormModal>
   )

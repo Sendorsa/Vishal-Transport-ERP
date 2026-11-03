@@ -13,8 +13,8 @@ import { canEditMonth } from "@/domain/month-lock"
 import { insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from "@/domain/adblue-inventory"
 import { fillAmount, insufficientTankerMessage, isStockPool, isTankerFill, normReg, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/station-ledger"
-import { currentActor, currentRole } from "@/lib/app-state"
-import { can, type Resource } from "@/lib/permissions"
+import { currentActor, currentRole } from "@/lib/identity"
+import { can, hasOwnerAuthority, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
 import { format, parseISO } from "date-fns"
 import { assignmentIndex, assignmentOn, inferAssignments, resolveCustomers, transferPeriods, type AssignmentPeriod } from "@/domain/assignments"
@@ -23,8 +23,11 @@ import { appendAuditEvent, appendAuditReviews, readAuditEvents, readAuditReviews
 import type { AdBlueEntry, AdBluePurchase, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, Invoice, NewEntity, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle } from "@/lib/types"
 import { ensureSeeded, exportBackup, loadDemoData, loadEmptyWorkspace, parseBackup, restoreBackup, type BackupFile } from "./bootstrap"
 import { createLocalRepository, latency, newId, NotFoundError } from "./repository"
+import { ConflictError, pendingVersions, runWithVersions } from "@/lib/versions"
+import { NeedData, requestScope } from "@/lib/request-scope"
+import { cleanWorkspace } from "@/lib/storage/seed"
 
-export { NotFoundError }
+export { NotFoundError, ConflictError }
 
 /** A payment to a fuel station (stored as a payment voucher — see api.fuelStationPayments). */
 export interface FuelStationPayment {
@@ -40,6 +43,8 @@ export interface FuelStationPayment {
   companyCode: CompanyCode
   /** A TDS deduction (u/s 194Q) rather than money paid — `amount` is the TDS. */
   tds: boolean
+  /** The voucher's version, for optimistic concurrency (src/lib/versions.ts). */
+  updatedAt: string
 }
 
 const customers = createLocalRepository("customers", "cus") // /api/customers
@@ -177,7 +182,15 @@ function assertDriverAccess() {
 
 /** Only the Owner and Dev replace or wipe the whole workspace (restore, reset to demo data, clear). */
 function assertWorkspaceAdmin(what: string) {
-  if (currentRole() !== "OWNER" && currentRole() !== "DEV") throw new Error(`Only the Owner or Dev can ${what}.`)
+  if (!hasOwnerAuthority(currentRole())) throw new Error(`Only the Owner or Dev can ${what}.`)
+}
+
+/**
+ * Whole-workspace replace / wipe exists only for a browser's own data. The shared database is never reset, cleared or
+ * restored from the application, for any role (D-9): recovery uses Supabase backups / point-in-time recovery.
+ */
+function assertNotShared(what: string) {
+  if (requestScope()) throw new Error(`${what} isn't available on the shared database. Recovery uses the database's backups.`)
 }
 
 /** Every delete needs a real reason (trimmed; empty or whitespace-only refused) — checked here, not only in the dialog. */
@@ -188,11 +201,11 @@ function assertReason(reason: string | null | undefined) {
 
 /* ------------------------------------------------------------------ Month lock */
 
-/** Employees can't add or change data in a locked month; the Owner always can (src/domain/month-lock.ts). */
+/** Employees can't add or change data in a locked month; the Owner and Dev always can (src/domain/month-lock.ts). */
 function assertMonthEditable(date: string) {
   const month = date.slice(0, 7)
   if (!canEditMonth(currentRole(), month, todayISO(), readCollection("month_locks")))
-    throw new Error(`${format(parseISO(`${month}-01`), "MMMM yyyy")} is locked. Only the Owner can change it, or unlock it for you.`)
+    throw new Error(`${format(parseISO(`${month}-01`), "MMMM yyyy")} is locked. Only the Owner or Dev can change it, or unlock it for you.`)
 }
 
 /**
@@ -383,7 +396,8 @@ function priceTrip(input: TripInput) {
  */
 let txChain: Promise<unknown> = Promise.resolve()
 function tx<T>(fn: () => Promise<T>): Promise<T> {
-  const run = txChain.then(() => runInTransaction(fn))
+  const versions = pendingVersions() // the record versions the user's screen showed (optimistic concurrency)
+  const run = txChain.then(() => runInTransaction(() => runWithVersions(versions, fn)))
   txChain = run.catch(() => undefined)
   return run
 }
@@ -498,6 +512,12 @@ async function transferVehicle(id: string, customerId: string | null, effectiveD
   assertMonthEditable(effectiveDate) // a back-dated transfer re-files that month's entries
   assertCustomerOpen(customerId, effectiveDate)
   const before = readCollection("vehicles").find((v) => v.id === id)
+  // First assignment ("Assigned since", owner 3 Nov 2026): may be back-dated, but never silently re-files an entry
+  // already recorded under another customer — history doesn't move behind anyone's back.
+  if (!readCollection("vehicle_assignments").some((a) => a.vehicleId === id)) {
+    const moved = [...readCollection("diesel_entries"), ...readCollection("adblue_entries")].find((e) => e.vehicleId === id && e.date >= effectiveDate && e.customerId !== customerId)
+    if (moved) throw new Error(`${regNo(id)} has an entry on ${formatDate(moved.date)} recorded under ${customerName(moved.customerId)}. Assign it from after that date, or correct that entry first.`)
+  }
   const beforePeriods = periodsOf(id)
   savePeriods(id, transferPeriods(beforePeriods, id, customerId, effectiveDate))
   const after = await vehicles.update(id, { assignedCustomerId: customerId })
@@ -628,7 +648,7 @@ export interface RestorePlan {
  */
 function planRestore(eventId: string): RestorePlan {
   ensureSeeded()
-  if (currentRole() !== "OWNER") throw new Error("Only the Owner can restore deleted records.")
+  if (!hasOwnerAuthority(currentRole())) throw new Error("Only the Owner or Dev can restore deleted records.")
   const events = readAuditEvents()
   const e = events.find((x) => x.id === eventId)
   if (!e) throw new NotFoundError("Audit event", eventId)
@@ -824,13 +844,23 @@ export const api = {
   vehicles: {
     list: vehicles.list,
     get: vehicles.get,
-    create: (input: NewEntity<Vehicle>) =>
+    /**
+     * POST /api/vehicles — `assignedSince` (owner, 3 Nov 2026): the day the vehicle started working for its customer
+     * (default today; may be back-dated for go-live, never in the future; a locked month needs the Owner or Dev).
+     * Its first assignment and status period start then, so entries dated from that day file under that customer.
+     */
+    create: (input: NewEntity<Vehicle> & { assignedSince?: string }) =>
       tx(async () => {
         assertCan("vehicles", "create")
-        assertCustomerOpen(input.assignedCustomerId, todayISO())
-        const v = await vehicles.create({ ...input, statusHistory: [{ status: input.status, startDate: todayISO(), endDate: null }] })
-        if (v.assignedCustomerId) savePeriods(v.id, [{ vehicleId: v.id, customerId: v.assignedCustomerId, startDate: todayISO(), endDate: null, status: "ACTIVE" }])
-        audit({ action: "CREATED", ...meta.vehicle(v), after: v })
+        const { assignedSince: since, ...data } = input
+        const start = since || todayISO()
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) throw new Error("Enter the date the vehicle was assigned since")
+        if (start > todayISO()) throw new Error("Assigned since can't be in the future.")
+        if (data.assignedCustomerId && start < todayISO()) assertMonthEditable(start)
+        assertCustomerOpen(data.assignedCustomerId, start)
+        const v = await vehicles.create({ ...data, statusHistory: [{ status: data.status, startDate: start < todayISO() ? start : todayISO(), endDate: null }] })
+        if (v.assignedCustomerId) savePeriods(v.id, [{ vehicleId: v.id, customerId: v.assignedCustomerId, startDate: start, endDate: null, status: "ACTIVE" }])
+        audit({ action: "CREATED", ...meta.vehicle(v), after: v, note: v.assignedCustomerId ? `Assigned to ${customerName(v.assignedCustomerId)} since ${formatDate(start)}` : null })
         return v
       }),
     /** A status change appends to statusHistory; past months keep the status they had. */
@@ -839,6 +869,31 @@ export const api = {
     /** Soft delete from today: kept in every report; no new diesel / AdBlue entries dated from today on. */
     archive: (id: string) => tx(() => updateVehicle(id, { status: "ARCHIVED" })),
     restore: (id: string) => tx(() => updateVehicle(id, { status: "ACTIVE" })),
+    /**
+     * PUT /api/vehicles/:id/opening-odometer — go-live opening (owner, 3 Nov 2026), Owner / Dev: the odometer at the
+     * vehicle's last diesel fill before records begin, and that fill's date. The first fill on or after it measures its
+     * KM Run from this reading. Refused when the vehicle already has a fill dated before it (it would be ignored).
+     * `km: null` removes it. Never a fill: no litres, spend or entry.
+     */
+    setOpeningOdometer: (id: string, input: { km: number | null; date: string }) =>
+      tx(async () => {
+        assertWorkspaceAdmin("record opening odometers")
+        const before = await vehicles.get(id)
+        if (!before) throw new NotFoundError("Vehicle", id)
+        if (input.km !== null) {
+          if (!(Number.isFinite(input.km) && input.km >= 0)) throw new Error("Enter the opening odometer reading (km)")
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) throw new Error("Enter the date of that reading")
+          if (input.date > todayISO()) throw new Error("An opening odometer can't be dated in the future.")
+          assertMonthEditable(input.date)
+          const earlier = readCollection("diesel_entries").find((e) => e.vehicleId === id && e.date < input.date)
+          if (earlier) throw new Error(`${before.regNo} already has a fill on ${formatDate(earlier.date)}, before ${formatDate(input.date)}, so this opening reading would be ignored.`)
+        }
+        if (before.openingOdometerDate) assertMonthEditable(before.openingOdometerDate)
+        const km = input.km === null ? null : Math.round(input.km * 10) / 10
+        const after = await vehicles.update(id, km === null ? { openingOdometerKm: null, openingOdometerDate: null } : { openingOdometerKm: km, openingOdometerDate: input.date, odometerKm: Math.max(before.odometerKm, km) })
+        audit({ action: "UPDATED", ...meta.vehicle(after), before, after, note: km === null ? "Opening odometer removed" : `Opening odometer ${formatNumber(km)} km as of ${formatDate(input.date)}` })
+        return after
+      }),
   },
   /** Fuel stations (petrol pumps) — the one master list; never deleted, archived instead. */
   fuelStations: {
@@ -903,7 +958,7 @@ export const api = {
     async list(): Promise<FuelStationPayment[]> {
       return (await payments.list())
         .filter((p) => p.direction === "OUT" && p.vendorId && p.categoryCode === STATION_PAYMENT_CATEGORY)
-        .map((p) => ({ id: p.id, stationId: p.vendorId!, paymentDate: p.date, forMonth: p.forMonth ?? null, amount: round2(p.amount + p.tdsAmount), paymentMode: p.mode, notes: p.notes, paymentNo: p.paymentNo, companyCode: p.companyCode, tds: !p.amount && p.tdsAmount > 0 }))
+        .map((p) => ({ id: p.id, stationId: p.vendorId!, paymentDate: p.date, forMonth: p.forMonth ?? null, amount: round2(p.amount + p.tdsAmount), paymentMode: p.mode, notes: p.notes, paymentNo: p.paymentNo, companyCode: p.companyCode, tds: !p.amount && p.tdsAmount > 0, updatedAt: p.updatedAt }))
     },
     create: (input: { stationId: string; paymentDate: string; amount: number; paymentMode: PaymentMode; notes: string; companyCode: CompanyCode; reference?: string; forMonth?: string }) =>
       tx(async () => {
@@ -991,9 +1046,10 @@ export const api = {
     /** PUT /api/month-locks/:month — Owner only: lock a month early or unlock a closed one for users. */
     set: (month: string, state: "OPEN" | "LOCKED") =>
       tx(async () => {
-        if (currentRole() !== "OWNER") throw new Error("Only the Owner can lock or unlock a month.")
+        if (!hasOwnerAuthority(currentRole())) throw new Error("Only the Owner or Dev can lock or unlock a month.")
         const existing = readCollection("month_locks").find((l) => l.month === month)
-        const after = existing ? await monthLocks.update(existing.id, { state, changedBy: "OWNER" }) : await monthLocks.create({ month, state, changedBy: "OWNER" })
+        const changedBy = currentRole() // recorded as who actually did it — a Dev lock is never labelled Owner
+        const after = existing ? await monthLocks.update(existing.id, { state, changedBy }) : await monthLocks.create({ month, state, changedBy })
         audit({
           action: state === "LOCKED" ? "MONTH_LOCKED" : "MONTH_UNLOCKED",
           module: "Month Lock",
@@ -1066,6 +1122,11 @@ export const api = {
         if (existing.invoiceId) throw new Error("Invoiced trips are locked.")
         assertMonthEditable(existing.date)
         assertMonthEditable(input.date)
+        if (input.vehicleId !== existing.vehicleId || input.customerId !== existing.customerId || input.date !== existing.date) {
+          // The same rules as a new trip for the new vehicle / customer / date (archived, assigned customer).
+          assertOpen(input.vehicleId, input.customerId, input.date)
+          assignedCustomer(input.vehicleId, input.date, input.customerId)
+        }
         const after = await trips.update(id, { ...input, ...priceTrip(input) })
         audit({ action: "UPDATED", ...meta.trip(after), before: existing, after, reason })
         return after
@@ -1115,9 +1176,11 @@ export const api = {
         return entry
       }),
     /** PATCH /api/diesel-entries/:id — amount is always recomputed from litres × rate. */
-    update: (id: string, input: Pick<DieselEntry, "date" | "vendorId" | "litres" | "rate" | "odometerKm" | "billNo" | "paymentMode" | "tankerId">, reason?: string) =>
+    update: (id: string, raw: Pick<DieselEntry, "date" | "vendorId" | "litres" | "rate" | "odometerKm" | "billNo" | "paymentMode" | "tankerId">, reason?: string) =>
       tx(async () => {
         assertCan("diesel", "edit")
+        // Only the editable fields: an edit never moves a fill to another vehicle, customer or company (server-enforced).
+        let input: Pick<DieselEntry, "date" | "vendorId" | "litres" | "rate" | "odometerKm" | "billNo" | "paymentMode" | "tankerId"> = { date: raw.date, vendorId: raw.vendorId, litres: raw.litres, rate: raw.rate, odometerKm: raw.odometerKm, billNo: raw.billNo, paymentMode: raw.paymentMode, tankerId: raw.tankerId }
         const before = await diesel.get(id)
         if (!before) throw new NotFoundError("Diesel entry", id)
         assertMonthEditable(before.date) // can't move an entry out of a locked month either
@@ -1168,6 +1231,7 @@ export const api = {
         assertCan("diesel", "edit")
         const before = await adblue.get(id)
         if (!before) throw new NotFoundError("AdBlue entry", id)
+        input = { ...input, vehicleId: before.vehicleId, customerId: before.customerId } // an edit never moves the entry to another vehicle or customer
         assertMonthEditable(before.date)
         assertMonthEditable(input.date)
         const entry = checkAdBlue(input, id)
@@ -1396,6 +1460,30 @@ export const api = {
   /** AdBlue bulk purchases into inventory. Month lock as for diesel; stock never below zero. */
   adbluePurchases: {
     list: adbluePurchases.list,
+    /**
+     * POST /api/adblue/opening-stock — go-live opening (owner, 3 Nov 2026; reverses the 31 Oct removal), Owner / Dev:
+     * AdBlue already on hand when records begin, with its value. One in the workspace; refused when any AdBlue purchase
+     * or stock draw is dated before it. It is stock and value (weighted average), never "AdBlue Purchased" (domain:
+     * purchasedIn, vendorAnalytics, inventoryLedger.openingStock). Not editable: delete with a reason and record again.
+     */
+    createOpening: (input: { date: string; litres: number; value: number; notes: string }) =>
+      tx(async () => {
+        assertWorkspaceAdmin("record AdBlue opening stock")
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) throw new Error("Enter the date of the opening stock")
+        if (input.date > todayISO()) throw new Error("Opening stock can't be dated in the future.")
+        if (!(input.litres > 0)) throw new Error("Opening stock must be greater than 0 L")
+        if (!(input.value > 0)) throw new Error("Enter the value of the stock on hand — every later draw is costed from it")
+        assertMonthEditable(input.date)
+        const purchases = readCollection("adblue_purchases")
+        if (purchases.some((p) => p.opening)) throw new Error("AdBlue opening stock is already recorded. Delete it (with a reason) to record it again.")
+        const earlier = [...purchases, ...stockDraws(readCollection("adblue_entries"))].find((x) => x.date < input.date)
+        if (earlier) throw new Error(`AdBlue already has records before ${formatDate(input.date)} (${formatDate(earlier.date)}). Opening stock must come first.`)
+        const litres = round2(input.litres)
+        const value = round2(input.value)
+        const after = await adbluePurchases.create({ date: input.date, vendorName: "", product: "Opening stock", buckets: 1, litresPerBucket: litres, totalLitres: litres, pricePerBucket: value, totalCost: value, invoiceNo: "", notes: input.notes.trim(), opening: true })
+        audit({ action: "CREATED", ...meta.adbluePurchase(after), after })
+        return after
+      }),
     create: (input: AdBluePurchaseInput) =>
       tx(async () => {
         assertCan("diesel", "create")
@@ -1435,6 +1523,31 @@ export const api = {
   invoices: {
     list: invoices.list,
     get: invoices.get,
+    /**
+     * POST /api/invoices/opening — go-live opening (owner, 3 Nov 2026), Owner / Dev: an invoice still unpaid when
+     * records begin, with its original number, invoice and due dates, and the amount outstanding. No lines, no tax (they
+     * belong to the old books). Issued at once, so receipts settle it and receivables / aging include it; revenue comes
+     * from trips, so it is never revenue of the period. Not editable: cancel it (no receipts) and enter it again.
+     */
+    createOpening: (input: { customerId: string; invoiceNo: string; date: string; dueDate: string; outstanding: number; notes: string }) =>
+      tx(async () => {
+        assertWorkspaceAdmin("record opening invoices")
+        assertCan("invoices", "create")
+        const customer = readCollection("customers").find((c) => c.id === input.customerId)
+        if (!customer) throw new NotFoundError("Customer", input.customerId)
+        const invoiceNo = input.invoiceNo.trim()
+        if (!invoiceNo) throw new Error("Enter the invoice number")
+        if (readCollection("invoices").some((i) => i.invoiceNo.toLowerCase() === invoiceNo.toLowerCase())) throw new Error(`Invoice ${invoiceNo} already exists`)
+        for (const d of [input.date, input.dueDate]) if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new Error("Enter the invoice date and due date")
+        if (input.date > todayISO()) throw new Error("An opening invoice can't be dated in the future.")
+        if (input.dueDate < input.date) throw new Error("The due date can't be before the invoice date")
+        if (!(input.outstanding > 0)) throw new Error("Enter the amount still unpaid")
+        assertMonthEditable(input.date)
+        const amount = round2(input.outstanding)
+        const after = await invoices.create({ invoiceNo, companyCode: customer.companyCode, customerId: customer.id, date: input.date, dueDate: input.dueDate, periodFrom: input.date, periodTo: input.date, lines: [], subtotal: amount, taxType: "CGST_SGST", taxRate: 0, cgst: 0, sgst: 0, igst: 0, total: amount, status: "ISSUED", notes: input.notes.trim(), opening: true })
+        audit({ action: "CREATED", ...meta.invoice(after), after, note: `Opening invoice: ${formatINR(amount)} unpaid at go-live` })
+        return after
+      }),
     /** POST /api/invoices — builds lines from trips, numbers it, locks the trips. */
     create: (input: InvoiceDraftInput) =>
       tx(async () => {
@@ -1510,11 +1623,47 @@ export const api = {
   },
 
   admin: {
-    /** The full backup (all collections and settings; not the audit log). */
+    /**
+     * The full backup (all collections and settings; not the audit log). On the shared database it is a read-only
+     * export for Dev (system administration) — also the rollback path: it restores into one browser.
+     */
     async exportBackup(): Promise<BackupFile> {
       await latency()
+      if (requestScope() && !can(currentRole(), "system")) throw new Error("Only Dev can export the shared database.")
       return exportBackup()
     },
+    /**
+     * Go-live setup (Owner / Dev): the three company tankers — JIO (TN70AX9480), Office (KA53C0538), Mini (KA51AF1429)
+     * — each with its tanker vehicle record. Adds only what is missing (matched by registration); never renames or
+     * moves anything. Vehicle details the books don't record (make, model, type, year) stay blank — never invented.
+     */
+    setupTankerMasters: () =>
+      tx(async () => {
+        assertWorkspaceAdmin("set up the tanker masters")
+        const clean = cleanWorkspace(new Date())
+        let added = 0
+        for (const station of clean.fuel_stations)
+          if (!readCollection("fuel_stations").some((s) => s.id === station.id)) throw new Error("The internal tanker source (dv_tanker) is missing — the database schema isn't complete.")
+        // The confirmed ids (CONFIRMED_TANKERS, same as the fuel import's TANKER_MASTER): tnk_tn70ax9480, veh_tn70ax9480…
+        const now = new Date().toISOString()
+        for (const t of clean.tankers) {
+          const wanted = clean.vehicles.find((v) => v.id === t.vehicleId)!
+          let vehicle = readCollection("vehicles").find((v) => normReg(v.regNo) === t.regNo)
+          if (!vehicle) {
+            vehicle = { ...wanted, createdAt: now, updatedAt: now }
+            writeCollection("vehicles", [...readCollection("vehicles"), vehicle])
+            audit({ action: "CREATED", ...meta.vehicle(vehicle), after: vehicle, note: `Tanker vehicle ${t.name} (go-live setup)` })
+            added++
+          }
+          if (!readCollection("tankers").some((x) => normReg(x.regNo) === t.regNo || x.id === t.id)) {
+            const tanker: Tanker = { ...t, vehicleId: readCollection("tankers").some((x) => x.vehicleId === vehicle!.id) ? null : vehicle.id, createdAt: now, updatedAt: now }
+            writeCollection("tankers", [...readCollection("tankers"), tanker])
+            audit({ action: "CREATED", ...meta.tanker(tanker), after: tanker, note: "Company tanker (go-live setup)" })
+            added++
+          }
+        }
+        return added
+      }),
     /**
      * Replaces all data with a backup or prepared import file — Owner and Dev only (it overwrites everything).
      * Validated first; atomic (`tx`): if it doesn't fit in storage or anything fails, the old data stays.
@@ -1522,6 +1671,7 @@ export const api = {
     restoreBackup: (raw: unknown, fileName: string) =>
       tx(async () => {
         await latency()
+        assertNotShared("Restore from file")
         assertWorkspaceAdmin("restore a backup")
         const file = parseBackup(raw)
         restoreBackup(file)
@@ -1532,6 +1682,7 @@ export const api = {
     resetDemoData: () =>
       tx(async () => {
         await latency()
+        assertNotShared("Reset to demo data")
         assertWorkspaceAdmin("reset the data")
         loadDemoData()
         audit({ action: "DATA_RESET", module: "System", recordType: "Data", recordId: "workspace", label: "All data replaced with demo data (Settings → Reset)" })
@@ -1539,6 +1690,7 @@ export const api = {
     clearAllData: () =>
       tx(async () => {
         await latency()
+        assertNotShared("Clear all data")
         assertWorkspaceAdmin("clear the data")
         loadEmptyWorkspace()
         audit({ action: "DATA_RESET", module: "System", recordType: "Data", recordId: "workspace", label: "All data cleared to an empty workspace (Settings → Clear)" })
@@ -1575,7 +1727,7 @@ export const api = {
     /** Deletion events the Owner hasn't reviewed yet (the Audit Log badge). Owner only. */
     async unreviewedDeletions() {
       await latency()
-      if (currentRole() !== "OWNER") throw new Error("Only the Owner can review deletions.")
+      if (!hasOwnerAuthority(currentRole())) throw new Error("Only the Owner or Dev can review deletions.")
       return unreviewedDeletions(readAuditEvents(), readAuditReviews()).length
     },
     /**
@@ -1584,7 +1736,7 @@ export const api = {
      */
     markReviewed: (eventIds: string[]) =>
       tx(async () => {
-        if (currentRole() !== "OWNER") throw new Error("Only the Owner can review deletions.")
+        if (!hasOwnerAuthority(currentRole())) throw new Error("Only the Owner or Dev can review deletions.")
         const reviewed = new Set(readAuditReviews().map((r) => r.eventId))
         const open = new Set(readAuditEvents().filter((e) => e.action === "DELETED" && !reviewed.has(e.id)).map((e) => e.id)) // restored deletions can be marked too
         const ids = [...new Set(eventIds)].filter((id) => open.has(id))
@@ -1598,6 +1750,7 @@ export const api = {
         const plan = planRestore(eventId)
         return { ok: true, note: plan.note, duplicate: plan.duplicate }
       } catch (err) {
+        if (err instanceof NeedData) throw err // server: load the data and run again — never a "can't restore" answer
         return { ok: false, reason: err instanceof Error ? err.message : "This record can't be restored." }
       }
     },
@@ -1610,7 +1763,7 @@ export const api = {
      */
     restoreDeleted: (eventId: string, reason: string, opts: { confirmNotDuplicate?: boolean } = {}) =>
       tx(async () => {
-        if (currentRole() !== "OWNER") throw new Error("Only the Owner can restore deleted records.")
+        if (!hasOwnerAuthority(currentRole())) throw new Error("Only the Owner or Dev can restore deleted records.")
         const reasonError = deletionReasonError(reason, "restoring")
         if (reasonError) throw new Error(reasonError)
         const plan = planRestore(eventId)

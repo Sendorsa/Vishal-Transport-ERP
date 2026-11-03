@@ -255,7 +255,7 @@ export function PaymentList({ openNew }: { openNew?: boolean }) {
           }
           pending={del.isPending}
           onConfirm={async (reason) => {
-            await del.mutateAsync({ id: selected.id, reason })
+            await del.mutateAsync({ id: selected.id, version: selected.updatedAt, reason })
             toast.success(`${selected.paymentNo} deleted`)
             setSelected(null)
           }}

@@ -391,11 +391,11 @@ export function DieselTanker() {
                             </DropdownMenuItem>
                           )}
                           {r.t.status === "ARCHIVED" ? (
-                            <DropdownMenuItem onSelect={() => archive.mutate({ id: r.t.id, restore: true }, { onSuccess: () => toast.success(`${r.t.name} restored`) })}>
+                            <DropdownMenuItem onSelect={() => archive.mutate({ id: r.t.id, version: r.t.updatedAt, restore: true }, { onSuccess: () => toast.success(`${r.t.name} restored`) })}>
                               <ArchiveRestore /> Restore Tanker
                             </DropdownMenuItem>
                           ) : (
-                            <DropdownMenuItem variant="destructive" onSelect={() => archive.mutate({ id: r.t.id }, { onSuccess: () => toast.success(`${r.t.name} archived — its history stays in every report`) })}>
+                            <DropdownMenuItem variant="destructive" onSelect={() => archive.mutate({ id: r.t.id, version: r.t.updatedAt }, { onSuccess: () => toast.success(`${r.t.name} archived — its history stays in every report`) })}>
                               <Archive /> Archive Tanker
                             </DropdownMenuItem>
                           )}
@@ -610,10 +610,10 @@ export function DieselTanker() {
           }
           pending={delLoad.isPending || delExternal.isPending || delTransfer.isPending || delAdjustment.isPending}
           onConfirm={async (reason) => {
-            if (deleting.kind === "load") await delLoad.mutateAsync({ id: deleting.load.id, reason })
-            else if (deleting.kind === "external") await delExternal.mutateAsync({ id: deleting.record.id, reason })
-            else if (deleting.kind === "transfer") await delTransfer.mutateAsync({ id: deleting.record.id, reason })
-            else await delAdjustment.mutateAsync({ id: deleting.record.id, reason })
+            if (deleting.kind === "load") await delLoad.mutateAsync({ id: deleting.load.id, version: deleting.load.updatedAt, reason })
+            else if (deleting.kind === "external") await delExternal.mutateAsync({ id: deleting.record.id, version: deleting.record.updatedAt, reason })
+            else if (deleting.kind === "transfer") await delTransfer.mutateAsync({ id: deleting.record.id, version: deleting.record.updatedAt, reason })
+            else await delAdjustment.mutateAsync({ id: deleting.record.id, version: deleting.record.updatedAt, reason })
             toast.success("Deleted")
           }}
           onClose={() => setDeleting(null)}
@@ -647,7 +647,7 @@ function TankerDialog({ tanker, onOpenChange }: { tanker?: Tanker; onOpenChange:
   })
   const submit = async () => {
     await save.mutateAsync({
-      id: tanker?.id,
+      id: tanker?.id, version: tanker?.updatedAt,
       data: {
         name: f.name,
         regNo: f.regNo,
@@ -707,7 +707,7 @@ function LoadDialog({ load, tankers, defaultTanker, onOpenChange }: { load?: Tan
     if (!f.stationId) return setError("Choose the supplier / fuel station")
     if (!(litres > 0)) return setError("Enter litres loaded")
     if (!(rate > 0)) return setError("Enter the rate per litre")
-    await save.mutateAsync({ id: load?.id, data: { tankerId: f.tankerId, date: f.date, stationId: f.stationId, invoiceNo: f.invoiceNo, litres, rate, notes: f.notes }, reason })
+    await save.mutateAsync({ id: load?.id, version: load?.updatedAt, data: { tankerId: f.tankerId, date: f.date, stationId: f.stationId, invoiceNo: f.invoiceNo, litres, rate, notes: f.notes }, reason })
     toast.success(`${load ? "Load updated" : "Loaded"} — +${L(litres)} into ${tankers.find((t) => t.id === f.tankerId)?.name ?? "the tanker"}`)
     onOpenChange(false)
   }

@@ -1,12 +1,13 @@
 /**
- * Monthly sheet lock. Employees (every role except Owner) can add or change diesel / AdBlue
+ * Monthly sheet lock. Employees can add or change diesel / AdBlue
  * data only while the month is open:
  *
  *   automatic   → the current month is open; once the next month starts, it locks by itself
- *   override    → the Owner can lock a month early, or unlock a closed month for users
- *   Owner       → can always edit, locked or not
+ *   override    → the Owner or Dev can lock a month early, or unlock a closed month for users
+ *   Owner, Dev  → can always edit, locked or not (owner's decision, 3 Nov 2026)
  */
 import type { MonthLock, Role } from "@/lib/types"
+import { hasOwnerAuthority } from "@/lib/permissions"
 import { monthKey } from "@/lib/format"
 
 export type LockState = "OPEN" | "LOCKED"
@@ -29,5 +30,5 @@ export function monthLockInfo(month: string, todayIso: string, locks: MonthLock[
 
 /** Whether `role` may add or change data dated in `month`. */
 export function canEditMonth(role: Role, month: string, todayIso: string, locks: MonthLock[]) {
-  return role === "OWNER" || monthLockInfo(month, todayIso, locks).state === "OPEN"
+  return hasOwnerAuthority(role) || monthLockInfo(month, todayIso, locks).state === "OPEN"
 }

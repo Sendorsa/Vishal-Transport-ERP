@@ -105,12 +105,16 @@ export function buildDieselIndex(ds: Dataset): DieselIndex {
   }
   // Previous recorded odometer per vehicle, ordered by date then odometer. A fill without an
   // odometer (imported history) has no KM of its own and is skipped as anyone's "previous".
+  // A vehicle's go-live opening odometer (its last fill before records began) is the previous reading of its first
+  // fill on or after that date — never a fill itself: no litres, no spend, no entry.
   const prevOdometer = new Map<string, number | null>()
   const byVehicle = new Map<string, DieselEntry[]>()
+  const opening = new Map(ds.vehicles.filter((v) => v.openingOdometerKm != null && v.openingOdometerDate).map((v) => [v.id, v]))
   for (const e of ds.diesel) push(byVehicle, e.vehicleId, e)
-  for (const list of byVehicle.values()) {
+  for (const [vehicleId, list] of byVehicle) {
     list.sort(fillOrder)
-    let last: number | null = null
+    const o = opening.get(vehicleId)
+    let last: number | null = o && !list.some((e) => e.date < o.openingOdometerDate!) ? o.openingOdometerKm! : null
     for (const e of list) {
       prevOdometer.set(e.id, last)
       if (e.odometerKm !== null) last = e.odometerKm

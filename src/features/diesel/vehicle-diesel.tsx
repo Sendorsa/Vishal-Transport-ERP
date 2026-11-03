@@ -16,7 +16,7 @@ import { StatusBadge } from "@/components/shared/status-badge"
 import { asOfMonth, statusOn } from "@/domain/status-history"
 import { assignmentIndex, handoverFrom } from "@/domain/assignments"
 import { fillRow, findGroup, monthLabel, monthProgress, prevMonthKey, shortMonthLabel, vehicleMonth } from "@/domain/diesel"
-import { useCan } from "@/lib/app-state"
+import { useCan, useRole } from "@/lib/app-state"
 import { useAdBlueEntries, useDeleteDiesel } from "@/lib/api/hooks"
 import { isTankerFill, tankerLabel, tankerOf } from "@/domain/tanker"
 import { adBlueStats } from "@/domain/adblue"
@@ -29,6 +29,8 @@ import { AddAdBlueDialog } from "./add-adblue-dialog"
 import { AdBlueSection } from "./adblue-section"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { CompanyLogo, DieselBreadcrumb, FillPaymentBadge, MonthSelect, dieselHref, kpiExplain, useDieselIndex, useDieselMonthOptions, useSyncDieselMonth, MonthLockControl, useMonthLock } from "./parts"
+import { OpeningOdometerDialog } from "@/features/go-live/opening-dialogs"
+import { hasOwnerAuthority } from "@/lib/permissions"
 
 /** Vehicle page: vehicle information → diesel entries (+ add) → monthly history. */
 export function VehicleDiesel({ slug, month, reg }: { slug: string; month: string; reg: string }) {
@@ -44,6 +46,8 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
   const [tab, setTab] = useState<"diesel" | "adblue">("diesel")
   const [editing, setEditing] = useState<DieselEntry | null>(null)
   const [deleting, setDeleting] = useState<DieselEntry | null>(null)
+  const [odometerOpen, setOdometerOpen] = useState(false)
+  const [role] = useRole()
   const del = useDeleteDiesel()
   const today = todayISO()
   const group = idx ? findGroup(idx, slug) : null
@@ -154,6 +158,12 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {/* Go-live opening (owner, 3 Nov 2026): the odometer at its last fill before records began — Owner / Dev. */}
+            {hasOwnerAuthority(role) && (
+              <Button variant="outline" size="sm" onClick={() => setOdometerOpen(true)} title={vehicle.openingOdometerKm != null ? `Opening odometer ${formatNumber(vehicle.openingOdometerKm)} km (${formatDate(vehicle.openingOdometerDate!)})` : undefined}>
+                <Gauge /> {vehicle.openingOdometerKm != null ? "Opening odometer ✓" : "Opening odometer"}
+              </Button>
+            )}
             <MonthSelect months={allMonths} value={month} onChange={(m) => router.push(dieselHref(group.slug, m, vehicle.regNo))} prominent />
           </div>
         </div>
@@ -162,6 +172,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
         </div>
       </div>
 
+      {odometerOpen && <OpeningOdometerDialog vehicle={vehicle} onOpenChange={setOdometerOpen} />}
       {/* 1. Vehicle information */}
       <Card size="sm">
         <CardHeader className="flex flex-row items-center justify-between">
@@ -357,7 +368,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
               : `This removes the fill from the vehicle's fuel history, the customer and monthly diesel totals, and the fuel station's purchases and ledger${deleting.paymentMode === "CASH" ? " (including its cash-at-pump payment)" : ""}. A later fill's KM since last fill then covers the gap, so total KM Run is unchanged.`
           }
           pending={del.isPending}
-          onConfirm={(reason) => del.mutateAsync({ id: deleting.id, reason })}
+          onConfirm={(reason) => del.mutateAsync({ id: deleting.id, version: deleting.updatedAt, reason })}
           onClose={() => setDeleting(null)}
         />
       )}
