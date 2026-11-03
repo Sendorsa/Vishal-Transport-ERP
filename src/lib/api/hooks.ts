@@ -392,9 +392,16 @@ export function useCreateDriverByName() {
 export function useCreateFuelStation() {
   const invalidate = useInvalidate()
   return async (name: string, details?: { location?: string; creditDays?: number }) => {
-    const station = await api.fuelStations.create({ name, ...details })
-    await invalidate("fuel_stations")
-    return station.id
+    try {
+      const station = await api.fuelStations.create({ name, ...details })
+      await invalidate("fuel_stations")
+      return station.id
+    } catch (e) {
+      // Not a useMutation, so nothing else reports it: every caller (Fuel Stations, the Diesel and tanker-load dialogs'
+      // inline "Create …") would otherwise fail silently and leave the dialog waiting.
+      onError(e)
+      throw e
+    }
   }
 }
 

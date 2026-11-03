@@ -351,6 +351,8 @@ function StationDialog({ station, onOpenChange }: { station?: FuelStation; onOpe
       else await create(f.name, details)
       toast.success(`${f.name.trim()} ${station ? "updated" : "added — also available in Diesel entries"}`)
       onOpenChange(false)
+    } catch {
+      // Already reported (toast); the dialog stays open with what was typed, nothing is claimed as saved.
     } finally {
       setPending(false)
     }

@@ -10,6 +10,7 @@ import type { RequestIdentity } from "@/lib/request-scope"
 import { ConflictError } from "@/lib/versions"
 import type { Role } from "@/lib/types"
 import type { Transact } from "./engine"
+import { PG_OPTIONS } from "./pg-options"
 
 /* ------------------------------------------------------------------ connection (server-only secret) */
 
@@ -21,7 +22,7 @@ let client: ReturnType<typeof postgres> | null = null
 export function serverTransact(): Transact {
   const url = process.env.SUPABASE_DB_URL
   if (!url) throw new Error("The shared database isn't configured on this server (SUPABASE_DB_URL).")
-  client ??= postgres(url, { ssl: "require", prepare: false, max: 3, idle_timeout: 20, connect_timeout: 10 })
+  client ??= postgres(url, { ...PG_OPTIONS, ssl: "require" })
   return (fn) => client!.begin((tx) => fn((text, params) => tx.unsafe(text, (params ?? []) as never[]) as never)) as never
 }
 
