@@ -79,7 +79,7 @@ async function main() {
   assert.equal(await count(), n1)
 
   // 4. Edited badge source: edited records only.
-  const edited = await api.audit.editedIds()
+  const edited = new Set(await api.audit.editedIds())
   assert.ok(edited.has(entry.id))
   assert.ok(!edited.has(station.id))
 
@@ -198,7 +198,7 @@ async function main() {
   const after = await log()
   assert.equal(after.length, before + 1)
   assert.deepEqual([after[0].action, after[0].actor.role], ["DATA_RESET", "OWNER"])
-  assert.equal((await api.audit.editedIds()).size, 0)
+  assert.equal((await api.audit.editedIds()).length, 0)
   assert.equal((await api.audit.history(entry.id)).length, 0) // ids may be reused by the new demo data
   assert.ok(after.some((e) => e.recordId === entry.id)) // …but the central log still has every old event
 

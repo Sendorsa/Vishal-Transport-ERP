@@ -1800,7 +1800,7 @@ export const api = {
     /** Ids of records with at least one edit — drives the "Edited" badge. */
     async editedIds() {
       await latency()
-      return editedIds(readAuditEvents())
+      return [...editedIds(readAuditEvents())] // an array: a Set doesn't survive JSON (shared backend)
     },
   },
 }

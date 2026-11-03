@@ -90,7 +90,7 @@ export const useSettings = () => useQuery({ queryKey: queryKeys.settings, queryF
 /** Central Audit Log — the API refuses every role but the Owner. */
 export const useAuditLog = (enabled = true) => useQuery({ queryKey: [...queryKeys.audit, "log"], queryFn: () => api.audit.list(), enabled })
 /** Ids of edited records, for the "Edited" badge. */
-export const useEditedIds = () => useQuery({ queryKey: [...queryKeys.audit, "edited"], queryFn: () => api.audit.editedIds() })
+export const useEditedIds = () => useQuery({ queryKey: [...queryKeys.audit, "edited"], queryFn: () => api.audit.editedIds(), select: (ids) => new Set(ids) })
 /** Unreviewed deletion events — the Owner's Audit Log badge. Only fetched for the Owner (the API refuses others). */
 export const useUnreviewedDeletions = (enabled: boolean) => useQuery({ queryKey: [...queryKeys.audit, "unreviewed"], queryFn: () => api.audit.unreviewedDeletions(), enabled })
 

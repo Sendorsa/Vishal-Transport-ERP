@@ -90,6 +90,10 @@ async function main() {
     await as(DEV, () => api.diesel.remove(fill.id, "Driver check: test entry"), true, { [fill.id]: newer.updatedAt })
     assert.equal((await as(DEV, () => api.diesel.list(), false)).some((e) => e.id === fill.id), false, "a delete with the current version is saved")
 
+    /* -------------------------------------------------------------- 4b. every API result survives JSON (the HTTP transport) */
+    const ids = await as(DEV, () => api.audit.editedIds(), false)
+    assert.ok(Array.isArray(JSON.parse(JSON.stringify(ids))) && ids.includes(station.id), "editedIds is plain JSON (a Set crashed the page in Production)")
+
     /* -------------------------------------------------------------- 5. a refused write never reports success */
     await assert.rejects(as(EMP, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 100, paymentMode: "NEFT", notes: "", companyCode: "VT" })), /can't create payment/)
     const [{ n }] = await client`select count(*)::int as n from finance.payments`
