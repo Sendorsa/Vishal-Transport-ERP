@@ -370,7 +370,7 @@ export function customerCards(idx: DieselIndex, month: string, todayIso: string)
     vehicleCount: cards.reduce((t, c) => t + c.vehicleCount, 0),
     customerCount: cards.filter((c) => c.spend > 0 || c.vehicleCount > 0).length,
     costPerKm: km > 0 ? round2(total / km) : null,
-    kmpl: litres > 0 ? round2(km / litres) : null,
+    kmpl: litres > 0 && km > 0 ? round2(km / litres) : null,
   }
 }
 

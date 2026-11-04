@@ -301,7 +301,7 @@ export function DashboardView() {
               </div>
               <div>
                 <div className="text-xs text-muted-foreground">Fleet kmpl</div>
-                <div className="num font-medium">{m.litres ? (km / m.litres).toFixed(2) : "—"}</div>
+                <div className="num font-medium">{m.litres && km ? (km / m.litres).toFixed(2) : "—"}</div>
               </div>
             </div>
           </CardContent>

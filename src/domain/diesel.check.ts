@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict"
 import { round2 } from "@/lib/format"
-import { dieselByVendor, type Dataset } from "./analytics"
+import { dieselByVendor, vehicleProfitability, type Dataset } from "./analytics"
 import { buildDieselIndex, customerCards, fillRow, groupMonth, vehicleMonth } from "./diesel"
 import { buildMaster, last12Months, litresByFuelType } from "./fuel-master"
 import { QUARTERS, inQuarter, quarterMonths, quarterOf } from "./quarters"
@@ -532,6 +532,13 @@ const recs = (r: Partial<TankerRecords>): TankerRecords => ({ loads: [], fills: 
   const ledOct = ledgerFor(stationLedger("s1", [cashFill, ...loadsAsStationPurchases(loads)], pays), ["2026-10"])
   assert.equal(round2(rowsOct.reduce((t, r) => t + r.amount, 0)), ledOct.paid) // 20,000 manual cash + 930 cash at pump
   assert.equal(ledOct.paid, 20930)
+}
+
+// Kmpl with diesel but no km (no trips yet) is unknown — "—", never a real-looking 0.00 (Vehicles, vehicle page, Dashboard).
+{
+  const dsk = { settings: { expenseCategories: [] }, vehicles: [ds.vehicles[0]], trips: [], payments: [], diesel: [{ ...fill("k1", 0, 150, 13500), vehicleId: ds.vehicles[0].id, date: "2026-11-04" }] } as unknown as Dataset
+  const vp = vehicleProfitability(dsk, { from: "2026-11-01", to: "2026-11-30" })[0]
+  assert.deepEqual([vp.km, vp.litres, vp.diesel, vp.kmpl, vp.costPerKm], [0, 150, 13500, null, null])
 }
 
 // Money rounds exactly like PostgreSQL's round(numeric, 2) (4 Nov 2026): float noise used to round half-paisa amounts down.

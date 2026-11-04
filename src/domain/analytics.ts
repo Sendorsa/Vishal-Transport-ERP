@@ -288,7 +288,7 @@ export function vehicleProfitability(ds: Dataset, range: DateRange): VehicleProf
       revenue: round2(revenue),
       diesel: round2(dieselAmt),
       litres: round2(litres),
-      kmpl: litres > 0 ? round2(km / litres) : null,
+      kmpl: litres > 0 && km > 0 ? round2(km / litres) : null, // no km (no trips) = unknown, never 0.00
       driver: round2(driver),
       maintenance: round2(maintenance),
       fixed: round2(fixed),
