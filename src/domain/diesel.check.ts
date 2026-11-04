@@ -534,6 +534,14 @@ const recs = (r: Partial<TankerRecords>): TankerRecords => ({ loads: [], fills: 
   assert.equal(ledOct.paid, 20930)
 }
 
+// Money rounds exactly like PostgreSQL's round(numeric, 2) (4 Nov 2026): float noise used to round half-paisa amounts down.
+{
+  assert.equal(round2(93.49 * 92.5), 8647.83) // 8647.825 — the float is 8647.824999…; the database stores 8647.83
+  assert.equal(round2(1.005), 1.01)
+  assert.equal(round2(-8647.825), -8647.83) // half away from zero, like PostgreSQL
+  assert.deepEqual([round2(22910.26), round2(0.1 + 0.2), round2(2334.54531), round2(0), round2(-0.004)], [22910.26, 0.3, 2334.55, 0, -0])
+}
+
 // Fuel Stations cards (4 Nov 2026): Total Spend = fuel purchased only; Payments Made and the balance come from the station
 // ledger, for every period (Monthly, Quarterly, Yearly, Financial Year, All Time) — the same figures as the ledger table.
 {

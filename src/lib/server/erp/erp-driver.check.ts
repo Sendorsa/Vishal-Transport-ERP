@@ -86,6 +86,12 @@ async function main() {
     const fill = await as(EMP, () => api.diesel.create({ date: today, vehicleId: vehicle.id, customerId: null, vendorId: station.id, litres: 37.64, rate: 94.8, odometerKm: 1000, billNo: "", paymentMode: "CREDIT" }))
     const back = (await as(DEV, () => api.diesel.list(), false)).find((e) => e.id === fill.id)!
     assert.deepEqual([back.amount, back.date], [3568.27, today])
+    // A half-paisa product: the database's generated amount (exact numeric) and the app's own rounding agree.
+    const half = await as(EMP, () => api.diesel.create({ date: today, vehicleId: vehicle.id, customerId: null, vendorId: station.id, litres: 93.49, rate: 92.5, odometerKm: 1200, billNo: "", paymentMode: "CREDIT" }))
+    const [{ amount: dbAmount }] = await client`select amount::text as amount from fuel.diesel_entries where id = ${half.id}`
+    assert.deepEqual([dbAmount, half.amount], ["8647.83", 8647.83], "the screen's amount before save = the stored amount after")
+    const halfNow = (await as(DEV, () => api.diesel.list(), false)).find((e) => e.id === half.id)!
+    await as(DEV, () => api.diesel.remove(half.id, "Driver check: test entry"), true, { [half.id]: halfNow.updatedAt })
     const newer = (await as(DEV, () => api.diesel.list(), false)).find((e) => e.id === fill.id)!
     await as(DEV, () => api.diesel.remove(fill.id, "Driver check: test entry"), true, { [fill.id]: newer.updatedAt })
     assert.equal((await as(DEV, () => api.diesel.list(), false)).some((e) => e.id === fill.id), false, "a delete with the current version is saved")

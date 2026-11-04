@@ -67,7 +67,8 @@ export async function runInDatabase<T>(transact: Transact, identity: RequestIden
     for (let attempt = 0; ; attempt++) {
       // A fresh in-memory copy for every run (a re-run never sees the previous run's half-done changes).
       const cache = new Map<string, unknown>([...loaded].map(([k, v]) => [k, structuredClone(v)]))
-      const scope: RequestScope = { identity, cache, written: new Set(), expected, newEvents: [], newReviews: [] }
+      // The versions too: a run that advanced them (advanceVersion) and then needed data must not leak into the re-run.
+      const scope: RequestScope = { identity, cache, written: new Set(), expected: { ...expected }, newEvents: [], newReviews: [] }
       try {
         const result = await als.run(scope, call)
         if (write) await persist(sql, scope, loaded, ctx)

@@ -277,6 +277,20 @@ async function main() {
   await api.admin.resetDemoData()
   assert.equal(await count(), 1)
 
+  // A vehicle edit that changes the customer (edit form, Diesel → Add existing vehicle) is one call with one version:
+  // it transfers first, then saves the other fields. It used to refuse itself as someone else's change (4 Nov 2026).
+  {
+    setRole("OWNER")
+    const { withVersions, ConflictError } = await import("@/lib/versions")
+    const v = (await api.vehicles.list()).find((x) => x.status === "ACTIVE" && x.assignedCustomerId)!
+    const other = (await api.customers.list()).find((c) => c.status === "ACTIVE" && c.id !== v.assignedCustomerId && c.companyCode === v.companyCode)!
+    const { id, createdAt, updatedAt, ...data } = v
+    void [createdAt]
+    const saved = await withVersions({ [id]: updatedAt }, () => api.vehicles.update(id, { ...data, assignedCustomerId: other.id, notes: "moved" }))
+    assert.deepEqual([saved.assignedCustomerId, saved.notes], [other.id, "moved"])
+    await assert.rejects(withVersions({ [id]: updatedAt }, () => api.vehicles.update(id, { ...data, assignedCustomerId: other.id, notes: "stale" })), (e: unknown) => e instanceof ConflictError, "a stale screen is still refused")
+  }
+
   console.log("record actions: all checks passed")
 }
 

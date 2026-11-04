@@ -192,6 +192,18 @@ async function main() {
   // Two payments in a row (one write at a time): distinct, gap-free numbers.
   const [pa, pb] = [await as(OWNER, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 1, paymentMode: "UPI", notes: "", companyCode: "VT", forMonth: "2026-11" })), await as(DEV, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 2, paymentMode: "UPI", notes: "", companyCode: "VT", forMonth: "2026-11" }))]
   assert.notEqual(pa.paymentNo, pb.paymentNo)
+  // Editing a vehicle and changing its customer (the edit form, or Diesel → Add existing vehicle) transfers it first,
+  // then saves the other fields — one call, one version. It used to refuse itself as "someone else changed this record".
+  const spare = await as(OWNER, () => api.vehicles.create({ ...bus, regNo: "TN70ZZ0002", assignedCustomerId: null, status: "ACTIVE" } as never))
+  const spareSeen = (await read(OWNER, () => api.vehicles.list())).find((x) => x.id === spare.id)!
+  const { id: _sid, createdAt: _sc, updatedAt: _su, ...spareData } = spareSeen
+  void [_sid, _sc, _su]
+  await as(OWNER, () => api.vehicles.update(spare.id, { ...spareData, assignedCustomerId: tepl.id, notes: "Moved to TEPL" }), true, { [spare.id]: spareSeen.updatedAt })
+  const spareNow = (await read(EMP, () => api.vehicles.list())).find((x) => x.id === spare.id)!
+  assert.deepEqual([spareNow.assignedCustomerId, spareNow.notes], [tepl.id, "Moved to TEPL"], "the customer change and the other fields are both saved")
+  assert.deepEqual((await read(EMP, () => api.assignments.list())).filter((a) => a.vehicleId === spare.id).map((a) => [a.customerId, a.startDate]), [[tepl.id, today]])
+  await assert.rejects(as(OWNER, () => api.vehicles.update(spare.id, { ...spareData, assignedCustomerId: tepl.id, notes: "Stale" }), true, { [spare.id]: spareSeen.updatedAt }), (e: unknown) => e instanceof ConflictError, "a stale screen is still refused")
+  assert.equal((await read(EMP, () => api.vehicles.list())).find((x) => x.id === spare.id)!.assignedCustomerId, tepl.id, "…and changed nothing")
 
   /* ---------------------------------------------------------------- 9. month lock: Employee refused, Dev and Owner allowed; recorded as who did it */
   const octFill = await as(OWNER, () => api.diesel.create({ ...fill(10, 119000), date: "2026-10-30" }))

@@ -88,8 +88,13 @@ export function monthKey(iso: string) {
   return iso.slice(0, 7)
 }
 
+/**
+ * Money to the paisa, half away from zero — exactly like PostgreSQL's round(numeric, 2), which computes the stored
+ * amounts. Float noise made 93.49 L × ₹92.50 = 8647.825 round to ₹8,647.82 here and ₹8,647.83 in the database
+ * (fixed 4 Nov 2026): 15 significant digits drop the noise before rounding.
+ */
 export function round2(n: number) {
-  return Math.round(n * 100) / 100
+  return (Math.sign(n) * Math.round(Number((Math.abs(n) * 100).toPrecision(15)))) / 100
 }
 
 const ONES = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"]

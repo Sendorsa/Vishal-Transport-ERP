@@ -47,6 +47,16 @@ export async function runWithVersions<T>(versions: Record<string, string> | null
   }
 }
 
+/**
+ * A record this same call has just changed (its new version): later steps of the call check against that, not the
+ * screen's version — e.g. a vehicle edit that changes the customer transfers it first, then saves the other fields.
+ * Without it the second step saw its own first step as "someone else's change" (fixed 4 Nov 2026).
+ */
+export function advanceVersion(id: string, version: string) {
+  const v = requestScope()?.expected ?? active
+  if (v && Object.hasOwn(v, id)) v[id] = version
+}
+
 /** Throws ConflictError when the user's version of `record` is not the stored one. No version given = no check. */
 export function assertVersion(record: { id: string; updatedAt: string }) {
   const expected = (requestScope()?.expected ?? active ?? {})[record.id]

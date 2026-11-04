@@ -7,7 +7,7 @@ import type { BaseEntity, CollectionKey, CollectionMap, NewEntity } from "@/lib/
 import { readCollection, writeCollection } from "@/lib/storage/local-store"
 import { ensureSeeded } from "./bootstrap"
 import { requestScope } from "@/lib/request-scope"
-import { assertVersion } from "@/lib/versions"
+import { advanceVersion, assertVersion } from "@/lib/versions"
 
 export interface Repository<T extends BaseEntity> {
   list(): Promise<T[]>
@@ -67,6 +67,7 @@ export function createLocalRepository<K extends CollectionKey>(
       if (idx < 0) throw new NotFoundError(key, id)
       assertVersion(items[idx]) // a stale screen never overwrites someone else's newer change
       const updated = { ...items[idx], ...patch, id, updatedAt: new Date().toISOString() } as T
+      advanceVersion(id, updated.updatedAt) // a later step of this call may change it again
       const next = items.slice()
       next[idx] = updated
       writeCollection(key, next)

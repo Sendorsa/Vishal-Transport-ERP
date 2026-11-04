@@ -11,7 +11,7 @@
     "check:diesel": "tsx src/domain/diesel.check.ts",
     "check:audit": "tsx src/lib/api/audit.check.ts",
     "check:actions": "tsx src/lib/api/actions.check.ts",
-    "check": "npm run check:diesel && npm run check:audit && npm run check:actions && npm run check:restore && npm run check:roles && npm run check:backup && npm run check:tankers && npm run check:month && npm run check:fresh-start && npm run check:supabase && npm run check:supabase-diesel && npm run check:erp-db && npm run check:erp-driver && npm run check:auth && npm run check:clean-start && npm run check:mobile",
+    "check": "npm run check:diesel && npm run check:audit && npm run check:actions && npm run check:restore && npm run check:roles && npm run check:backup && npm run check:tankers && npm run check:month && npm run check:fresh-start && npm run check:supabase && npm run check:supabase-diesel && npm run check:erp-db && npm run check:erp-driver && npm run check:erp-fields && npm run check:erp-errors && npm run check:auth && npm run check:clean-start && npm run check:mobile",
     "check:restore": "tsx src/lib/api/restore.check.ts",
     "check:roles": "tsx src/lib/api/roles.check.ts",
     "check:backup": "tsx src/lib/api/backup.check.ts",
@@ -29,7 +29,9 @@
     "check:clean-start": "tsx src/lib/api/clean-start.check.ts",
     "check:mobile": "tsx src/lib/keyboard.check.ts",
     "check:erp-db": "tsx src/lib/server/erp/erp-db.check.ts",
-    "check:erp-driver": "tsx src/lib/server/erp/erp-driver.check.ts"
+    "check:erp-driver": "tsx src/lib/server/erp/erp-driver.check.ts",
+    "check:erp-fields": "tsx src/lib/server/erp/erp-fields.check.ts",
+    "check:erp-errors": "tsx src/lib/server/erp/errors.check.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.9.1",
