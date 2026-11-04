@@ -19,7 +19,7 @@ import { adBlueStats, withRuns } from "./adblue"
 import { asOfMonth, historyOf, statusOn, withStatus } from "./status-history"
 import { canEditMonth, monthLockInfo } from "./month-lock"
 import { balanceType, ledgerFor, stationLedger, stationPaymentHistory } from "./station-ledger"
-import { inStationPeriod, stationSummary, stationTransactions } from "./fuel-stations"
+import { inStationPeriod, stationCard, stationSummary, stationTransactions } from "./fuel-stations"
 import { activeVehicleIds, handoverFrom, inferAssignments, resolveCustomers, customerVehicles, searchVehicles, transferPeriods } from "./assignments"
 import { matchesSearch } from "@/lib/utils"
 
@@ -532,6 +532,37 @@ const recs = (r: Partial<TankerRecords>): TankerRecords => ({ loads: [], fills: 
   const ledOct = ledgerFor(stationLedger("s1", [cashFill, ...loadsAsStationPurchases(loads)], pays), ["2026-10"])
   assert.equal(round2(rowsOct.reduce((t, r) => t + r.amount, 0)), ledOct.paid) // 20,000 manual cash + 930 cash at pump
   assert.equal(ledOct.paid, 20930)
+}
+
+// Fuel Stations cards (4 Nov 2026): Total Spend = fuel purchased only; Payments Made and the balance come from the station
+// ledger, for every period (Monthly, Quarterly, Yearly, Financial Year, All Time) — the same figures as the ledger table.
+{
+  const tx = (id: string, date: string, amount: number, paymentMode: "CREDIT" | "CASH" = "CREDIT") =>
+    ({ id, date, vehicleId: "v1", customerId: "c1", kind: "DIESEL" as const, qty: amount / 100, rate: 100, amount, createdAt: "", vendorId: "s1", paymentMode })
+  const pay = (id: string, date: string, amount: number, mode: string, tdsAmount = 0) => ({ id, paymentNo: id, vendorId: "s1", date, amount, tdsAmount, direction: "OUT" as const, categoryCode: "DIESEL_SETTLEMENT", mode, notes: "" })
+  const txns = [tx("f1", "2026-09-10", 100000), tx("f2", "2026-10-04", 930, "CASH"), tx("f3", "2027-02-10", 2000)]
+  const pays = [pay("p1", "2026-10-15", 70000, "NEFT"), pay("p2", "2026-10-20", 10000, "CASH"), pay("p3", "2026-10-31", 0, "TDS", 100), pay("p4", "2027-03-05", 1000, "NEFT")]
+  const ledger = stationLedger("s1", txns, pays, "2027-03", { date: "2026-08-31", amount: 5000 }) // ₹5,000 Debit opening
+  const card = (months?: string[]) => stationCard(txns, ledger, { match: (t) => !months || months.includes(t.date.slice(0, 7)), months })
+  const figs = (months?: string[]) => { const c = card(months); return [c.combinedSpend, c.paid, c.closing] }
+  const year = (y: string) => Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, "0")}`)
+  assert.deepEqual(figs(["2026-09"]), [100000, 0, 105000]) // Monthly: nothing paid yet
+  assert.deepEqual(figs(["2026-10"]), [930, 81030, 24900]) // NEFT 70,000 + manual cash 10,000 + cash at pump 930 + TDS 100
+  assert.deepEqual(figs(quarterMonths("2026", 4)), [930, 81030, 24900]) // Quarterly
+  assert.deepEqual(figs(year("2026")), [100930, 81030, 24900]) // Yearly (calendar), from the ₹5,000 opening
+  assert.deepEqual(figs(year("2027")), [2000, 1000, 25900])
+  assert.deepEqual(figs(fyMonths(2026)), [102930, 82030, 25900]) // Financial Year 2026-27
+  assert.deepEqual(figs(), [102930, 82030, 25900]) // All Time
+  // Payments never change Total Spend, and the card agrees with the ledger and the payment history.
+  const noPay = stationLedger("s1", txns, [], "2027-03", { date: "2026-08-31", amount: 5000 })
+  assert.equal(stationCard(txns, noPay, { match: (t) => t.date.startsWith("2026-10"), months: ["2026-10"] }).combinedSpend, 930)
+  assert.equal(card(["2026-10"]).paid, ledgerFor(ledger, ["2026-10"]).paid)
+  assert.equal(round2(stationPaymentHistory("s1", pays, txns).filter(inStationPeriod("2026-10")).reduce((t, r) => t + r.amount, 0)), card(["2026-10"]).paid)
+  assert.equal(balanceType(card(["2026-10"]).closing), "DEBIT")
+  // Recording a payment moves Payments Made and the balance on the card, never Total Spend.
+  const more = stationLedger("s1", txns, [...pays, pay("p5", "2026-10-25", 30000, "UPI")], "2027-03", { date: "2026-08-31", amount: 5000 })
+  const after = stationCard(txns, more, { match: (t) => t.date.startsWith("2026-10"), months: ["2026-10"] })
+  assert.deepEqual([after.combinedSpend, after.paid, after.closing, balanceType(after.closing)], [930, 111030, -5100, "CREDIT"])
 }
 
 /* Search boxes: vehicle search (Diesel landing) and the shared match (customer searches). */

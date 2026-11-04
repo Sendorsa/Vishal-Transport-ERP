@@ -18,7 +18,7 @@ import { SimpleSelect } from "@/components/shared/simple-select"
 import { StatsCard } from "@/components/shared/stats-card"
 import { StatusBadge } from "@/components/shared/status-badge"
 import { monthLabel } from "@/domain/diesel"
-import { stationSummary, stationTransactions, type StationKind, type StationTxn } from "@/domain/fuel-stations"
+import { stationCard, stationSummary, stationTransactions, type StationKind, type StationTxn } from "@/domain/fuel-stations"
 import { QUARTERS, inQuarter } from "@/domain/quarters"
 import { QuarterComparison } from "@/components/shared/quarter-comparison"
 import { balanceType, ledgerFor, openingOf, stationPaymentHistory, stationLedger, tdsDate, tdsDue } from "@/domain/station-ledger"
@@ -116,7 +116,7 @@ export function FuelStations() {
 
   if (!can("diesel")) return <NoAccess what="fuel stations" />
   if (isLoading || !data) return <PageSkeleton />
-  const all = data.stations.map((v) => ({ v, s: stationSummary(data.txnsOf(v.id).filter(period.match)) }))
+  const all = data.stations.map((v) => ({ v, s: stationCard(data.txnsOf(v.id), data.ledgerOf(v.id), { match: period.match, months: period.periodMonths }) }))
   const ledgers = data.stations.map((v) => ({ v, l: ledgerFor(data.ledgerOf(v.id), period.periodMonths) })).filter((x) => x.l.opening || x.l.purchased || x.l.paid || x.l.closing)
   const tot = {
     purchased: ledgers.reduce((t, x) => t + x.l.purchased, 0),
@@ -220,6 +220,10 @@ export function FuelStations() {
                     <div className="num text-2xl font-semibold tracking-tight">{formatINR(s.combinedSpend)}</div>
                     <div className="text-xs text-muted-foreground">Total Spend · {period.label}</div>
                   </div>
+                  <dl className="grid grid-cols-2 gap-x-3 text-sm">
+                    <Figure label="Payments Made" value={formatINR(s.paid)} />
+                    <Figure label="Balance" value={<BalanceBadge amount={s.closing} />} />
+                  </dl>
                   <dl className="grid grid-cols-3 gap-x-3 border-t pt-2.5 text-sm">
                     <Figure label="Diesel" value={L(s.dieselLitres)} />
                     <Figure label="Petrol" value={L(s.petrolLitres)} />

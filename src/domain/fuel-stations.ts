@@ -10,6 +10,7 @@
  *   Vehicles / Customers Served = distinct ids across all those transactions
  */
 import { byEntryOrder } from "./payment-order"
+import { ledgerFor, type LedgerRow } from "./station-ledger"
 import { isTankerLoadId } from "./tanker"
 import type { AdBlueEntry, DieselEntry, FuelType, Vehicle } from "@/lib/types"
 import { round2 } from "@/lib/format"
@@ -60,6 +61,15 @@ export function stationSummary(txns: StationTxn[]) {
     vehiclesServed: new Set(txns.filter((t) => !isTankerLoadId(t.id)).map((t) => t.vehicleId).filter(Boolean)).size,
     customersServed: new Set(txns.map((t) => t.customerId).filter(Boolean)).size,
   }
+}
+
+/**
+ * A station card for the selected period: Total Spend (fuel purchased — stationSummary, never mixed with payments)
+ * plus Payments Made and the closing balance from the station ledger (ledgerFor) — the same figures as the ledger table.
+ */
+export function stationCard(txns: StationTxn[], ledger: LedgerRow[], period: { match: (t: { date: string }) => boolean; months?: string[] }) {
+  const l = ledgerFor(ledger, period.months)
+  return { ...stationSummary(txns.filter(period.match)), paid: l.paid, closing: l.closing }
 }
 
 /** Period filter: "2026-10" (month), "2026" (year) or "" (all time). */
