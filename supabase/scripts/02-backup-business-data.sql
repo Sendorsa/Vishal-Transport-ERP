@@ -1,4 +1,4 @@
--- READ-ONLY. Backup of every business table, as one JSON document, before the go-live reset.
+-- READ-ONLY. Backup of every business table, the audit trail and the configuration, as one JSON document, before a reset.
 -- Run in the SQL Editor; download the single result cell (or copy it) and keep it outside Supabase.
 -- Verify: the counts in "row_counts" must equal the number of rows in each "tables" entry, and must match
 -- 03-reset-business-data.sql's preview. Tables that don't exist yet (migrations not applied) show null.
@@ -18,11 +18,14 @@ with t(name) as (values
   ('fuel.fuel_stations'), ('fuel.tankers'), ('fuel.diesel_entries'), ('fuel.tanker_loads'), ('fuel.tanker_transfers'),
   ('fuel.tanker_adjustments'), ('fuel.adblue_purchases'), ('fuel.adblue_entries'),
   ('finance.payment_categories'), ('finance.payments'), ('finance.payment_allocations'),
-  ('ops.trips'), ('billing.invoices'), ('billing.invoice_lines'), ('billing.invoice_line_trips')
+  ('ops.trips'), ('billing.invoices'), ('billing.invoice_lines'), ('billing.invoice_line_trips'),
+  -- the audit trail and role permissions too (4 Nov 2026: the clean reset can clear the audit trail)
+  ('audit.events'), ('audit.reviews'), ('core.role_permissions')
 )
 select jsonb_build_object(
   'format', 'vishal-erp-db-backup',
   'exported_at', now(),
   'row_counts', (select jsonb_object_agg(name, jsonb_array_length(coalesce(pg_temp.rows_of(name), '[]'::jsonb))) from t),
   'tables', (select jsonb_object_agg(name, pg_temp.rows_of(name)) from t)
-) as backup;
+) as backup,
+  (select jsonb_object_agg(name, jsonb_array_length(coalesce(pg_temp.rows_of(name), '[]'::jsonb))) from t) as row_counts;

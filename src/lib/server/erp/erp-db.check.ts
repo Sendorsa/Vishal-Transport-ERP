@@ -294,6 +294,74 @@ async function main() {
   const resetDel = (await read(DEV, () => api.audit.list())).find((e) => e.action === "DELETED" && e.recordId === bus.id && e.actor.kind === "SYSTEM")!
   assert.ok(!(await read(DEV, () => api.audit.checkRestore(resetDel.id))).ok, "records cleared by the go-live reset can't be pushed back")
 
+  /* ---------------------------------------------------------------- 15. clean reset preserving every account (scripts 04 inventory, 05 parts A and B) */
+  // Business data again (after the go-live reset): a station, a customer, payments, a reviewed deletion, a month lock.
+  const st2 = await as(OWNER, () => api.fuelStations.create({ name: "Shrudu Fuels", location: "" }))
+  await as(OWNER, () => api.customers.create({ ...minda, code: "JBM", shortName: "JBM", name: "JBM Bidadi" } as never))
+  const payKeep = { stationId: st2.id, paymentDate: today, paymentMode: "UPI" as const, notes: "", companyCode: "VT" as const, forMonth: today.slice(0, 7) }
+  await as(OWNER, () => api.fuelStationPayments.create({ ...payKeep, amount: 500 }))
+  const pay2 = await as(OWNER, () => api.fuelStationPayments.create({ ...payKeep, amount: 7 }))
+  const pay2Now = (await read(OWNER, () => api.payments.list())).find((x) => x.id === pay2.id)!
+  await as(OWNER, () => api.fuelStationPayments.remove(pay2.id, "Entered twice"), true, { [pay2.id]: pay2Now.updatedAt })
+  const pay2Del = (await read(DEV, () => api.audit.list())).find((e) => e.action === "DELETED" && e.recordId === pay2.id)!
+  await as(OWNER, () => api.audit.markReviewed([pay2Del.id]))
+  await as(DEV, () => api.monthLocks.set("2026-09", "LOCKED"))
+  await db.exec(`alter table auth.users add column if not exists updated_at timestamptz default now(), add column if not exists last_sign_in_at timestamptz`) // as in Supabase
+  type Inv = { tables: Record<string, number>; unknown_tables: string[]; account_fks: { from: string; to: string; on_delete: string }[]; profile_fks: { to: string }[]; accounts: Record<string, unknown>; audit_guards: Record<string, string>; audit_by_module: Record<string, number> | null }
+  const inventory = async () => ((await db.exec(readFileSync(new URL("04-inventory.sql", scripts), "utf8"))).at(-1)!.rows[0] as { inventory: Inv }).inventory
+  const inv0 = await inventory()
+  assert.deepEqual(inv0.unknown_tables, [], "the reset script knows every table")
+  assert.ok(inv0.profile_fks.every((f) => ["public.profiles", "auth.users"].includes(f.to)), "no foreign key from accounts into business data (nothing can cascade into a profile)")
+  assert.ok(inv0.account_fks.length >= 4)
+  assert.ok(inv0.tables["core.customers"] >= 1 && inv0.tables["finance.payments"] >= 1 && inv0.tables["audit.reviews"] >= 1 && inv0.tables["core.month_locks"] >= 1 && inv0.tables["fuel.tankers"] === 3)
+  const reset05 = readFileSync(new URL("05-clean-reset-preserve-profiles.sql", scripts), "utf8")
+  const partA = reset05.slice(reset05.indexOf("\nbegin;") + 1, reset05.indexOf("\ncommit;") + 8)
+  const partB = reset05.slice(reset05.lastIndexOf("\nbegin;") + 1, reset05.lastIndexOf("\ncommit;") + 8)
+  const REF = (sql: string) => sql.replace("TYPE-PROJECT-REF", "dqnoducqiootfvkzskhu")
+  const refused = async (sql: string, why: RegExp) => {
+    await assert.rejects(db.exec(sql), why)
+    await db.exec("rollback").catch(() => undefined)
+    assert.deepEqual((await inventory()).tables, inv0.tables, "a refused run changes nothing")
+  }
+  await refused(partA, /Not confirmed/)
+  await db.exec("create table core.zz_reservations (id int)")
+  await assert.rejects(db.exec(REF(partA)), /does not know: core\.zz_reservations/, "an uninspected table stops the reset")
+  await db.exec("rollback").catch(() => undefined)
+  await db.exec("drop table core.zz_reservations")
+  await refused(REF(partB).replace("TYPE-MODE", "BUSINESS"), /run Part A first/)
+  await refused(REF(partB), /Choose the mode/)
+  // Part A: every business table empty; accounts, Google identities and configuration identical.
+  await db.exec(REF(partA))
+  const inv1 = await inventory()
+  for (const [t, n] of Object.entries(inv1.tables))
+    if (!["public.profiles", "core.role_permissions", "core.companies", "core.vehicle_types", "core.app_settings", "finance.payment_categories", "audit.events", "audit.reviews"].includes(t))
+      assert.equal(n, t === "fuel.fuel_stations" ? 1 : 0, `part A cleared ${t}`)
+  assert.deepEqual(inv1.accounts, inv0.accounts, "every profile, auth user and identity exactly as before")
+  for (const t of ["core.role_permissions", "core.companies", "core.vehicle_types", "core.app_settings", "finance.payment_categories", "audit.reviews"]) assert.equal(inv1.tables[t], inv0.tables[t], `${t} kept`)
+  assert.ok(inv1.tables["audit.events"] > inv0.tables["audit.events"], "part A only adds to the audit trail")
+  // Part B, BUSINESS: only the Accounts history and one marker remain; the append-only guard is back on.
+  const accountEvents = inv0.audit_by_module?.Accounts ?? 0
+  await db.exec(REF(partB).replace("TYPE-MODE", "BUSINESS"))
+  const inv2 = await inventory()
+  assert.deepEqual(inv2.audit_by_module, { ...(accountEvents ? { Accounts: accountEvents } : {}), System: 1 }, "business audit history cleared, account history kept")
+  assert.equal(inv2.tables["audit.reviews"], 0)
+  assert.ok(Object.values(inv2.audit_guards).every((s) => s === "O"), "every audit trigger enabled again")
+  assert.deepEqual(inv2.accounts, inv0.accounts)
+  await assert.rejects(db.exec("delete from audit.events"), /append-only/, "the trail is append-only again")
+  await assert.rejects(db.exec(`update public.profiles set full_name = 'Changed' where id = '${P.EMP}'`), /audit|account/i, "an account change still needs its audit event")
+  await db.exec("rollback").catch(() => undefined)
+  // Part B, ALL: nothing but the marker.
+  await db.exec(REF(partB).replace("TYPE-MODE", "ALL"))
+  const inv3 = await inventory()
+  assert.deepEqual([inv3.tables["audit.events"], inv3.tables["audit.reviews"], inv3.audit_by_module], [1, 0, { System: 1 }])
+  assert.deepEqual(inv3.accounts, inv0.accounts)
+  // The application still authenticates its accounts and works on the clean database.
+  assert.equal((await read(EMP, () => api.fuelStations.list())).length, 1, "only dv_tanker")
+  const fresh2 = await as(OWNER, () => api.fuelStations.create({ name: "Vishal Gasoline" }))
+  assert.ok((await read(EMP, () => api.fuelStations.list())).some((x) => x.id === fresh2.id), "a new record after the reset is saved and visible to another account")
+  assert.equal((await read(DEV, () => api.audit.list())).filter((e) => e.recordId === fresh2.id).length, 1, "…with its audit event")
+  await assert.rejects(as(EMP, () => api.customers.create({ ...minda, code: "Y" } as never)), /can't create customer/, "role permissions still apply")
+
   console.log("shared database (engine + RLS + every migration, three accounts): all checks passed")
 }
 
