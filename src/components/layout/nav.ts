@@ -54,11 +54,12 @@ export const NAV_ITEMS: NavItem[] = [
 ]
 
 /**
- * Sidebar visibility only — not a permission. Dev and the Owner see every item their role can use (owner's decision,
- * 3 Nov 2026: the Owner runs every business module); the Employee sees only the Fuel section. Hidden modules keep
- * their routes and permissions (src/lib/permissions.ts).
+ * Sidebar visibility only — not a permission (owner, 4 Nov 2026). Dev sees every item its role can use, unchanged.
+ * The Owner and the Employee see only the Fuel section and the Audit Log (Settings and every other section hidden);
+ * the Audit Log still needs the `audit` permission (`navFor`), which the Employee doesn't have. Hidden modules keep
+ * their routes, permissions and API access (src/lib/permissions.ts).
  */
-export const showInNav = (role: Role, item: NavItem) => role !== "EMPLOYEE" || item.group === "Fuel"
+export const showInNav = (role: Role, item: NavItem) => role === "DEV" || item.group === "Fuel" || item.href === "/audit"
 
 export function isActive(pathname: string, href: string) {
   return href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`)

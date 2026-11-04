@@ -45,20 +45,24 @@ async function main() {
     assert.equal(storage.getItem("vt:ui:role"), legacy) // the stored value is left as it was
   }
   setRole("OWNER")
-  // Sidebar: Dev and the Owner see every module their role can use; the Employee only the Fuel section.
+  // Sidebar (owner, 4 Nov 2026): Dev sees everything; the Owner and the Employee only Fuel + the Audit Log (with permission).
   const { NAV_ITEMS, showInNav } = await import("@/components/layout/nav")
   const shown = (role: (typeof ROLES)[number]["value"]) => NAV_ITEMS.filter((i) => can(role, i.resource) && showInNav(role, i)).map((i) => i.title)
   const fuel = NAV_ITEMS.filter((i) => i.group === "Fuel").map((i) => i.title)
   assert.deepEqual(shown("DEV"), NAV_ITEMS.map((i) => i.title))
-  assert.deepEqual(shown("OWNER"), NAV_ITEMS.map((i) => i.title), "OWNER sidebar: every business module (no Dev-only item exists in the sidebar)")
-  assert.deepEqual(shown("EMPLOYEE"), fuel, "EMPLOYEE sidebar")
+  assert.deepEqual(shown("OWNER"), [...fuel, "Audit Log"], "OWNER sidebar: Fuel + Audit Log; no Settings, no other section")
+  assert.deepEqual(shown("OWNER"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Audit Log"])
+  assert.deepEqual(shown("EMPLOYEE"), fuel, "EMPLOYEE sidebar: Fuel (the Audit Log needs the audit permission, which the Employee doesn't have)")
   assert.deepEqual(shown("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"])
+  // Visibility only: the hidden modules keep every permission (direct URLs and the API behave as before).
+  for (const r of ["dashboard", "customers", "vehicles", "trips", "invoices", "payments", "reports", "settings", "audit"] as const) assert.ok(can("OWNER", r), `OWNER keeps ${r}`)
+  assert.ok(!can("EMPLOYEE", "audit") && !can("EMPLOYEE", "settings") && can("EMPLOYEE", "trips") && can("EMPLOYEE", "dashboard"), "EMPLOYEE permissions unchanged")
 
   // Phone tab bar: four of the role's own items; "More" (the drawer) holds the rest of that same list.
   const { mobileTabs, navFor, isActive } = await import("@/components/layout/nav")
   const tabs = (role: (typeof ROLES)[number]["value"]) => mobileTabs(role).map((i) => i.title)
   assert.deepEqual(tabs("DEV"), ["Dashboard", "Trips", "Diesel", "Invoices"], "Dev's tabs")
-  assert.deepEqual(tabs("OWNER"), ["Dashboard", "Trips", "Diesel", "Invoices"], "Owner's tabs")
+  assert.deepEqual(tabs("OWNER"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"], "Owner's tabs (Audit Log under More)")
   assert.deepEqual(tabs("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"], "Employee's tabs")
   for (const r of ROLES) {
     assert.equal(mobileTabs(r.value).length, 4, `${r.label}: four tabs`)
