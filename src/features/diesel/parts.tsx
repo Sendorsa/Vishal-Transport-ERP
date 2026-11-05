@@ -2,10 +2,11 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useSyncExternalStore } from "react"
 import Link from "next/link"
-import { CalendarDays, ChevronRight, Lock, LockOpen } from "lucide-react"
+import { CalendarDays, ChevronRight, Info, Lock, LockOpen } from "lucide-react"
 import { addMonths, format, parseISO } from "date-fns"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { StatusBadge } from "@/components/shared/status-badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import {
@@ -36,6 +37,28 @@ export function useDieselIndex() {
 export function FillPaymentBadge({ entry }: { entry: Pick<DieselEntry, "vendorId" | "paymentMode"> }) {
   return isTankerFill(entry) ? <StatusBadge status="TANKER" label="From tanker" tone="gray" /> : <StatusBadge status={entry.paymentMode} />
 }
+
+/**
+ * The Mileage column of a fill table: header with an ⓘ saying how it's calculated (the StatsCard tooltip), and the
+ * cell — a fill's `fillMileage` (domain/diesel.ts) to 2 decimals, or "—" when there is none.
+ */
+export function MileageHeader({ unit }: { unit: "L" | "kWh" }) {
+  const info = `This fill's mileage = KM since last fill ÷ ${unit === "kWh" ? "units charged (kWh)" : "litres filled"}. Shown as — for a first fill, a missing odometer or previous reading, no ${unit === "kWh" ? "units" : "litres"}, or a KM since last fill that isn't positive.`
+  return (
+    <span className="inline-flex items-center gap-1">
+      Mileage (km/{unit})
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button type="button" aria-label={`How Mileage is calculated: ${info}`} className="shrink-0 cursor-help rounded-sm opacity-60 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-2">
+            <Info className="size-3" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-64 font-normal">{info}</TooltipContent>
+      </Tooltip>
+    </span>
+  )
+}
+export const mileageText = (kmpl: number | null, unit: "L" | "kWh") => (kmpl === null ? "—" : `${kmpl.toFixed(2)} km/${unit}`)
 
 /* ------------------------------------------------------------------ Company monogram */
 

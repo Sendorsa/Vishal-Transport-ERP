@@ -315,7 +315,13 @@ async function main() {
       const mine = (await api.diesel.list()).filter((e) => e.vehicleId === bus.id)
       return Object.fromEntries(mine.map((e) => [e.id, fillRow(idx, e).kmSince]))
     }
+    const mileage = async () => {
+      const ds = { vehicles: await api.vehicles.list(), drivers: [], diesel: await api.diesel.list(), trips: [], customers: await api.customers.list(), assignments: await api.assignments.list() } as never
+      const idx = buildDieselIndex(ds)
+      return Object.fromEntries((await api.diesel.list()).filter((e) => e.vehicleId === bus.id).map((e) => [e.id, fillRow(idx, e).kmpl]))
+    }
     assert.deepEqual(await km(), { [a.id]: null, [b.id]: 500, [c.id]: 500 })
+    assert.deepEqual(await mileage(), { [a.id]: null, [b.id]: 10, [c.id]: 10 }, "mileage = KM since last fill ÷ litres; first fill —")
     const edit = (e: typeof b, odometerKm: number | null, extra: object = {}) =>
       api.diesel.update(e.id, { date: e.date, vendorId: e.vendorId, litres: e.litres, rate: e.rate, odometerKm, billNo: e.billNo, paymentMode: e.paymentMode, tankerId: e.tankerId, ...extra })
     const before = { a: await api.diesel.get(a.id), c: await api.diesel.get(c.id) }
@@ -327,6 +333,7 @@ async function main() {
     assert.equal(readCollection("diesel_entries").filter((e) => e.vehicleId === bus.id).length, 3, "an edit never creates a record")
     // 5. Dependent KM: this fill and the next one both follow the corrected reading.
     assert.deepEqual(await km(), { [a.id]: null, [b.id]: 600, [c.id]: 400 })
+    assert.deepEqual(await mileage(), { [a.id]: null, [b.id]: 12, [c.id]: 8 }, "an edited reading: this fill's and the next fill's mileage follow")
     // 6. The neighbours are untouched.
     assert.deepEqual([await api.diesel.get(a.id), await api.diesel.get(c.id)], [before.a, before.c])
     // 7. Invalid readings are refused, and nothing changes.
@@ -341,6 +348,12 @@ async function main() {
     await assert.rejects(api.diesel.create(odoFill(day(1), null)), /Enter the odometer reading/, "a new fill always has a reading")
     assert.equal((await api.diesel.get(b.id))!.odometerKm, 1600)
     assert.equal(await logSize(), log0, "refused edits leave no audit event")
+    // Editing litres recalculates mileage (600 km ÷ 48 L); deleting the earlier fill leaves this one without a previous
+    // reading (—), and the later fill is unchanged.
+    await edit((await api.diesel.get(b.id))!, 1600, { litres: 48 })
+    assert.deepEqual(await mileage(), { [a.id]: null, [b.id]: 12.5, [c.id]: 8 })
+    await api.diesel.remove(a.id, "Check: earlier fill removed")
+    assert.deepEqual(await mileage(), { [b.id]: null, [c.id]: 8 })
     // The same day reorders by odometer, so it never conflicts.
     const sameDay = await api.diesel.create(odoFill(day(20), 1550))
     // The vehicle's last known km: a typo raises it, its correction lowers it back, a delete takes it to what's left.

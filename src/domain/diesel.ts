@@ -199,15 +199,23 @@ export interface FillRow {
   prevOdometer: number | null
   /** odometer − prevOdometer; null when there is no previous fill or no odometer. Negative = data entry error. */
   kmSince: number | null
+  /** This fill's mileage: kmSince ÷ litres (fillMileage). */
+  kmpl: number | null
 }
+
+/**
+ * Mileage of one fill = KM since last fill ÷ litres filled (units for an EV charge: km/kWh), rounded to 2 decimals.
+ * null — shown as "—" — when there is no KM since last fill (first fill, no odometer, no previous reading), when that
+ * KM isn't positive (a lower or equal reading is a data error, never a mileage), or when no litres were filled.
+ * Derived on read like KM since last fill, so it follows every edit or delete of this fill or its neighbours.
+ */
+export const fillMileage = (kmSince: number | null, litres: number): number | null =>
+  kmSince !== null && kmSince > 0 && litres > 0 ? round2(kmSince / litres) : null
 
 export function fillRow(idx: DieselIndex, e: DieselEntry): FillRow {
   const prev = idx.prevOdometer.get(e.id) ?? null
-  return {
-    entry: e,
-    prevOdometer: prev,
-    kmSince: prev === null || e.odometerKm === null ? null : e.odometerKm - prev,
-  }
+  const kmSince = prev === null || e.odometerKm === null ? null : e.odometerKm - prev
+  return { entry: e, prevOdometer: prev, kmSince, kmpl: fillMileage(kmSince, e.litres) }
 }
 
 /* ------------------------------------------------------------------ Stats */

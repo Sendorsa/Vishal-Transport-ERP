@@ -21,7 +21,8 @@ import { PageHeader } from "@/components/shared/page-header"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { StatsCard } from "@/components/shared/stats-card"
 import { CompanyBadge, StatusBadge } from "@/components/shared/status-badge"
-import { FillPaymentBadge } from "@/features/diesel/parts"
+import { FillPaymentBadge, MileageHeader, mileageText } from "@/features/diesel/parts"
+import { buildDieselIndex, fillRow } from "@/domain/diesel"
 import { categoryName, complianceAlerts, vehicleProfitability } from "@/domain/analytics"
 import { monthKeysInRange, rangeForPreset } from "@/domain/periods"
 import { useCreatePayment, useDataset } from "@/lib/api/hooks"
@@ -56,12 +57,16 @@ export function VehicleDetail({ id }: { id: string }) {
       return { month: m, label: formatMonthKey(m), revenue: p.revenue, cost: p.totalCost, contribution: p.contribution, km: p.km, litres: p.litres, kmpl: p.kmpl }
     })
     const diesel = inEntryOrder(ds.diesel.filter((e) => e.vehicleId === id))
+    // KM since last fill and mileage per fill, from this vehicle's own readings (the Diesel module's fillRow).
+    const fillIdx = buildDieselIndex({ ...ds, diesel, trips: [] })
+    const mileage = new Map(diesel.map((e) => [e.id, fillRow(fillIdx, e).kmpl]))
     const payments = ds.payments.filter((p) => p.vehicleId === id && p.direction === "OUT")
     return {
       vehicle,
       profit,
       monthly,
       diesel,
+      mileage,
       maintenance: inEntryOrder(payments.filter((p) => MAINT.has(p.categoryCode ?? ""))),
       fixedCosts: inEntryOrder(payments.filter((p) => !MAINT.has(p.categoryCode ?? ""))),
       trips: ds.trips.filter((t) => t.vehicleId === id),
@@ -81,6 +86,7 @@ export function VehicleDetail({ id }: { id: string }) {
     return <EmptyState icon={Bus} title="Vehicle not found" action={<Button asChild variant="outline"><Link href="/vehicles">Back to vehicles</Link></Button>} />
 
   const v = d.vehicle
+  const unit = v.fuelType === "EV" ? "kWh" : "L" // an EV's "litres" are units charged
   if (editing)
     return (
       <div className="mx-auto max-w-5xl">
@@ -293,6 +299,7 @@ export function VehicleDetail({ id }: { id: string }) {
               { id: "bill", header: "Bill no.", hideOnMobile: true, cell: (r) => <span className="text-muted-foreground">{r.billNo}</span> },
               { id: "odo", header: "Odometer", align: "right", hideOnMobile: true, cell: (r) => (r.odometerKm === null ? "—" : formatNumber(r.odometerKm)) },
               { id: "litres", header: "Litres", align: "right", sortValue: (r) => r.litres, cell: (r) => formatNumber(r.litres, 2) },
+              { id: "kmpl", header: <MileageHeader unit={unit} />, align: "right", hideOnMobile: true, cell: (r) => mileageText(d.mileage!.get(r.id) ?? null, unit) },
               { id: "rate", header: "₹/L", align: "right", hideOnMobile: true, cell: (r) => r.rate.toFixed(2) },
               { id: "amt", header: "Amount", align: "right", sortValue: (r) => r.amount, cell: (r) => <Money value={r.amount} /> },
               { id: "mode", header: "Mode", hideOnMobile: true, cell: (r) => <FillPaymentBadge entry={r} /> },

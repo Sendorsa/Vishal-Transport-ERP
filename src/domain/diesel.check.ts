@@ -5,7 +5,7 @@
 import assert from "node:assert/strict"
 import { round2 } from "@/lib/format"
 import { dieselByVendor, vehicleProfitability, type Dataset } from "./analytics"
-import { buildDieselIndex, customerCards, fillRow, groupMonth, vehicleMonth } from "./diesel"
+import { buildDieselIndex, customerCards, fillMileage, fillRow, groupMonth, vehicleMonth } from "./diesel"
 import { buildMaster, last12Months, litresByFuelType } from "./fuel-master"
 import { QUARTERS, inQuarter, quarterMonths, quarterOf } from "./quarters"
 import { inEntryOrder } from "./payment-order"
@@ -608,6 +608,30 @@ const recs = (r: Partial<TankerRecords>): TankerRecords => ({ loads: [], fills: 
   assert.deepEqual(customerVehicles("cus_b", periods, fleet, "2026-10-31").map((r) => [r.vehicle.id, r.current]), [["v1", true]])
   assert.deepEqual(customerVehicles("cus_b", periods, fleet, "2026-09-15"), []) // its period hadn't started
   assert.equal(customerVehicles("cus_cached", periods, fleet, "2026-10-31").length, 0) // the cache is never used
+}
+
+/* ---------------------------------------------------------------- Mileage per fill = KM since last fill ÷ litres */
+{
+  // The owner's example: 63,075 → 63,927 km = 852 km on 156.67 L = 5.4382… → 5.44 km/L.
+  assert.equal(fillMileage(852, 156.67), 5.44)
+  assert.equal(fillMileage(100, 8), 12.5) // two decimals, shown as "12.50"
+  assert.equal(fillMileage(1, 0.008), 125) // half away from zero (round2)
+  assert.equal(fillMileage(853, 160), 5.33) // 5.33125 → 5.33
+  // Never a made-up figure: no KM since last fill (first fill, no odometer, no previous reading), KM ≤ 0, no litres.
+  assert.equal(fillMileage(null, 50), null)
+  assert.equal(fillMileage(0, 50), null)
+  assert.equal(fillMileage(-120, 50), null) // a lower reading is a data error, never a negative mileage
+  assert.equal(fillMileage(852, 0), null) // never ÷ 0
+  // Through fillRow, on the same sequence as KM since last fill (fixtures above: 500 → 1,800 → 2,700 km).
+  const rows = v.entries.map((e) => fillRow(idx, e))
+  assert.deepEqual(rows.map((r) => r.kmpl), [null, round2(1300 / 60), round2(900 / 120)]) // first fill: —
+  const m = (diesel: ReturnType<typeof fill>[]) => {
+    const i = buildDieselIndex({ ...ds, diesel } as unknown as Dataset)
+    return diesel.map((e) => fillRow(i, e as never).kmpl)
+  }
+  assert.deepEqual(m([fill("a", 63075, 150, 14000), fill("b", 63927, 156.67, 14000, { date: "2026-10-09" })]), [null, 5.44])
+  assert.deepEqual(m([fill("a", 63075, 150, 14000), fill("b", 63927, 156.67, 14000, { date: "2026-10-09" }), fill("c", 64000, 50, 4700, { date: "2026-10-12", litres: 0 })]), [null, 5.44, null]) // zero litres: —
+  assert.deepEqual(m([fill("a", 63075, 150, 14000), { ...fill("b", 0, 150, 14000, { date: "2026-10-09" }), odometerKm: null } as never, fill("c", 64000, 150, 14000, { date: "2026-10-12" })]), [null, null, round2((64000 - 63075) / 150)]) // no odometer: —, and the next fill measures from the last real reading
 }
 
 console.log("diesel calculations: all checks passed")

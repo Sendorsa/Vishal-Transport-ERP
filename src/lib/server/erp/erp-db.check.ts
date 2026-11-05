@@ -25,7 +25,7 @@ async function main() {
   const { loadsAsStationPurchases, valueTankers } = await import("@/domain/tanker")
   const { valueInventory, stockDraws, purchasedIn } = await import("@/domain/adblue-inventory")
   const { settlementIndex, invoiceOutstanding, revenueInRange } = await import("@/domain/analytics")
-  const { buildDieselIndex, fillRow } = await import("@/domain/diesel")
+  const { buildDieselIndex, fillMileage, fillRow } = await import("@/domain/diesel")
 
   /* ---------------------------------------------------------------- a real PostgreSQL with every migration */
   const db = new PGlite({ extensions: { btree_gist } })
@@ -171,6 +171,13 @@ async function main() {
   // The Odometer field of the vehicle form, changed on its own, is saved (it was dropped as "only the cache").
   await as(OWNER, () => api.vehicles.update(bus.id, { odometerKm: 121000 }))
   assert.equal(await busOdo(), 121000)
+  // Mileage per fill from the database's readings = the same calculation on the values as entered (localStorage
+  // backend): opening 120,000 → 120,400 (100 L) → 120,500 (37.64 L) → 120,750 (300 L, the corrected tanker fill).
+  const dbFills = await read(OWNER, () => api.diesel.list())
+  const dbIdx = buildDieselIndex({ vehicles: await read(OWNER, () => api.vehicles.list()), drivers: [], diesel: dbFills, trips: [], customers: [], assignments: await read(OWNER, () => api.assignments.list()) } as never)
+  const kmplOf = (id: string) => fillRow(dbIdx, dbFills.find((e) => e.id === id)!).kmpl
+  assert.deepEqual([kmplOf(f1.id), kmplOf(f2.id), kmplOf(tf.id)], [fillMileage(400, 100), fillMileage(100, 37.64), fillMileage(250, 300)])
+  assert.deepEqual([kmplOf(f1.id), kmplOf(f2.id), kmplOf(tf.id)], [4, 2.66, 0.83])
 
   /* ---------------------------------------------------------------- 6. AdBlue: opening + bulk, weighted-average draw */
   await as(OWNER, () => api.adbluePurchases.create({ date: today, vendorName: "Bulk Vendor", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" }))

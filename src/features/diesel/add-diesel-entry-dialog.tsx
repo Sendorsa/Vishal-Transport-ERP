@@ -9,7 +9,7 @@ import { ReasonField } from "@/components/shared/audit"
 import { Field } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { useCreateDiesel, useCreateFuelStation, useDieselEntries, useFuelStations, useTankerAdjustments, useTankerDispenses, useTankerLoads, useTankerTransfers, useTankers, useUpdateDiesel } from "@/lib/api/hooks"
-import { fillOrder, odometerConflict } from "@/domain/diesel"
+import { fillMileage, fillOrder, odometerConflict } from "@/domain/diesel"
 import { TANKER_SOURCE_ID, insufficientTankerMessage, isStockPool, tankerLabel, tankerOf, valueTankers } from "@/domain/tanker"
 import { CreatableSelect } from "@/components/shared/creatable-select"
 import { fuelLabel } from "@/lib/constants"
@@ -113,7 +113,7 @@ export function AddDieselEntryDialog({
   const unit = ev ? "kWh" : "L"
   const amount = round2(litres * rate)
   const kmSince = lastOdo === null || odo === null ? null : odo - lastOdo
-  const kmpl = kmSince && kmSince > 0 && litres > 0 ? kmSince / litres : null
+  const kmpl = fillMileage(kmSince, litres) // the same mileage as the Diesel entries table
 
   const close = () => {
     setF(blank)

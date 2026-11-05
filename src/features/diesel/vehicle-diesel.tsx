@@ -28,7 +28,7 @@ import { AddDieselEntryDialog } from "./add-diesel-entry-dialog"
 import { AddAdBlueDialog } from "./add-adblue-dialog"
 import { AdBlueSection } from "./adblue-section"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { CompanyLogo, DieselBreadcrumb, FillPaymentBadge, MonthSelect, dieselHref, kpiExplain, useDieselIndex, useDieselMonthOptions, useSyncDieselMonth, MonthLockControl, useMonthLock } from "./parts"
+import { CompanyLogo, DieselBreadcrumb, FillPaymentBadge, MileageHeader, mileageText, MonthSelect, dieselHref, kpiExplain, useDieselIndex, useDieselMonthOptions, useSyncDieselMonth, MonthLockControl, useMonthLock } from "./parts"
 import { OpeningOdometerDialog } from "@/features/go-live/opening-dialogs"
 import { hasOwnerAuthority } from "@/lib/permissions"
 
@@ -94,6 +94,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
     )
 
   const { cur, prev } = d
+  const unit = vehicle.fuelType === "EV" ? "kWh" : "L" // an EV's "litres" are units charged
   const why = kpiExplain(cur)
   // AdBlue for this vehicle with this customer, selected month — its own entries and formulas.
   const ab = adBlueStats((adblue.data ?? []).filter((e) => e.vehicleId === vehicle.id && e.customerId === (group.customer?.id ?? null) && e.date.startsWith(month)))
@@ -302,6 +303,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
                     cell: (f) =>
                       f.kmSince === null ? "—" : f.kmSince < 0 ? <span className="text-destructive" title="Odometer is lower than the previous fill — counted as 0">{formatNumber(f.kmSince)}</span> : formatNumber(f.kmSince),
                   },
+                  { id: "kmpl", header: <MileageHeader unit={unit} />, align: "right", cell: (f) => mileageText(f.kmpl, unit) },
                   { id: "mode", header: "Payment", hideOnMobile: true, cell: (f) => <FillPaymentBadge entry={f.entry} /> },
                   ...(mayEdit || mayDelete
                     ? [{
