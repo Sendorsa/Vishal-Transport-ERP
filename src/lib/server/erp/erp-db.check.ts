@@ -158,6 +158,19 @@ async function main() {
   assert.equal(ledgerFor(led, ["2026-10"]).closing, 50000, "October closing = the opening balance, carried into November")
   // The payment never touched a fuel entry.
   assert.deepEqual((await read(OWNER, () => api.diesel.list())).map((e) => [e.id, e.updatedAt]).sort(), fills.map((e) => [e.id, e.updatedAt]).sort())
+  // Odometer edits reach the database: the fill's reading, and the vehicle's last known km after a corrected typo.
+  const busOdo = async () => (await read(OWNER, () => api.vehicles.get(bus.id)))!.odometerKm
+  const tfEdit = (odometerKm: number) => ({ date: today, vendorId: "dv_tanker", tankerId: JIO, litres: 300, rate: 95, odometerKm, billNo: "", paymentMode: "CREDIT" as const })
+  assert.equal(await busOdo(), 120700, "the database raised it on the new fill")
+  await as(OWNER, () => api.diesel.update(tf.id, tfEdit(127000), "typo"))
+  assert.deepEqual([(await read(OWNER, () => api.diesel.get(tf.id)))!.odometerKm, await busOdo()], [127000, 127000])
+  await as(EMP, () => api.diesel.update(tf.id, tfEdit(120750), "typo corrected"))
+  assert.deepEqual([(await read(OWNER, () => api.diesel.get(tf.id)))!.odometerKm, await busOdo()], [120750, 120750], "the corrected reading, and the cache lowered with it")
+  await assert.rejects(as(EMP, () => api.diesel.update(tf.id, tfEdit(-1))), /Enter the odometer reading/)
+  assert.equal((await read(OWNER, () => api.diesel.get(tf.id)))!.odometerKm, 120750, "a refused edit changes nothing")
+  // The Odometer field of the vehicle form, changed on its own, is saved (it was dropped as "only the cache").
+  await as(OWNER, () => api.vehicles.update(bus.id, { odometerKm: 121000 }))
+  assert.equal(await busOdo(), 121000)
 
   /* ---------------------------------------------------------------- 6. AdBlue: opening + bulk, weighted-average draw */
   await as(OWNER, () => api.adbluePurchases.create({ date: today, vendorName: "Bulk Vendor", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" }))

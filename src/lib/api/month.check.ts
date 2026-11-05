@@ -5,7 +5,7 @@
  * carry-forward across the year end, and fuel station payments for old months (payment date vs paid against).
  */
 import assert from "node:assert/strict"
-import { checkTanker, setRole } from "./test-browser"
+import { checkTanker, loadCheckDemoData, setRole } from "./test-browser"
 
 process.env.TZ = "America/New_York" // Node re-reads TZ on change: device time 10½ hours behind India
 
@@ -26,6 +26,11 @@ const at = (ist: string) => (NOW = new RealDate(`${ist}+05:30`).getTime())
 at("2026-10-15T10:00:00")
 
 async function main() {
+  // The demo data on this check's own clock (15 Oct 2026), never the real date: ./test-browser generates it when it
+  // is imported — a static import, so before the fake clock above exists — from the real "today", so once the real
+  // date passed into November it held November fills (a 3 Nov cash fill at Lakshmitha) and November's figures moved.
+  // The generator is deterministic for a given day, so every run now starts from the same data.
+  loadCheckDemoData("aud_checkdemo_month")
   const { api } = await import("./index")
   const { todayISO, msUntilIndiaMidnight, round2 } = await import("@/lib/format")
   const { dieselMonths, pickMonth } = await import("@/domain/diesel")
@@ -77,8 +82,12 @@ async function main() {
   setRole("OWNER")
   const vehicles = await api.vehicles.list()
   const v = vehicles.find((x) => x.status === "ACTIVE" && x.fuelType === "DIESEL" && x.assignedCustomerId)!
-  let odo = Math.max(v.odometerKm, ...(await api.diesel.list()).filter((e) => e.vehicleId === v.id).map((e) => e.odometerKm ?? 0))
-  const fill = (date: string, litres = 40) => ({ date, vehicleId: v.id, customerId: v.assignedCustomerId, vendorId: "dv_lakshmitha", litres, rate: 95, odometerKm: (odo += 100), billNo: "", paymentMode: "CREDIT" as const })
+  const { readCollection } = await import("@/lib/storage/local-store")
+  let odo = 0
+  // A reading that fits the vehicle's sequence on that date (just above its last earlier fill): the API refuses a
+  // back-dated fill above a later one, whose KM Run would go negative.
+  const fit = (date: string) => Math.max(0, ...readCollection("diesel_entries").filter((e) => e.vehicleId === v.id && e.date < date && e.odometerKm !== null).map((e) => e.odometerKm!)) + 1
+  const fill = (date: string, litres = 40) => ({ date, vehicleId: v.id, customerId: v.assignedCustomerId, vendorId: "dv_lakshmitha", litres, rate: 95, odometerKm: (odo = fit(date)), billNo: "", paymentMode: "CREDIT" as const })
   const lock = (month: string) => monthLockInfo(month, todayISO(), []).state
   setRole("EMPLOYEE")
   const octEntry = await api.diesel.create(fill("2026-10-31")) // 31 Oct 23:59:30: October open

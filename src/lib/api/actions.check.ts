@@ -294,6 +294,68 @@ async function main() {
     await assert.rejects(withVersions({ [id]: updatedAt }, () => api.vehicles.update(id, { ...data, assignedCustomerId: other.id, notes: "stale" })), (e: unknown) => e instanceof ConflictError, "a stale screen is still refused")
   }
 
+  /* ---------------------------------------------------------------- Odometer edits: persisted, KM follows, cache corrected */
+  {
+    setRole("OWNER") // the Owner may change any month, so the fills can sit on separate days whatever today is
+    const { buildDieselIndex, fillRow } = await import("@/domain/diesel")
+    const { readCollection } = await import("@/lib/storage/local-store")
+    const day = (n: number) => new Date(Date.parse(`${today}T00:00:00Z`) - n * 86_400_000).toISOString().slice(0, 10)
+    const tpl = { companyCode: "VT", typeCode: vehicle.typeCode, make: "", model: "", year: 0, seats: null, fuelType: "DIESEL", mileageKmpl: 4, ownership: "OWNED", ownerName: null, status: "ACTIVE", odometerKm: 0, defaultDriverId: null, insurance: { provider: "", policyNo: "", validTill: "", premium: 0 }, roadTax: { validTill: "", amount: 0, period: "ANNUAL" }, fitnessValidTill: "", permitValidTill: "", emiAmount: 0, notes: "" }
+    const bus = await api.vehicles.create({ ...tpl, regNo: "TN70ODO0001", assignedCustomerId: customerId, assignedSince: day(40) } as never)
+    const odoFill = (date: string, odometerKm: number | null) => ({ date, vehicleId: bus.id, customerId, vendorId: station, litres: 50, rate: 95, odometerKm, billNo: "ODO", paymentMode: "CREDIT" as const })
+    // 1. Enter readings.
+    const a = await api.diesel.create(odoFill(day(30), 1000))
+    const b = await api.diesel.create(odoFill(day(20), 1500))
+    const c = await api.diesel.create(odoFill(day(10), 2000))
+    const cache = async () => (await api.vehicles.get(bus.id))!.odometerKm
+    assert.equal(await cache(), 2000, "a new fill raises the vehicle's last known km")
+    const km = async () => {
+      const ds = { vehicles: await api.vehicles.list(), drivers: [], diesel: await api.diesel.list(), trips: [], customers: await api.customers.list(), assignments: await api.assignments.list() } as never
+      const idx = buildDieselIndex(ds)
+      const mine = (await api.diesel.list()).filter((e) => e.vehicleId === bus.id)
+      return Object.fromEntries(mine.map((e) => [e.id, fillRow(idx, e).kmSince]))
+    }
+    assert.deepEqual(await km(), { [a.id]: null, [b.id]: 500, [c.id]: 500 })
+    const edit = (e: typeof b, odometerKm: number | null, extra: object = {}) =>
+      api.diesel.update(e.id, { date: e.date, vendorId: e.vendorId, litres: e.litres, rate: e.rate, odometerKm, billNo: e.billNo, paymentMode: e.paymentMode, tankerId: e.tankerId, ...extra })
+    const before = { a: await api.diesel.get(a.id), c: await api.diesel.get(c.id) }
+    // 2–4. Edit the middle reading: the same record, persisted (the stored record, as a reload reads it), no duplicate.
+    const edited = await edit(b, 1600, { billNo: "ODO-EDIT" })
+    assert.deepEqual([edited.id, edited.odometerKm, edited.billNo], [b.id, 1600, "ODO-EDIT"])
+    assert.equal((await api.diesel.get(b.id))!.odometerKm, 1600)
+    assert.equal(readCollection("diesel_entries").find((e) => e.id === b.id)!.odometerKm, 1600, "persisted in storage")
+    assert.equal(readCollection("diesel_entries").filter((e) => e.vehicleId === bus.id).length, 3, "an edit never creates a record")
+    // 5. Dependent KM: this fill and the next one both follow the corrected reading.
+    assert.deepEqual(await km(), { [a.id]: null, [b.id]: 600, [c.id]: 400 })
+    // 6. The neighbours are untouched.
+    assert.deepEqual([await api.diesel.get(a.id), await api.diesel.get(c.id)], [before.a, before.c])
+    // 7. Invalid readings are refused, and nothing changes.
+    const log0 = await logSize()
+    await assert.rejects(edit(edited, 900), /below the previous fill \(1,000 km/)
+    await assert.rejects(edit(edited, 2100), /above the next fill \(2,000 km/)
+    await assert.rejects(edit(edited, -5), /Enter the odometer reading/)
+    await assert.rejects(edit(edited, Number.NaN), /Enter the odometer reading/)
+    await assert.rejects(edit(edited, null), /Enter the odometer reading/)
+    await assert.rejects(edit(edited, 1700, { date: day(5) }), /above the next fill|below the previous fill/, "a date change is checked too (moved after C at 2,000 km)")
+    await assert.rejects(api.diesel.create(odoFill(day(25), 1800)), /above the next fill \(1,600 km/, "a back-dated fill above the next one")
+    await assert.rejects(api.diesel.create(odoFill(day(1), null)), /Enter the odometer reading/, "a new fill always has a reading")
+    assert.equal((await api.diesel.get(b.id))!.odometerKm, 1600)
+    assert.equal(await logSize(), log0, "refused edits leave no audit event")
+    // The same day reorders by odometer, so it never conflicts.
+    const sameDay = await api.diesel.create(odoFill(day(20), 1550))
+    // The vehicle's last known km: a typo raises it, its correction lowers it back, a delete takes it to what's left.
+    const c2 = await edit((await api.diesel.get(c.id))!, 20000)
+    assert.equal(await cache(), 20000)
+    await edit(c2, 2050)
+    assert.equal(await cache(), 2050, "the corrected typo no longer shows as the vehicle's odometer")
+    await api.diesel.remove(c.id, "Entered on the wrong vehicle")
+    assert.equal(await cache(), 1600, "back to the highest remaining reading")
+    await api.vehicles.update(bus.id, { odometerKm: 5000 }) // entered by hand on the vehicle, above every fill
+    await edit((await api.diesel.get(b.id))!, 1650)
+    assert.equal(await cache(), 5000, "a reading entered on the vehicle itself is left alone")
+    await api.diesel.remove(sameDay.id, "Check fixture")
+  }
+
   console.log("record actions: all checks passed")
 }
 

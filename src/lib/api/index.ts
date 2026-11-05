@@ -8,6 +8,7 @@ import { buildInvoice, type InvoiceDraftInput } from "@/domain/invoicing"
 import { calculateTripRevenue, fyLabel } from "@/domain/pricing"
 import { settlementIndex } from "@/domain/analytics"
 import { adBlueNeighbours } from "@/domain/adblue"
+import { odometerConflict } from "@/domain/diesel"
 import { statusOn, withStatus } from "@/domain/status-history"
 import { canEditMonth } from "@/domain/month-lock"
 import { insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from "@/domain/adblue-inventory"
@@ -109,6 +110,36 @@ function assertTankerOpen(tankerId: string | undefined, what = "Choose the tanke
 function assertPumpStation(vendorId: string) {
   const station = readCollection("fuel_stations").find((v) => v.id === vendorId)
   if (!station || station.isTanker) throw new Error("Choose the fuel station the diesel was bought from")
+}
+
+/**
+ * A fill's odometer: a real reading (a number ≥ 0) that fits the vehicle's sequence of fills — never below the previous
+ * dated fill, never above the next one (odometerConflict). `id` = the fill being edited (left out of the sequence).
+ */
+function assertFillOdometer(vehicleId: string, id: string | null, date: string, km: number) {
+  if (!(Number.isFinite(km) && km >= 0)) throw new Error("Enter the odometer reading (km)")
+  const others = readCollection("diesel_entries").filter((e) => e.vehicleId === vehicleId && e.id !== id)
+  const c = odometerConflict(others, date, km)
+  if (c?.side === "previous") throw new Error(`Odometer ${formatNumber(km)} km is below the previous fill (${formatNumber(c.km)} km on ${formatDate(c.date)}).`)
+  if (c) throw new Error(`Odometer ${formatNumber(km)} km is above the next fill (${formatNumber(c.km)} km on ${formatDate(c.date)}), whose KM Run would go negative.`)
+}
+
+/**
+ * The vehicle's "last known km" (`odometerKm`, a cache) after a fill's reading changed (`was` → `now`) or the fill was
+ * deleted (`now` null): raised to a higher reading, and — when the old reading was what set it — lowered back to the
+ * vehicle's highest remaining reading (its opening odometer at least), so a corrected typo no longer shows. A value
+ * entered on the vehicle above every fill is left alone. Display only: no figure, KM Run or report reads it.
+ */
+async function syncVehicleOdometer(vehicleId: string, was: number | null, now: number | null) {
+  const v = readCollection("vehicles").find((x) => x.id === vehicleId)
+  if (!v) return
+  let km = v.odometerKm
+  if (now !== null && now > km) km = now
+  else if (was !== null && was === v.odometerKm) {
+    const highest = readCollection("diesel_entries").reduce((m, e) => (e.vehicleId === vehicleId && e.odometerKm !== null && e.odometerKm > m ? e.odometerKm : m), v.openingOdometerKm ?? 0)
+    if (highest < km) km = highest
+  }
+  if (km !== v.odometerKm) await vehicles.update(vehicleId, { odometerKm: km })
 }
 
 function checkLoad(input: TankerLoadInput, existing?: TankerLoad) {
@@ -1151,6 +1182,7 @@ export const api = {
         assertMonthEditable(e.date)
         const before = dieselView(e)
         await diesel.remove(id)
+        await syncVehicleOdometer(e.vehicleId, e.odometerKm, null)
         audit({ action: "DELETED", ...meta.diesel(e), before, reason })
       }),
     create: (input: Omit<NewEntity<DieselEntry>, "amount" | "companyCode">) =>
@@ -1175,8 +1207,9 @@ export const api = {
           assertPumpStation(input.vendorId)
           delete input.tankerId
         }
+        assertFillOdometer(vehicle.id, null, input.date, input.odometerKm ?? NaN) // a new fill always has a reading
         const entry = await diesel.create({ ...input, companyCode: vehicle.companyCode, amount: round2(input.litres * input.rate) })
-        if (input.odometerKm !== null && input.odometerKm > vehicle.odometerKm) await vehicles.update(vehicle.id, { odometerKm: input.odometerKm })
+        await syncVehicleOdometer(vehicle.id, null, entry.odometerKm)
         audit({ action: "CREATED", ...meta.diesel(entry), after: dieselView(entry) })
         return entry
       }),
@@ -1208,8 +1241,14 @@ export const api = {
         }
         if (isTankerFill(input) || isTankerFill(before))
           assertTankerStock(tankerRecords({ fills: readCollection("diesel_entries").map((e) => (e.id === id ? { ...e, ...input } : e)) }))
+        // The reading: an imported fill recorded without one may stay without one; any other fill keeps a valid reading,
+        // checked against its neighbours when the reading or the date changes (unchanged history isn't re-judged).
+        if (input.odometerKm === null) {
+          if (before.odometerKm !== null) throw new Error("Enter the odometer reading (km)")
+        } else if (input.odometerKm !== before.odometerKm || input.date !== before.date) assertFillOdometer(before.vehicleId, id, input.date, input.odometerKm)
         const beforeView = dieselView(before)
         const after = await diesel.update(id, { ...input, amount: round2(input.litres * input.rate) })
+        await syncVehicleOdometer(before.vehicleId, before.odometerKm, after.odometerKm)
         audit({ action: "UPDATED", ...meta.diesel(after), before: beforeView, after: dieselView(after), reason })
         return after
       }),

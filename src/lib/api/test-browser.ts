@@ -32,16 +32,21 @@ Object.assign(globalThis, { window: { localStorage: storage, addEventListener() 
 
 // The checks exercise the API on the demo data. First use no longer loads it (the clean go-live workspace does), so
 // load it explicitly and mark it as data of unknown origin: the checks' data is never replaced behind their back.
-loadDemoData()
-writeMeta({ version: SCHEMA_VERSION, seededAt: new Date().toISOString() })
-appendAuditEvent(
-  buildEvent(
-    { action: "DATA_RESET", module: "System", recordType: "Data", recordId: "workspace", label: "Demo data loaded for the checks" },
-    { kind: "SYSTEM", userId: null, name: null, role: null },
-    "aud_checkdemo01",
-    new Date().toISOString()
+// The demo data is generated up to `new Date()`: a check with a fake clock calls this again once its clock is set
+// (this import runs first), so its data never depends on the real date.
+export function loadCheckDemoData(eventId = "aud_checkdemo01") {
+  loadDemoData()
+  writeMeta({ version: SCHEMA_VERSION, seededAt: new Date().toISOString() })
+  appendAuditEvent(
+    buildEvent(
+      { action: "DATA_RESET", module: "System", recordType: "Data", recordId: "workspace", label: "Demo data loaded for the checks" },
+      { kind: "SYSTEM", userId: null, name: null, role: null },
+      eventId,
+      new Date().toISOString()
+    )
   )
-)
+}
+loadCheckDemoData()
 
 /** The mock-session role the API reads (vt:ui:role). */
 /** Removed roles can still be stored by an old browser — they must read as Employee. */

@@ -9,7 +9,7 @@ import { ReasonField } from "@/components/shared/audit"
 import { Field } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { useCreateDiesel, useCreateFuelStation, useDieselEntries, useFuelStations, useTankerAdjustments, useTankerDispenses, useTankerLoads, useTankerTransfers, useTankers, useUpdateDiesel } from "@/lib/api/hooks"
-import { fillOrder } from "@/domain/diesel"
+import { fillOrder, odometerConflict } from "@/domain/diesel"
 import { TANKER_SOURCE_ID, insufficientTankerMessage, isStockPool, tankerLabel, tankerOf, valueTankers } from "@/domain/tanker"
 import { CreatableSelect } from "@/components/shared/creatable-select"
 import { fuelLabel } from "@/lib/constants"
@@ -66,9 +66,10 @@ export function AddDieselEntryDialog({
     () => (entries.data ?? []).filter((e) => e.vehicleId === vehicle.id && e.id !== entry?.id).sort(fillOrder),
     [entries.data, vehicle.id, entry?.id]
   )
-  const odoTyped = Number(f.odometerKm || vehicle.odometerKm || 0)
+  // The reading as typed — blank stays blank (null), never a substitute such as the vehicle's last known km.
+  const odo = f.odometerKm.trim() === "" ? null : Number(f.odometerKm)
   // Previous fill = latest fill before this one in (date, odometer) order — same rule the KPIs use.
-  const lastFill = [...vehicleFills].reverse().find((e) => e.odometerKm !== null && (e.date < f.date || (e.date === f.date && e.odometerKm <= odoTyped)))
+  const lastFill = [...vehicleFills].reverse().find((e) => e.odometerKm !== null && (e.date < f.date || (e.date === f.date && e.odometerKm <= (odo ?? Infinity))))
   const lastOdo = lastFill?.odometerKm ?? null
   const lastRate = useMemo(
     () => (entries.data ?? []).filter((e) => e.vendorId === f.vendorId).sort((a, b) => b.date.localeCompare(a.date))[0]?.rate,
@@ -108,11 +109,10 @@ export function AddDieselEntryDialog({
         ? { ...cur, vendorId: entry && !wasTankerFill ? entry.vendorId : "", tankerId: "", rate: wasTankerFill ? "" : cur.rate }
         : { ...cur, vendorId: TANKER_SOURCE_ID, tankerId: v, rate: cur.vendorId === TANKER_SOURCE_ID ? cur.rate : "" }
     )
-  const odo = odoTyped
   const ev = vehicle.fuelType === "EV" // fuel type comes from the vehicle record
   const unit = ev ? "kWh" : "L"
   const amount = round2(litres * rate)
-  const kmSince = lastOdo === null ? null : odo - lastOdo
+  const kmSince = lastOdo === null || odo === null ? null : odo - lastOdo
   const kmpl = kmSince && kmSince > 0 && litres > 0 ? kmSince / litres : null
 
   const close = () => {
@@ -136,7 +136,15 @@ export function AddDieselEntryDialog({
       else if (!(rate > 50 && rate < 200)) errs.rate = "Rate should be ₹50–200 per litre"
     } else if (!f.vendorId) errs.vendorId = "Choose the fuel station (or add it)"
     if (!fromTanker && f.vendorId && (ev ? !(rate > 0 && rate < 100) : !(rate > 50 && rate < 200))) errs.rate = ev ? "Rate should be ₹1–100 per kWh" : "Rate should be ₹50–200 per litre"
-    if (lastOdo !== null && odo < lastOdo) errs.odometerKm = `Below last fill (${formatNumber(lastOdo)} km)`
+    // An imported fill recorded without a reading may stay without one; every other fill needs a valid reading that
+    // fits between the vehicle's previous and next fills (odometerConflict — the same rule the API enforces).
+    if (odo === null) {
+      if (!entry || entry.odometerKm !== null) errs.odometerKm = "Enter the odometer reading"
+    } else if (!(Number.isFinite(odo) && odo >= 0)) errs.odometerKm = "Enter a valid odometer reading"
+    else {
+      const c = odometerConflict(vehicleFills, f.date, odo)
+      if (c) errs.odometerKm = c.side === "previous" ? `Below last fill (${formatNumber(c.km)} km)` : `Above next fill (${formatNumber(c.km)} km on ${formatDate(c.date)})`
+    }
     setErrors(errs)
     if (Object.keys(errs).length) return
     const data = { date: f.date, vendorId: f.vendorId, litres, rate, odometerKm: odo, billNo: f.billNo.trim(), paymentMode: (fromTanker ? "CREDIT" : f.paymentMode) as "CREDIT" | "CASH", tankerId: fromTanker ? tankerId : undefined }
@@ -209,7 +217,7 @@ export function AddDieselEntryDialog({
           </Field>
         )}
         <Field label="Odometer (km)" required error={errors.odometerKm}>
-          <Input type="number" value={f.odometerKm} placeholder={String(vehicle.odometerKm)} onChange={(e) => set("odometerKm")(e.target.value)} />
+          <Input type="number" value={f.odometerKm} placeholder={`Last known ${formatNumber(vehicle.odometerKm)}`} onChange={(e) => set("odometerKm")(e.target.value)} />
         </Field>
         <Field label="Bill / indent no.">
           <Input value={f.billNo} onChange={(e) => set("billNo")(e.target.value)} />

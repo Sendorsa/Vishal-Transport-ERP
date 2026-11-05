@@ -177,6 +177,22 @@ export const isLiquid = (idx: DieselIndex, e: DieselEntry) => idx.vehicles.get(e
 export const fillOrder = (a: Pick<DieselEntry, "date" | "odometerKm">, b: Pick<DieselEntry, "date" | "odometerKm">) =>
   a.date.localeCompare(b.date) || (a.odometerKm ?? Number.MAX_SAFE_INTEGER) - (b.odometerKm ?? Number.MAX_SAFE_INTEGER)
 
+/**
+ * Does an odometer reading fit the vehicle's fill sequence (fillOrder: date, then odometer)? It may not be below the
+ * nearest fill dated before it, nor above the nearest fill dated after it (that fill's KM Run would go negative).
+ * Fills on the same day reorder by odometer, so they never conflict; fills without an odometer (imported history) are
+ * skipped. `others` = the vehicle's other fills (leave the edited one out). Returns the conflicting neighbour, or null.
+ * One rule for the entry dialog and the API.
+ */
+export function odometerConflict(others: Pick<DieselEntry, "date" | "odometerKm">[], date: string, km: number): { side: "previous" | "next"; date: string; km: number } | null {
+  const sorted = others.filter((e) => e.odometerKm !== null).sort(fillOrder)
+  const prev = sorted.filter((e) => e.date < date).at(-1)
+  if (prev && km < prev.odometerKm!) return { side: "previous", date: prev.date, km: prev.odometerKm! }
+  const next = sorted.find((e) => e.date > date)
+  if (next && km > next.odometerKm!) return { side: "next", date: next.date, km: next.odometerKm! }
+  return null
+}
+
 export interface FillRow {
   entry: DieselEntry
   /** Odometer of the vehicle's previous fill; null for its first-ever fill. */

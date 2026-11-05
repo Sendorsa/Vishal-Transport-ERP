@@ -88,6 +88,8 @@ export interface LoadCtx {
 }
 export interface WriteCtx extends LoadCtx {
   identity: RequestIdentity
+  /** Record ids with an audit event in this request. */
+  audited?: Set<string>
 }
 
 interface Spec<T extends { id: string; updatedAt: string; createdAt: string }> {
@@ -372,9 +374,14 @@ export async function applyUpserts(sql: Sql, key: CollectionKey, before: { id: s
     const prevCols = spec.cols(prev as never)
     const diff: Record<string, unknown> = Object.fromEntries(Object.entries(cols).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(prevCols[k])))
     if (key === "month_locks" && Object.keys(diff).length) diff.changed_by = ctx.identity.profileId // who changed it, from the verified session
-    // The "last known km" cache alone: the database raises it itself when a fill is saved (bump_vehicle_odometer, for
-    // anyone allowed to add the fill — an Employee can't edit vehicles), so the app's own copy of that bump is skipped.
-    if (key === "vehicles" && Object.keys(diff).length === 1 && "odometer_km" in diff) delete diff.odometer_km
+    // The vehicle's "last known km" cache alone, kept in step by a fill's create / edit / delete (no vehicle audit event —
+    // the column is exempt from the audit-presence rule): written without the version check, and left as it was where
+    // RLS doesn't let this role edit vehicles (the database still raises it on a new fill, bump_vehicle_odometer). A
+    // real vehicle edit (the Odometer field of the vehicle form, audited) is written and checked like any other change.
+    if (key === "vehicles" && Object.keys(diff).length === 1 && "odometer_km" in diff && !ctx.audited?.has(r.id)) {
+      await sql(`update ${spec.table} set odometer_km = $2 where id = $1`, [r.id, diff.odometer_km])
+      delete diff.odometer_km
+    }
     if (Object.keys(diff).length) await updateRow(sql, spec.table, r.id, prev.updatedAt, diff)
     await spec.afterUpdate?.(sql, prev as never, r as never, ctx)
   }

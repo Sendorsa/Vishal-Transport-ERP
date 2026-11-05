@@ -82,7 +82,7 @@ export async function runInDatabase<T>(transact: Transact, identity: RequestIden
 }
 
 async function persist(sql: Sql, scope: RequestScope, loaded: Map<string, unknown>, ctx: LoadCtx) {
-  const wctx = { ...ctx, identity: scope.identity }
+  const wctx = { ...ctx, identity: scope.identity, audited: new Set((scope.newEvents as AuditEvent[]).map((e) => e.recordId)) }
   const keys = [...scope.written]
   if (keys.includes(SETTINGS)) await writeSettings(sql, loaded.get(SETTINGS) as Settings, scope.cache.get(SETTINGS) as Settings)
   const changed = WRITE_ORDER.filter((c) => keys.includes(KEY[c]))

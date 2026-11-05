@@ -60,16 +60,21 @@ async function main() {
   await assert.rejects(api.tankerLoads.create({ tankerId: "", date: today, stationId: "dv_lakshmitha", invoiceNo: "", litres: 100, rate: 95, notes: "" }), /Choose the tanker/)
   const la = await api.tankerLoads.create({ tankerId: a.id, date: "2026-09-02", stationId: "dv_lakshmitha", invoiceNo: "L-A", litres: 3000, rate: 94.5, notes: "" })
   const lb = await api.tankerLoads.create({ tankerId: b.id, date: "2026-09-03", stationId: "dv_raghuveer", invoiceNo: "L-B", litres: 1000, rate: 95, notes: "" })
+  // A reading that fits the vehicle's real sequence on that date (just above its last earlier fill): the API refuses a
+  // back-dated fill above the next fill, whose KM Run would go negative.
+  const fit = async (date: string, vehicleId = vehicle.id) => Math.max(0, ...(await api.diesel.list()).filter((e) => e.vehicleId === vehicleId && e.date < date && e.odometerKm !== null).map((e) => e.odometerKm!)) + 1
+  const odo10 = await fit("2026-09-10")
   const fill = (litres: number, odometerKm: number, tankerId: string, rate: number) => ({ date: "2026-09-10", vehicleId: vehicle.id, customerId: null, vendorId: "dv_tanker", tankerId, litres, rate, odometerKm, billNo: "", paymentMode: "CREDIT" as const })
   // Tanker C has no stock — the fill is refused even though A and B have plenty (stocks never mix).
-  await assert.rejects(api.diesel.create(fill(50, odo0 + 100, c.id, 95)), /Insufficient tanker inventory in Mini Tanker KA51AF1429\. Available: 0 L/)
-  await assert.rejects(api.diesel.create(fill(50, odo0 + 100, "", 95)), /Choose the tanker/)
-  const fa = await api.diesel.create(fill(200, odo0 + 100, a.id, 98.81))
+  await assert.rejects(api.diesel.create(fill(50, odo10, c.id, 95)), /Insufficient tanker inventory in Mini Tanker KA51AF1429\. Available: 0 L/)
+  await assert.rejects(api.diesel.create(fill(50, odo10, "", 95)), /Choose the tanker/)
+  const fa = await api.diesel.create(fill(200, odo10, a.id, 98.81))
+  const odo11 = await fit("2026-09-11")
   // A new tanker fill must carry its source rate — never saved rate-less, so never costed at the average (31 Oct 2026).
-  await assert.rejects(api.diesel.create({ ...fill(100, odo0 + 250, b.id, 0), date: "2026-09-11" }), /source rate/)
+  await assert.rejects(api.diesel.create({ ...fill(100, odo11, b.id, 0), date: "2026-09-11" }), /source rate/)
   // Older records saved without a rate still exist (imports): written as stored data, they read at the weighted average.
   const { readCollection: readCol, writeCollection: writeCol } = await import("@/lib/storage/local-store")
-  const fb = { ...fill(100, odo0 + 250, b.id, 0), date: "2026-09-11", id: "dsl_legacy_norate", companyCode: vehicle.companyCode, customerId: vehicle.assignedCustomerId, amount: 0, createdAt: "2026-09-11T10:00:00.000Z", updatedAt: "2026-09-11T10:00:00.000Z" }
+  const fb = { ...fill(100, odo11, b.id, 0), date: "2026-09-11", id: "dsl_legacy_norate", companyCode: vehicle.companyCode, customerId: vehicle.assignedCustomerId, amount: 0, createdAt: "2026-09-11T10:00:00.000Z", updatedAt: "2026-09-11T10:00:00.000Z" }
   writeCol("diesel_entries", [...readCol("diesel_entries"), fb as never])
   const ext = await api.tankerDispenses.create({ tankerId: b.id, date: "2026-09-12", vehicleNo: "KA01AB1234", litres: 50, notes: "Hired truck" })
   await assert.rejects(api.tankerDispenses.create({ tankerId: b.id, date: "2026-09-12", vehicleNo: "KA01AB1234", litres: 900, notes: "" }), /Insufficient tanker inventory in Tanker KA53C0538/)
@@ -97,7 +102,7 @@ async function main() {
   const sep = (id: string | null) => tankerPeriod(tankerLedger(tankerMoves(r), id, "2026-10"), ["2026-09"])
   assert.deepEqual([sep(a.id).transferOut, sep(c.id).transferIn, sep(null).transferIn, sep(null).loadedCost], [500, 500, 0, round2(3000 * 94.5 + 1000 * 95)]) // company total unchanged
   // C dispenses some of it — deleting the transfer would now make C negative: refused.
-  const fc = await api.diesel.create({ ...fill(100, odo0 + 400, c.id, 98.81), date: "2026-09-16" })
+  const fc = await api.diesel.create({ ...fill(100, await fit("2026-09-16"), c.id, 98.81), date: "2026-09-16" })
   await assert.rejects(api.tankerTransfers.remove(tr.id, "Wrong tanker"), /Insufficient tanker inventory in Mini Tanker/)
   await api.diesel.remove(fc.id, "Check cleanup")
   await api.tankerTransfers.remove(tr.id, "Wrong tanker")
@@ -135,7 +140,7 @@ async function main() {
   /* ---------------------------------------------------------------- 7. A tanker's own fuel never comes from tanker cargo */
   const ownVehicle = vehicles.find((v) => v.status === "ACTIVE" && v.id !== vehicle.id)!
   await api.tankers.update(a.id, { ...blank, name: "Tanker TN70AX9480", regNo: "TN70AX9480", vehicleId: ownVehicle.id })
-  await assert.rejects(api.diesel.create({ ...fill(10, ownVehicle.odometerKm + 10, b.id, 95), vehicleId: ownVehicle.id }), /own fuel isn't taken from tanker cargo/)
+  await assert.rejects(api.diesel.create({ ...fill(10, await fit("2026-09-10", ownVehicle.id), b.id, 95), vehicleId: ownVehicle.id }), /own fuel isn't taken from tanker cargo/)
   await assert.rejects(api.tankers.update(b.id, { ...blank, name: "Tanker KA53C0538", regNo: "KA53C0538", vehicleId: ownVehicle.id }), /already linked/)
 
   /* ---------------------------------------------------------------- 8. AdBlue: direct vendor purchase never touches bulk stock */

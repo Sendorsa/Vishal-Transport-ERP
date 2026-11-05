@@ -275,7 +275,7 @@ export function useUpdateDiesel() {
   const invalidate = useInvalidate()
   return useMutation({
     mutationFn: ({ id, data, reason, version }: { id: string; data: Parameters<typeof api.diesel.update>[1]; reason?: string; version?: string }) => v(id, version, () => api.diesel.update(id, data, reason)),
-    onSuccess: () => invalidate("diesel_entries"),
+    onSuccess: () => invalidate("diesel_entries", "vehicles"), // a corrected reading can change the vehicle's last known km
     onError,
   })
 }
@@ -292,7 +292,7 @@ export function useCreateDiesel() {
 export function useDeleteDiesel() {
   const invalidate = useInvalidate()
   // Tanker fills return litres to the tanker; vehicles' "last known km" is unaffected.
-  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.diesel.remove(id, reason)), onSuccess: () => invalidate("diesel_entries"), onError })
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.diesel.remove(id, reason)), onSuccess: () => invalidate("diesel_entries", "vehicles"), onError })
 }
 
 export function useCreateInvoice() {
