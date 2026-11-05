@@ -18,6 +18,10 @@ import type { Customer, DieselEntry, Vehicle } from "@/lib/types"
 
 /** The "Direct petrol pump" diesel source; every other source value is a tanker id. */
 const PUMP = "PUMP"
+/** A read-only value in the form (fuel type, tanker stock, payment): an input's height and border, muted, never overflowing. */
+const READ_ONLY_BOX = "flex min-h-8 min-w-0 items-center gap-2 rounded-lg border bg-muted/40 px-2.5 py-1 text-sm"
+/** A select whose long value (e.g. a historical stock name) ends in "…" instead of widening its column. */
+const TRUNCATE_SELECT = "min-w-0 *:data-[slot=select-value]:block! *:data-[slot=select-value]:min-w-0 *:data-[slot=select-value]:truncate"
 
 /**
  * Adds — or, with `entry`, edits — a fill for one vehicle, costed to one customer, inside one month.
@@ -170,20 +174,26 @@ export function AddDieselEntryDialog({
         </Field>
         <Field label="Payment">
           {fromTanker ? (
-            <div className="flex h-8 items-center rounded-lg border bg-muted/40 px-2.5 text-sm text-muted-foreground">From tanker cargo — nothing to pay</div>
+            <div className={READ_ONLY_BOX}>
+              <span className="truncate">Nothing to pay</span>
+              <span className="ml-auto shrink-0 text-xs text-muted-foreground">tanker cargo</span>
+            </div>
           ) : (
             <SimpleSelect value={f.paymentMode} onChange={set("paymentMode")} options={[{ value: "CREDIT", label: "Credit (vendor account)" }, { value: "CASH", label: "Cash" }]} />
           )}
         </Field>
-        <Field
-          label="Diesel source"
-          required
-          error={fromTanker ? errors.vendorId : undefined}
-          hint={fromTanker && tankerId && !pool ? `Available in this tanker: ${formatNumber(cargo.litres, 2)} L — the fill is taken out of its stock` : undefined}
-        >
-          <SimpleSelect value={fromTanker ? tankerId : PUMP} onChange={setSource} options={sourceOptions} />
+        <Field label="Diesel source" required error={fromTanker ? errors.vendorId : undefined}>
+          <SimpleSelect value={fromTanker ? tankerId : PUMP} onChange={setSource} options={sourceOptions} className={TRUNCATE_SELECT} />
         </Field>
-        {fromTanker ? null : (
+        {/* The tanker's stock takes the Fuel Station's place, so every later field keeps its position in both states. */}
+        {fromTanker ? (
+          <Field label="Tanker stock">
+            <div className={READ_ONLY_BOX} title="This fill is taken out of the tanker's stock">
+              <span className="num truncate">{pool || !tankerId ? "—" : `${formatNumber(cargo.litres, 2)} L`}</span>
+              <span className="ml-auto shrink-0 text-xs text-muted-foreground">{pool ? "historical stock" : "available"}</span>
+            </div>
+          </Field>
+        ) : (
           <Field label="Fuel Station" required error={errors.vendorId}>
             <CreatableSelect
               value={f.vendorId}
@@ -195,8 +205,9 @@ export function AddDieselEntryDialog({
           </Field>
         )}
         <Field label="Fuel type">
-          <div className="flex h-8 items-center rounded-lg border bg-muted/40 px-2.5 text-sm" title="Set on the vehicle record">
-            {fuelLabel(vehicle.fuelType)} <span className="ml-auto text-xs text-muted-foreground">from vehicle</span>
+          <div className={READ_ONLY_BOX} title="Set on the vehicle record">
+            <span className="truncate">{fuelLabel(vehicle.fuelType)}</span>
+            <span className="ml-auto shrink-0 text-xs text-muted-foreground">from vehicle</span>
           </div>
         </Field>
         <Field label={ev ? "Units (kWh)" : "Litres"} required error={errors.litres}>
@@ -207,7 +218,7 @@ export function AddDieselEntryDialog({
             label="Source rate (₹ / L)"
             required
             error={errors.rate}
-            hint={lastLoad ? `For reference — last load into this tanker: ${formatINR(lastLoad.rate)} / L on ${formatDate(lastLoad.date)}` : "The rate this diesel is costed at"}
+            hint={lastLoad ? `Reference: last load ${formatINR(lastLoad.rate)} / L on ${formatDate(lastLoad.date)}` : "The rate this diesel is costed at"}
           >
             <Input type="number" step="0.01" value={f.rate} onChange={(e) => set("rate")(e.target.value)} />
           </Field>
