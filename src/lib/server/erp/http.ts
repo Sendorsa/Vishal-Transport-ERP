@@ -5,6 +5,7 @@
 import "server-only"
 import postgres from "postgres"
 import { api } from "@/lib/api"
+import { isReadMethod } from "@/lib/api/reads"
 import { getServerAuth } from "@/lib/auth/session"
 import type { RequestIdentity } from "@/lib/request-scope"
 import type { Role } from "@/lib/types"
@@ -37,8 +38,6 @@ export async function requestIdentity(): Promise<RequestIdentity | { error: stri
 
 /* ------------------------------------------------------------------ the allowlist */
 
-/** Reads run in a transaction without the write lock and never write. */
-const READS = new Set(["list", "get", "history", "editedIds", "unreviewedDeletions", "checkRestore", "exportBackup"])
 /** Never callable from the browser on the shared database (D-9): they would replace or wipe it. */
 const BLOCKED = new Set(["admin.restoreBackup", "admin.resetDemoData", "admin.clearAllData"])
 
@@ -50,7 +49,7 @@ export function resolveMethod(name: unknown): { fn: (...args: unknown[]) => Prom
   if (!group || !Object.hasOwn(api, ns) || !Object.hasOwn(group, method)) return null
   const fn = group[method]
   if (typeof fn !== "function") return null
-  const write = !(READS.has(method) || name === "settings.get")
+  const write = !isReadMethod(ns, method) // reads run in a transaction without the write lock and never write
   return { fn: fn as (...args: unknown[]) => Promise<unknown>, write }
 }
 

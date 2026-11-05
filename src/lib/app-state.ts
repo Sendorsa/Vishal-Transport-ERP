@@ -8,7 +8,7 @@
  */
 import { createContext, useCallback, useContext, useSyncExternalStore } from "react"
 import type { CompanyScope, Role } from "./types"
-import { currentActor, currentRole, readStoredRole, setVerifiedSession } from "./identity"
+import { currentActor, currentRole, previewRole, readStoredRole, setPreviewRole, setVerifiedSession, subscribePreview } from "./identity"
 import { can, type Action, type Resource } from "./permissions"
 import { monthKey, msUntilIndiaMidnight, todayISO } from "./format"
 
@@ -54,8 +54,17 @@ export const useSession = () => useContext(SessionContext)
 export { currentActor, currentRole }
 export const setVerifiedRole = (role: Role | null, email: string | null = null) => setVerifiedSession(role ? { role, email } : null)
 
+/** UI Preview Mode (interface only, see identity.ts): the previewed role, or null. */
+export { setPreviewRole }
+export const usePreviewRole = () => useSyncExternalStore(subscribePreview, previewRole, () => null)
+
+/**
+ * The role the UI renders for: the signed-in account's role — or, while a DEV previews another role, that role.
+ * Never used for authorization: the API and the server use the verified account (identity.ts).
+ */
 export function useRole(): [Role, (r: Role) => void] {
   const session = useContext(SessionContext)
+  const preview = usePreviewRole()
   const stored = useSyncExternalStore(
     subscribe,
     readStoredRole,
@@ -70,7 +79,7 @@ export function useRole(): [Role, (r: Role) => void] {
     },
     [session]
   )
-  return [session?.role ?? stored, set]
+  return [session ? (session.role === "DEV" && preview) || session.role : stored, set]
 }
 
 /**

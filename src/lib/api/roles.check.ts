@@ -198,6 +198,61 @@ async function main() {
   const reset = (await api.audit.list())[0]
   assert.deepEqual([reset.action, reset.actor.role], ["DATA_RESET", "DEV"])
 
+  /* ---------------------------------------------------------------- UI Preview Mode: interface only, UI writes blocked, never authority */
+  {
+    const { setVerifiedSession, setPreviewRole, previewRole, currentActor } = await import("@/lib/identity")
+    const { api: uiApi, PreviewWriteBlockedError } = await import("./client")
+    const { isReadMethod } = await import("./reads")
+    const dev = { role: "DEV" as const, email: "dev@example.com" }
+    setVerifiedSession(dev)
+    for (const r of ["OWNER", "EMPLOYEE"] as const) {
+      setPreviewRole(r)
+      assert.equal(previewRole(), r, `DEV previews ${r}`)
+      // The API's identity never follows the preview: still the verified DEV account.
+      assert.equal(currentRole(), "DEV")
+      assert.equal(currentActor().role, "DEV")
+      // Every write through the UI's api is blocked before it runs — none slips through — and reads still work. (Direct API / database requests are still authorised as DEV: a browser guard, not enforcement.)
+      let writes = 0
+      for (const [ns, group] of Object.entries(api))
+        for (const [method, fn] of Object.entries(group as Record<string, unknown>)) {
+          if (typeof fn !== "function") continue
+          const call = () => (uiApi as unknown as Record<string, Record<string, (...a: unknown[]) => unknown>>)[ns][method]()
+          if (isReadMethod(ns, method)) continue
+          assert.throws(call, PreviewWriteBlockedError, `${r} preview refuses ${ns}.${method}`)
+          writes++
+        }
+      assert.ok(writes > 50, `every write method checked (${writes})`)
+      const before = (await uiApi.customers.list()).length
+      assert.throws(() => uiApi.customers.create({ name: "Preview Co" } as never), PreviewWriteBlockedError)
+      assert.equal((await uiApi.customers.list()).length, before, "nothing saved in preview")
+    }
+    // Return to Dev (DEV or null): writes work again.
+    setPreviewRole("DEV")
+    assert.equal(previewRole(), null)
+    const pump = await uiApi.fuelStations.create({ name: "Preview Check Pump" })
+    assert.ok(pump.id)
+    // Only a verified DEV can preview — storage tampering or another role's session gets nothing.
+    for (const r of ["OWNER", "EMPLOYEE"] as const) {
+      setRole("DEV") // a tampered vt:ui:role…
+      setVerifiedSession({ role: r, email: "someone@example.com" })
+      assert.equal(currentRole(), r) // …never beats the verified account
+      setPreviewRole("OWNER")
+      assert.equal(previewRole(), null, `${r} can't start a preview`)
+    }
+    // Sign-out, an ended session or another account ends a preview; signing back in doesn't revive it.
+    setVerifiedSession(dev)
+    setPreviewRole("EMPLOYEE")
+    setVerifiedSession(null)
+    assert.equal(previewRole(), null, "signed out: no preview")
+    setVerifiedSession(dev)
+    assert.equal(previewRole(), null, "signed back in: Dev, not the old preview")
+    setPreviewRole("OWNER")
+    setVerifiedSession({ role: "DEV", email: "other-dev@example.com" })
+    assert.equal(previewRole(), null, "another DEV account doesn't inherit a preview")
+    setVerifiedSession(null)
+    setRole("OWNER")
+  }
+
   console.log("roles: all checks passed")
 }
 

@@ -116,7 +116,7 @@ export function UserAccounts({ error }: { error?: string }) {
           </Button>
         </CardContent>
       </Card>
-      {accounts ? (
+      {accounts && can("accounts") ? ( // can(): a DEV previewing another role sees that role's page (identity.ts)
         <AccountManager accounts={accounts} meId={me.id} onChanged={refresh} />
       ) : (
         me.status === "ACTIVE" && <p className="text-sm text-muted-foreground">Only Dev can manage user accounts.</p>

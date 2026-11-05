@@ -6,6 +6,8 @@
  */
 import { api as localApi, PossibleDuplicateError } from "./index"
 import { ConflictError, pendingVersions } from "@/lib/versions"
+import { previewRole } from "@/lib/identity"
+import { isReadMethod } from "./reads"
 
 export const DATA_BACKEND: "local" | "supabase" = process.env.NEXT_PUBLIC_DATA_BACKEND === "supabase" ? "supabase" : "local"
 export const isSharedBackend = DATA_BACKEND === "supabase"
@@ -45,4 +47,37 @@ function remoteApi(): typeof localApi {
   })
 }
 
-export const api: typeof localApi = isSharedBackend ? remoteApi() : localApi
+/** Thrown instead of a write made through the application UI while a DEV previews another role. */
+export class PreviewWriteBlockedError extends Error {
+  constructor() {
+    super("UI Preview Mode: saving is blocked to prevent accidental changes. Return to Dev to make changes — nothing was saved.")
+  }
+}
+
+/**
+ * UI Preview Mode (identity.ts): while it's on, every `api` method the UI calls that isn't a read is refused here,
+ * before it reaches the browser store or the server — whatever the previewed role's screens offer. Reads pass through
+ * unchanged. This blocks accidental writes through the normal application UI only: it is not server-side enforcement.
+ * The API and the server still authorise as the verified DEV account, with DEV's actual permissions, so direct API or
+ * database requests may still modify data.
+ */
+function blockWritesWhilePreviewing(target: typeof localApi): typeof localApi {
+  return new Proxy(target, {
+    get: (t, ns: string) => {
+      const group = Reflect.get(t, ns) as Record<string, unknown> | undefined
+      if (!group || typeof group !== "object") return group
+      return new Proxy(group, {
+        get: (g, method: string) => {
+          const fn = Reflect.get(g, method)
+          if (typeof fn !== "function" || isReadMethod(ns, method)) return fn
+          return (...args: unknown[]) => {
+            if (previewRole()) throw new PreviewWriteBlockedError()
+            return Reflect.apply(fn, g, args)
+          }
+        },
+      })
+    },
+  })
+}
+
+export const api: typeof localApi = blockWritesWhilePreviewing(isSharedBackend ? remoteApi() : localApi)

@@ -17,7 +17,40 @@ const LEGACY: readonly LegacyRole[] = ["ACCOUNTANT", "OPS_MANAGER"]
 // shared between requests (the server uses the request scope instead).
 let verified: { role: Role; email: string | null } | null = null
 export function setVerifiedSession(session: { role: Role; email: string | null } | null) {
-  if (typeof window !== "undefined") verified = session
+  if (typeof window === "undefined") return
+  verified = session
+  // Signed out, session ended, or another account: a preview never outlives the DEV session that started it.
+  if (!session || session.role !== "DEV" || session.email !== preview?.email) preview = null
+}
+
+/**
+ * UI Preview Mode (DEV role preview). A signed-in DEV can look at the ERP as the Owner or the Employee sees it:
+ * navigation, pages and buttons follow the previewed role (useRole / useCan). It changes the interface only — not the
+ * authenticated identity and not backend permissions: the API's role (currentRole, currentActor) and the server's
+ * identity stay the verified DEV account, so a preview never gains any permission.
+ * Writes through the normal application UI are blocked to prevent accidental changes (client.ts). This is a browser
+ * guard, not a security boundary: DEV retains their actual DEV permissions, and direct API or database requests may
+ * still modify data (recorded as DEV). In memory only: a reload, sign-out or a different account ends it. Never
+ * stored, never sent to the server.
+ */
+let preview: { role: Role; email: string | null } | null = null
+const previewListeners = new Set<() => void>()
+
+/** Starts (OWNER / EMPLOYEE) or ends (null / DEV) a preview. Ignored unless the verified account is DEV. */
+export function setPreviewRole(role: Role | null) {
+  if (typeof window === "undefined") return
+  preview = role && role !== "DEV" && verified?.role === "DEV" ? { role, email: verified.email } : null
+  previewListeners.forEach((l) => l())
+}
+
+/** The role being previewed, or null — only ever for the verified DEV session that started it. */
+export function previewRole(): Role | null {
+  return preview && verified?.role === "DEV" && verified.email === preview.email ? preview.role : null
+}
+
+export function subscribePreview(cb: () => void) {
+  previewListeners.add(cb)
+  return () => void previewListeners.delete(cb)
 }
 
 /**
