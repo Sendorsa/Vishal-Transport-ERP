@@ -14,7 +14,7 @@ import { insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from 
 import { fillAmount, insufficientTankerMessage, isStockPool, isTankerFill, normReg, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/station-ledger"
 import { currentActor, currentRole } from "@/lib/identity"
-import { can, hasOwnerAuthority, type Resource } from "@/lib/permissions"
+import { can, canRecordStationPayment, canSetStationOpening, hasOwnerAuthority, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
 import { format, parseISO } from "date-fns"
 import { assignmentIndex, assignmentOn, inferAssignments, resolveCustomers, transferPeriods, type AssignmentPeriod } from "@/domain/assignments"
@@ -570,8 +570,11 @@ async function updateDriver(id: string, patch: Partial<NewEntity<Driver>>) {
 
 /** POST /api/payments — validates allocations against outstanding. */
 async function createPayment(input: Omit<NewEntity<Payment>, "paymentNo">) {
-  // A vehicle's maintenance expense is logged from its page by whoever may edit the vehicle (vehicles:edit).
-  if (!(input.direction === "OUT" && input.vehicleId && can(currentRole(), "vehicles", "edit"))) assertCan("payments", "create")
+  // A vehicle's maintenance expense is logged from its page by whoever may edit the vehicle (vehicles:edit);
+  // a fuel station payment (never TDS) by whoever may record station payments (canRecordStationPayment).
+  const maintenance = input.direction === "OUT" && !!input.vehicleId && can(currentRole(), "vehicles", "edit")
+  const stationPayment = !!input.vendorId && isStationPayment(input, input.vendorId) && !input.tdsAmount && canRecordStationPayment(currentRole())
+  if (!maintenance && !stationPayment) assertCan("payments", "create")
   ensureSeeded()
   assertMonthEditable(input.date)
   assertStationPaymentDate(input)
@@ -930,7 +933,7 @@ export const api = {
      */
     setOpeningBalance: (id: string, input: { amount: number; date: string }) =>
       tx(async () => {
-        assertWorkspaceAdmin("record opening balances")
+        if (!canSetStationOpening(currentRole())) throw new Error("Your role can't record opening balances.")
         const before = await fuelStations.get(id)
         if (!before || before.isTanker) throw new NotFoundError("Fuel station", id)
         if (!Number.isFinite(input.amount)) throw new Error("Enter the opening balance")
@@ -962,7 +965,7 @@ export const api = {
     },
     create: (input: { stationId: string; paymentDate: string; amount: number; paymentMode: PaymentMode; notes: string; companyCode: CompanyCode; reference?: string; forMonth?: string }) =>
       tx(async () => {
-        assertCan("payments", "create")
+        if (!canRecordStationPayment(currentRole())) throw new Error("Your role can't create payment records.")
         const station = readCollection("fuel_stations").find((v) => v.id === input.stationId)
         if (!station) throw new NotFoundError("Fuel station", input.stationId)
         if (!(input.amount > 0)) throw new Error("Amount must be greater than zero")

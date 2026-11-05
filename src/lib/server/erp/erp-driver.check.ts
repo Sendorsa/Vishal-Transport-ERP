@@ -101,7 +101,7 @@ async function main() {
     assert.ok(Array.isArray(JSON.parse(JSON.stringify(ids))) && ids.includes(station.id), "editedIds is plain JSON (a Set crashed the page in Production)")
 
     /* -------------------------------------------------------------- 5. a refused write never reports success */
-    await assert.rejects(as(EMP, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 100, paymentMode: "NEFT", notes: "", companyCode: "VT" })), /can't create payment/)
+    await assert.rejects(as(EMP, () => api.fuelStationPayments.recordTds({ stationId: station.id, month: today.slice(0, 7), amount: 100, companyCode: "VT", notes: "" })), /can't create payment/) // Employee: no TDS
     const [{ n }] = await client`select count(*)::int as n from finance.payments`
     assert.equal(n, 0)
 

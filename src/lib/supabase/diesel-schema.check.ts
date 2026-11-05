@@ -206,8 +206,11 @@ async function main() {
   await refused(tx(OWNER, pay(`'VT', 'OUT', '${today}', 'VENDOR', 'dv_tanker', 'Diesel Tanker', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', null)`, "pay_x1")), /foreign key/, "nobody pays the tanker source")
   await refused(tx(OWNER, pay(`'VT', 'OUT', '${today}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', '2099-01')`, "pay_x2")), /check constraint/, "not paid against a later month")
   await refused(tx(OWNER, pay(`'VT', 'OUT', '${tomorrow}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', null)`, "pay_x3")), /future/, "no future-dated payment")
-  await refused(tx(EMP, pay(`'VT', 'OUT', '${today}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', null)`, "pay_x4")), /row-level security/, "Employee doesn't record payments")
-  assert.equal((await asUser<{ n: number }>(EMP, `select count(*)::int as n from finance.payments`))[0].n, 2, "…but sees station payments on the ledger (diesel:view)")
+  // The Employee records station payments (diesel:edit, owner 5 Nov 2026) — never TDS, never in a locked month.
+  await refused(tx(EMP, pay(`'VT', 'OUT', '${lastMonthEnd}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 0, 1, 'TDS', '${lastMonthEnd.slice(0, 7)}')`, "pay_x5")), /row-level security/, "Employee doesn't record TDS")
+  await refused(tx(EMP, pay(`'VT', 'OUT', '${lastMonthDay}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', null)`, "pay_x6")), /row-level security/, "Employee follows the month lock on payments")
+  await tx(EMP, pay(`'VT', 'OUT', '${today}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', null)`, "pay_x4"))
+  assert.equal((await asUser<{ n: number }>(EMP, `select count(*)::int as n from finance.payments`))[0].n, 3, "…and sees station payments on the ledger (diesel:view)")
   await tx(OWNER, pay(`'VT', 'OUT', '${lastMonthEnd}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 0, 94.80, 'TDS', '${lastMonthEnd.slice(0, 7)}')`, "pay_tds5"))
   await refused(tx(OWNER, pay(`'VT', 'OUT', '${lastMonthEnd}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 0, 1, 'TDS', '${lastMonthEnd.slice(0, 7)}')`, "pay_tds6")), /payments_one_tds_per_station_month/, "one TDS per station per month")
   await refused(tx(OWNER, pay(`'VT', 'OUT', '${lastMonthDay}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 0, 1, 'TDS', '${lastMonthDay.slice(0, 7)}')`, "pay_tds7")), /check constraint/, "TDS is dated the month's last day")
@@ -215,7 +218,8 @@ async function main() {
   assert.equal((await asUser<{ n: number }>(EMP, `select count(*)::int as n from finance.payments where id = 'pay_rct8'`))[0].n, 0, "…but a diesel-only reader never sees a receipt")
 
   /* ---------------------------------------------------------------- opening balance */
-  await refused(tx(EMP, `update fuel.fuel_stations set opening_balance = 9455.49, opening_balance_date = '${today}' where id = 'dv_raghuveer'; ${ev("UPDATED", "Fuel Stations", "Fuel station", "dv_raghuveer")}`), /Only the Owner or Dev/, "opening balances: Owner / Dev")
+  await refused(tx(EMP, `update fuel.fuel_stations set opening_balance = 9455.49, opening_balance_date = '${lastMonthDay}' where id = 'dv_raghuveer'; ${ev("UPDATED", "Fuel Stations", "Fuel station", "dv_raghuveer")}`), /month is locked/, "opening balances follow the month lock")
+  await tx(EMP, `update fuel.fuel_stations set opening_balance = 9455.49, opening_balance_date = '${today}' where id = 'dv_raghuveer'; ${ev("UPDATED", "Fuel Stations", "Fuel station", "dv_raghuveer")}`) // diesel:edit (owner, 5 Nov 2026)
   await tx(DEV, `update fuel.fuel_stations set opening_balance = -2500, opening_balance_date = '${today}' where id = 'dv_raghuveer'; ${ev("UPDATED", "Fuel Stations", "Fuel station", "dv_raghuveer")}`)
   assert.equal((await one<{ b: string }>(`select opening_balance::text as b from fuel.fuel_stations where id = 'dv_raghuveer'`)).b, "-2500.00", "a Credit opening balance is kept signed")
 

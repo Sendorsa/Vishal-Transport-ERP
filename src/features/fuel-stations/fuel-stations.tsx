@@ -33,6 +33,7 @@ import type { CompanyCode, FuelStation, Payment, PaymentMode } from "@/lib/types
 import { useDieselIndex } from "../diesel/parts"
 import { isTankerLoadId, loadsAsStationPurchases } from "@/domain/tanker"
 import { usePeriod } from "../diesel/period"
+import { canRecordStationPayment, canSetStationOpening } from "@/lib/permissions"
 
 /**
  * Fuel Stations — a master entity (vt:fuelStations). The same list feeds the pump field in Diesel
@@ -436,12 +437,12 @@ export function FuelStationDetail({ id }: { id: string }) {
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <HistoryButton id={v.id} />
-            {(role === "OWNER" || role === "DEV") && (
+            {canSetStationOpening(role) && (
               <Button variant="outline" onClick={() => setOpeningOpen(true)}>
                 <Scale /> Opening Balance
               </Button>
             )}
-            {can("payments", "create") && v.status !== "ARCHIVED" && (
+            {canRecordStationPayment(role) && v.status !== "ARCHIVED" && (
               // Paid today; while an earlier month is shown, it's suggested as the month paid against.
               <Button onClick={() => setPaying({ forMonth: period.mode === "month" ? period.periodMonths?.[0] : undefined })}>
                 <Plus /> Add Payment

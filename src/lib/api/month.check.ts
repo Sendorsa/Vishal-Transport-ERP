@@ -108,7 +108,7 @@ async function main() {
   const octPaid0 = await paidIn("2026-10")
   const paidAll0 = round2((await paymentsOf()).reduce((t, p) => t + p.amount, 0))
   setRole("EMPLOYEE")
-  await assert.rejects(api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-11-01", amount: 1, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }), /can't/) // Employees don't record payments
+  await assert.rejects(api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-10-31", amount: 1, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }), /is locked/) // Employees follow the lock
   setRole("DEV")
   at("2026-11-15T11:00:00")
   const novPay = await api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-11-15", amount: 100000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" })

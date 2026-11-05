@@ -172,15 +172,21 @@ async function main() {
     await assert.rejects(api.customers.archive((await api.customers.list())[0].id), refused)
     await assert.rejects(api.invoices.create({} as never), refused)
     await assert.rejects(api.payments.create({ direction: "IN", vehicleId: null } as never), refused)
-    await assert.rejects(api.fuelStationPayments.create({} as never), refused)
+    await assert.rejects(api.fuelStationPayments.recordTds({} as never), refused)
     await assert.rejects(api.drivers.update(driver.id, { status: "INACTIVE" }), refused)
     await assert.rejects(api.settings.update({ companies: [] }), refused)
     await assert.rejects(api.settings.update({ vehicleTypes: (await api.settings.get()).vehicleTypes }), refused)
     await assert.rejects(api.admin.resetDemoData(), refused)
     await assert.rejects(api.admin.clearAllData(), refused)
     await assert.rejects(api.admin.restoreBackup({}, "x.json"), refused)
-    assert.ok(await api.fuelStations.create({ name: "Roles Check Pump" }))
+    const pump = await api.fuelStations.create({ name: "Roles Check Pump" })
+    // Fuel Stations → station → Add Payment and Opening Balance (owner, 5 Nov 2026) — not TDS, edits or deletes.
+    const empPay = await api.fuelStationPayments.create({ stationId: pump.id, paymentDate: today, amount: 250, paymentMode: "CASH", notes: "", companyCode: "VT" })
+    await assert.rejects(api.fuelStationPayments.update(empPay.id, { paymentDate: today, amount: 300, paymentMode: "CASH", notes: "" }), refused)
+    await assert.rejects(api.fuelStationPayments.remove(empPay.id, "Employee attempt"), refused)
+    assert.equal((await api.fuelStations.setOpeningBalance(pump.id, { amount: 500, date: today })).openingBalance, 500)
     setRole("OWNER")
+    assert.equal((await api.audit.list()).find((e) => e.recordId === empPay.id)?.actor.role, "EMPLOYEE")
   }
 
   /* ---------------------------------------------------------------- Regression: a data reset never changes who you are */

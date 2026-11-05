@@ -62,6 +62,14 @@ export function can(role: Role, resource: Resource, action: Action = "view") {
  */
 export const hasOwnerAuthority = (role: Role) => role === "OWNER" || role === "DEV"
 
+/**
+ * Fuel Stations → station → Add Payment and Opening Balance (owner, 5 Nov 2026): whoever may edit fuel records
+ * (diesel:edit — the Employee too), besides payment users. TDS, payment edits / deletes and the Payments module are
+ * unchanged. The database mirrors it (migration 20261105000000).
+ */
+export const canRecordStationPayment = (role: Role) => can(role, "payments", "create") || can(role, "diesel", "edit")
+export const canSetStationOpening = (role: Role) => can(role, "diesel", "edit")
+
 /** Removed roles (31 Oct 2026), named only where history shows them: audit events and the audit log's role filter. */
 export const LEGACY_ROLES: { value: LegacyRole; label: string }[] = [
   { value: "ACCOUNTANT", label: "Accountant (former role)" },

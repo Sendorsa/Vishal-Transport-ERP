@@ -135,14 +135,17 @@ async function main() {
   assert.equal(v.stock.get(JIO)!.litres, 1200, "JIO: 1,000 opening + 500 loaded − 300 filled")
 
   /* ---------------------------------------------------------------- 5. station ledger: Opening + Purchased − Paid = Closing; partial payment */
-  await assert.rejects(as(EMP, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 1000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" })), /can't create payment/)
-  const pay = await as(OWNER, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 20000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }))
+  // The Employee records a station payment (owner, 5 Nov 2026) — but no TDS, and never in a locked month.
+  await assert.rejects(as(EMP, () => api.fuelStationPayments.recordTds({ stationId: station.id, month: "2026-10", amount: 1, companyCode: "VT", notes: "" })), /can't create payment/)
+  await assert.rejects(as(EMP, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: B, amount: 1000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" })), /is locked/)
+  await as(EMP, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 1000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }))
+  const pay = await as(OWNER, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 19000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }))
   const st = (await read(OWNER, () => api.fuelStations.list())).find((s) => s.id === station.id)!
   const purchases = [...fills, ...loadsAsStationPurchases(loads)]
   const led = stationLedger(station.id, purchases, await read(OWNER, () => api.payments.list()), today.slice(0, 7), openingOf(st))
   const nov = ledgerFor(led, [today.slice(0, 7)])
   const bought = round2(9480 + 3568.27 + round2(500 * 95.1)) // pump fills + the tanker load; never the tanker fill
-  const paid = round2(20000 + 3568.27) // the voucher + cash at pump
+  const paid = round2(1000 + 19000 + 3568.27) // the Employee's and the Owner's vouchers + cash at pump
   assert.deepEqual([nov.opening, nov.purchased, nov.paid, nov.closing], [50000, bought, paid, round2(50000 + bought - paid)])
   assert.equal(ledgerFor(led, ["2026-10"]).closing, 50000, "October closing = the opening balance, carried into November")
   // The payment never touched a fuel entry.
