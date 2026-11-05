@@ -3,11 +3,11 @@
  * data only while the month is open:
  *
  *   automatic   → the current month is open; once the next month starts, it locks by itself
- *   override    → the Owner or Dev can lock a month early, or unlock a closed month for users
- *   Owner, Dev  → can always edit, locked or not (owner's decision, 3 Nov 2026)
+ *   override    → the Owner, Dev or Employee can lock a month early, or unlock a closed month for users
+ *   Owner, Dev  → can always edit, locked or not (owner's decision, 3 Nov 2026); the Employee follows the lock
  */
 import type { MonthLock, Role } from "@/lib/types"
-import { hasOwnerAuthority } from "@/lib/permissions"
+import { canBypassMonthLock } from "@/lib/permissions"
 import { monthKey } from "@/lib/format"
 
 export type LockState = "OPEN" | "LOCKED"
@@ -30,5 +30,5 @@ export function monthLockInfo(month: string, todayIso: string, locks: MonthLock[
 
 /** Whether `role` may add or change data dated in `month`. */
 export function canEditMonth(role: Role, month: string, todayIso: string, locks: MonthLock[]) {
-  return hasOwnerAuthority(role) || monthLockInfo(month, todayIso, locks).state === "OPEN"
+  return canBypassMonthLock(role) || monthLockInfo(month, todayIso, locks).state === "OPEN"
 }

@@ -172,10 +172,11 @@ async function main() {
   assert.equal((await api.payments.list()).filter((p) => p.direction === "OUT").reduce((t, p) => t + p.amount, 0), paidOut0) // a TDS entry pays no money out
   await assert.rejects(api.fuelStationPayments.recordTds({ stationId: station, month: "2026-09", amount: 1, companyCode: "VT", notes: "" }), /already recorded/)
   await assert.rejects(api.fuelStationPayments.recordTds({ stationId: station, month: "2026-10", amount: 1, companyCode: "VT", notes: "" }), /dated 31-10-2026|record it on or after/) // month not over
-  // An older month's TDS: no grace period any more — Owner-level authority (Owner, Dev, Employee) may record it.
+  // An older month's TDS: no grace period — the Owner (or Dev) may record it in a locked month; the Employee follows the lock.
   setRole("EMPLOYEE")
-  const augTds = await api.fuelStationPayments.recordTds({ stationId: station, month: "2026-08", amount: 1, companyCode: "VT", notes: "" })
+  await assert.rejects(api.fuelStationPayments.recordTds({ stationId: station, month: "2026-08", amount: 1, companyCode: "VT", notes: "" }), /August 2026 is locked/)
   setRole("OWNER")
+  const augTds = await api.fuelStationPayments.recordTds({ stationId: station, month: "2026-08", amount: 1, companyCode: "VT", notes: "" })
   assert.deepEqual([augTds.date, augTds.forMonth], ["2026-08-31", "2026-08"])
   const stp = (await api.fuelStationPayments.list()).find((p) => p.id === tds.id)!
   assert.deepEqual([stp.tds, stp.amount], [true, due])

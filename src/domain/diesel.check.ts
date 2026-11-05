@@ -179,12 +179,12 @@ assert.equal(activeVehicleIds(periods, fleet, "tepl", "2026-09-15").size, 1) // 
 // Month lock: employees edit only the open month; the Owner always can and can override.
 assert.equal(monthLockInfo("2026-10", "2026-10-06", []).state, "OPEN") // current month open
 assert.equal(monthLockInfo("2026-09", "2026-10-06", []).state, "LOCKED") // locks once October starts
-assert.equal(canEditMonth("EMPLOYEE", "2026-09", "2026-10-06", []), true) // Owner-level authority since 5 Nov 2026
+assert.equal(canEditMonth("EMPLOYEE", "2026-09", "2026-10-06", []), false) // the Employee follows the lock (owner, 5 Nov 2026)
 assert.equal(canEditMonth("OWNER", "2026-09", "2026-10-06", []), true)
 const unlockedSep = [{ month: "2026-09", state: "OPEN", changedBy: "OWNER" }] as never
 assert.equal(canEditMonth("EMPLOYEE", "2026-09", "2026-10-06", unlockedSep), true) // Owner unlocked September
 const lockedOct = [{ month: "2026-10", state: "LOCKED", changedBy: "OWNER" }] as never
-assert.equal(canEditMonth("EMPLOYEE", "2026-10", "2026-10-06", lockedOct), true) // the Employee has the Owner's month-lock authority (owner, 5 Nov 2026)
+assert.equal(canEditMonth("EMPLOYEE", "2026-10", "2026-10-06", lockedOct), false) // Owner locked October early — the Employee follows the lock
 assert.equal(canEditMonth("DEV", "2026-10", "2026-10-06", lockedOct), true) // Dev has the Owner's month-lock authority (owner, 3 Nov 2026)
 assert.equal(canEditMonth("DEV", "2026-09", "2026-10-06", []), true)
 assert.equal(canEditMonth("OWNER", "2026-10", "2026-10-06", lockedOct), true)

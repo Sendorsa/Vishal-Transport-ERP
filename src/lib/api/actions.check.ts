@@ -174,12 +174,18 @@ async function main() {
 
   /* ---------------------------------------------------------------- 6. Month lock */
   const old = (await api.diesel.list()).find((e) => e.date.startsWith(lastMonth) && e.vendorId !== "dv_tanker")!
-  setRole("EMPLOYEE") // Owner-level authority (5 Nov 2026): the Employee, like the Owner, can change a locked month
-  await api.diesel.remove(old.id, "Employee correction")
+  setRole("EMPLOYEE") // may edit and delete like the Owner, but never in a locked month (owner, 5 Nov 2026)
+  await assert.rejects(api.diesel.update(old.id, { date: old.date, vendorId: old.vendorId, litres: old.litres + 1, rate: old.rate, odometerKm: old.odometerKm, billNo: old.billNo, paymentMode: old.paymentMode }), /is locked/)
+  await assert.rejects(api.diesel.remove(old.id, "Check: test record"), /is locked/)
+  setRole("OWNER") // the Owner can change any month (Monthly Sheet Lock)…
+  assert.ok(await api.diesel.get(old.id))
+  await api.diesel.remove(old.id, "Owner correction")
   assert.deepEqual(await events(old.id), ["DELETED"])
-  // Station payments in a locked month: the Employee handles money like the Owner (permission and lock pass first).
+  // Station payments in a locked month: the Employee handles money, but not a locked month's.
   const oldPay = (await api.payments.list()).find((p) => p.categoryCode === "DIESEL_SETTLEMENT" && p.date < `${lastMonth}-01`)!
-  await assert.rejects(api.fuelStationPayments.remove(oldPay.id, ""), /reason/i)
+  setRole("EMPLOYEE")
+  await assert.rejects(api.fuelStationPayments.remove(oldPay.id, "Check: test record"), /is locked/)
+  await assert.rejects(api.fuelStationPayments.update(oldPay.id, { paymentDate: oldPay.date, amount: oldPay.amount + 1, paymentMode: oldPay.mode, notes: "" }), /is locked/)
   setRole("OWNER")
   assert.ok(await api.payments.get(oldPay.id))
 

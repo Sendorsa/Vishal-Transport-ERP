@@ -9,7 +9,7 @@ import { checkTanker, setRole, storage } from "./test-browser"
 
 async function main() {
   const { api } = await import("./index")
-  const { can, RESOURCES, DEV_ONLY, ROLES, roleLabel, hasOwnerAuthority } = await import("@/lib/permissions")
+  const { can, RESOURCES, DEV_ONLY, ROLES, roleLabel, hasOwnerAuthority, canBypassMonthLock } = await import("@/lib/permissions")
   const { currentRole } = await import("@/lib/app-state")
   const { canEditMonth } = await import("@/domain/month-lock")
   const { actorLabel } = await import("@/domain/audit")
@@ -67,8 +67,11 @@ async function main() {
   }
   assert.ok(isActive("/diesel/minda/2026-11", "/diesel") && isActive("/fuel-stations/dv_tanker", "/fuel-stations"), "a tab stays active on its sub-pages")
   assert.ok(!isActive("/dashboard", "/diesel") && isActive("/dashboard", "/dashboard"), "…and only its own pages")
-  // The Monthly Sheet Lock bypass: Owner-level authority — the Owner, Dev and (owner, 5 Nov 2026) the Employee.
-  for (const r of ["OWNER", "DEV", "EMPLOYEE"] as const) assert.equal(canEditMonth(r, "2020-01", todayISO(), []), true)
+  // The Monthly Sheet Lock bypass: the Owner and Dev, never the Employee (owner, 5 Nov 2026) — who may still lock / unlock.
+  assert.equal(canEditMonth("OWNER", "2020-01", todayISO(), []), true)
+  assert.equal(canEditMonth("DEV", "2020-01", todayISO(), []), true)
+  assert.equal(canEditMonth("EMPLOYEE", "2020-01", todayISO(), []), false)
+  assert.ok(hasOwnerAuthority("EMPLOYEE") && !canBypassMonthLock("EMPLOYEE") && canBypassMonthLock("OWNER") && canBypassMonthLock("DEV"))
 
   /* ---------------------------------------------------------------- 6. Role persistence (mock session) */
   setRole("DEV")

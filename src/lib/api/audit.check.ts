@@ -132,19 +132,22 @@ async function main() {
   assert.deepEqual([ph[2].reason, (ph[2].before as { amount: number }).amount], ["Duplicate voucher", 12000])
 
   // 12 / 14. Failed operations leave no event and no change.
-  //   a) Month lock: the Employee, like the Owner, may edit last month's entry (owner, 5 Nov 2026) — recorded as EMPLOYEE.
+  //   a) Month lock: an Employee can't edit last month's entry (auto-locked) — despite its Owner-level authority (5 Nov 2026).
   const old = (await api.diesel.list()).find((e) => e.date.startsWith(lastMonth) && e.vendorId !== "dv_tanker")!
   setRole("EMPLOYEE")
-  await api.diesel.update(old.id, { date: old.date, vendorId: old.vendorId, litres: old.litres + 2, rate: old.rate, odometerKm: old.odometerKm, billNo: old.billNo, paymentMode: old.paymentMode }, "Employee correction")
-  assert.deepEqual([(await log())[0].recordId, (await log())[0].actor.role], [old.id, "EMPLOYEE"])
+  const n2 = (await api.audit.history(old.id)).length
+  await assert.rejects(api.diesel.update(old.id, { date: old.date, vendorId: old.vendorId, litres: old.litres + 1, rate: old.rate, odometerKm: old.odometerKm, billNo: old.billNo, paymentMode: old.paymentMode }), /is locked/)
+  await assert.rejects(api.diesel.remove(old.id, "Employee attempt"), /is locked/)
+  assert.equal((await api.audit.history(old.id)).length, n2)
+  assert.equal((await api.diesel.get(old.id))!.litres, old.litres)
   //   b) The Owner may edit a locked month (Monthly Sheet Lock) — and it is recorded as the Owner.
   setRole("OWNER")
   await api.diesel.update(old.id, { date: old.date, vendorId: old.vendorId, litres: old.litres + 1, rate: old.rate, odometerKm: old.odometerKm, billNo: old.billNo, paymentMode: old.paymentMode }, "Odometer correction")
   assert.deepEqual([(await log())[0].recordId, (await log())[0].actor.role], [old.id, "OWNER"])
-  //   c) A refused station payment (no amount) records nothing.
+  //   c) A refused station payment (Employee: dated in a locked month) records nothing.
   const n3 = await count()
   setRole("EMPLOYEE")
-  await assert.rejects(api.fuelStationPayments.create({ stationId: "dv_raghuveer", paymentDate: `${twoMonthsAgo}-10`, amount: 0, paymentMode: "NEFT", notes: "", companyCode: "VT" }), /greater than zero/)
+  await assert.rejects(api.fuelStationPayments.create({ stationId: "dv_raghuveer", paymentDate: `${twoMonthsAgo}-10`, amount: 1, paymentMode: "NEFT", notes: "", companyCode: "VT" }), /is locked/)
   setRole("OWNER")
   assert.equal(await count(), n3)
   //   d) If the audit write itself fails, the record change is rolled back too —
@@ -181,13 +184,13 @@ async function main() {
   const all = await log()
   assert.ok(all.every((e, i) => i === 0 || all[i - 1].at >= e.at)) // newest first
   assert.ok(all.filter((e) => matchesAudit(e, { role: "EMPLOYEE" })).every((e) => e.actor.role === "EMPLOYEE"))
-  assert.equal(all.filter((e) => matchesAudit(e, { role: "EMPLOYEE", module: "Diesel", action: "UPDATED" })).length, 2) // the first edit and the locked-month correction; the rest were by the Owner
+  assert.equal(all.filter((e) => matchesAudit(e, { role: "EMPLOYEE", module: "Diesel", action: "UPDATED" })).length, 1) // the later three edits were by the Owner
   assert.equal(all.filter((e) => matchesAudit(e, { recordId: pay.id })).length, 3)
   assert.equal(all.filter((e) => matchesAudit(e, { q: "duplicate voucher" })).length, 1)
   assert.equal(all.filter((e) => matchesAudit(e, { action: "DELETED" })).length, 2)
   assert.equal(all.filter((e) => matchesAudit(e, { from: today, to: today })).length, all.length)
   assert.equal(all.filter((e) => matchesAudit(e, { to: "2000-01-01" })).length, 0)
-  assert.equal(all.filter((e) => matchesAudit(e, { user: "Employee (unverified session)" })).length, 3) // diesel create, first edit, locked-month correction
+  assert.equal(all.filter((e) => matchesAudit(e, { user: "Employee (unverified session)" })).length, 2) // diesel create + first edit
   assert.equal(formatAuditTime("2026-10-12T09:00:00.000Z"), "12 Oct 2026, 2:30 pm IST") // stored UTC, shown IST
   const t = (at: string, id: string) => ({ ...all[0], at, id })
   assert.deepEqual(newestFirst([t("2026-10-12T09:00:00Z", "a"), t("2026-10-12T10:00:00Z", "b"), t("2026-10-12T10:00:00Z", "c")]).map((e) => e.id), ["c", "b", "a"]) // same instant → later append first

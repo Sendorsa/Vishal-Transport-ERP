@@ -10,7 +10,7 @@ import { toast } from "sonner"
 import { api } from "./client"
 import { withVersions } from "@/lib/versions"
 import { useCompanyScope, useRole } from "@/lib/app-state"
-import { monthLockInfo } from "@/domain/month-lock"
+import { canEditMonth, monthLockInfo } from "@/domain/month-lock"
 import { hasOwnerAuthority } from "@/lib/permissions"
 import { todayISO } from "@/lib/format"
 import { scopeDataset, type Dataset } from "@/domain/analytics"
@@ -204,8 +204,8 @@ export function useMonthLock(month: string) {
   const [role] = useRole()
   const locks = useMonthLocks()
   const info = monthLockInfo(month, todayISO(), locks.data ?? [])
-  const isOwner = hasOwnerAuthority(role) // Owner-level control: the Owner and Dev
-  return { info, isOwner, canEdit: isOwner || info.state === "OPEN" }
+  const isOwner = hasOwnerAuthority(role) // lock / unlock: Owner-level authority (Owner, Dev, Employee)
+  return { info, isOwner, canEdit: canEditMonth(role, month, todayISO(), locks.data ?? []) } // locked data: Owner and Dev only
 }
 
 /** Owner: lock a month early, or unlock a closed month for users. */

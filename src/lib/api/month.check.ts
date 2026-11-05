@@ -87,7 +87,8 @@ async function main() {
   assert.deepEqual([lock("2026-10"), lock("2026-11")], ["LOCKED", "OPEN"])
   const edit = (e: typeof octEntry) => ({ date: e.date, vendorId: e.vendorId, litres: e.litres + 1, rate: e.rate, odometerKm: e.odometerKm, billNo: e.billNo, paymentMode: e.paymentMode })
   setRole("EMPLOYEE")
-  assert.ok(canEditMonth("EMPLOYEE", "2026-10", todayISO(), await api.monthLocks.list()), "the Employee has the Owner's access to locked months (5 Nov 2026)")
+  await assert.rejects(api.diesel.update(octEntry.id, edit(octEntry)), /October 2026 is locked/)
+  await assert.rejects(api.diesel.create(fill("2026-10-30")), /October 2026 is locked/) // back-dated
   await api.diesel.create(fill("2026-11-01")) // November is open
   setRole("DEV")
   assert.ok(canEditMonth("DEV", "2026-10", todayISO(), await api.monthLocks.list()), "Dev keeps the Owner's access to locked months")
@@ -106,6 +107,8 @@ async function main() {
   const paidIn = async (m: string) => ledgerFor(await ledger(), [m]).paid
   const octPaid0 = await paidIn("2026-10")
   const paidAll0 = round2((await paymentsOf()).reduce((t, p) => t + p.amount, 0))
+  setRole("EMPLOYEE")
+  await assert.rejects(api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-10-31", amount: 1, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }), /is locked/) // Employees follow the lock
   setRole("DEV")
   at("2026-11-15T11:00:00")
   const novPay = await api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-11-15", amount: 100000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" })
@@ -150,7 +153,12 @@ async function main() {
   at("2027-01-01T00:00:30")
   assert.deepEqual([lock("2026-12"), lock("2027-01")], ["LOCKED", "OPEN"])
   setRole("EMPLOYEE")
-  assert.ok(canEditMonth("EMPLOYEE", "2026-12", todayISO(), await api.monthLocks.list())) // locked, but not for Owner-level authority
+  await assert.rejects(api.diesel.update(decEntry.id, edit(decEntry)), /December 2026 is locked/)
+  // …but the Employee may lock and unlock months (owner, 5 Nov 2026): unlocking December opens it for the Employee too.
+  assert.equal((await api.monthLocks.set("2026-12", "OPEN")).changedBy, "EMPLOYEE")
+  assert.ok(canEditMonth("EMPLOYEE", "2026-12", todayISO(), await api.monthLocks.list()))
+  await api.monthLocks.set("2026-12", "LOCKED")
+  await assert.rejects(api.diesel.update(decEntry.id, edit(decEntry)), /December 2026 is locked/)
   const janFill = await api.diesel.create(fill("2027-01-01"))
   setRole("OWNER")
   await api.diesel.update(decEntry.id, edit(decEntry), "Owner correction")
@@ -179,7 +187,8 @@ async function main() {
   assert.ok((await api.audit.list()).length > 0) // Dev views the log…
   const devDel = (await api.audit.list()).find((e) => e.action === "DELETED" && e.recordId === ownerLate.id)!
   setRole("EMPLOYEE")
-  assert.ok((await api.audit.checkRestore(devDel.id)).ok, "the Employee may restore, like the Owner")
+  const empRestore = await api.audit.checkRestore(devDel.id) // a payment dated in locked October: the lock applies to restores too
+  assert.ok(!empRestore.ok && /October 2026 is locked/.test(empRestore.reason), "the Employee can't push a record back into a locked month")
   setRole("DEV")
   await api.audit.restoreDeleted(devDel.id, "Dev restores") // …and restores (Owner-level authority)
   assert.ok(await api.payments.get(ownerLate.id))

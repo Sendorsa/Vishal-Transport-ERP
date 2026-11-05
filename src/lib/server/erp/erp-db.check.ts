@@ -104,10 +104,12 @@ async function main() {
   await assert.rejects(as(OWNER, () => api.vehicles.create({ ...bus, regNo: "TN70ZZ0001", assignedSince: "2099-01-01" } as never)), /future/)
 
   /* ---------------------------------------------------------------- 3. openings at the baseline (Owner-level) */
-  await as(EMP, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })) // we owe ₹50,000 at 31 Oct — Owner-level, the Employee too (5 Nov 2026)
+  await assert.rejects(as(EMP, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })), /October 2026 is locked/) // Owner-level, but the Employee follows the lock
+  await as(OWNER, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })) // we owe ₹50,000 at 31 Oct
   await as(DEV, () => api.tankerLoads.createOpening({ tankerId: JIO, date: B, litres: 1000, value: 95000, notes: "Dip at go-live" }))
   await as(OWNER, () => api.adbluePurchases.createOpening({ date: B, litres: 100, value: 9000, notes: "" }))
-  await as(EMP, () => api.vehicles.setOpeningOdometer(bus.id, { km: 120000, date: "2026-10-28" }))
+  await assert.rejects(as(EMP, () => api.vehicles.setOpeningOdometer(bus.id, { km: 120000, date: "2026-10-28" })), /October 2026 is locked/)
+  await as(OWNER, () => api.vehicles.setOpeningOdometer(bus.id, { km: 120000, date: "2026-10-28" }))
   const oldInv = await as(OWNER, () => api.invoices.createOpening({ customerId: minda.id, invoiceNo: "VT/2026-27/045", date: "2026-10-05", dueDate: "2026-11-04", outstanding: 118000, notes: "Unpaid at go-live" }))
   assert.deepEqual([oldInv.opening, oldInv.status, oldInv.total, oldInv.lines.length], [true, "ISSUED", 118000, 0])
 
@@ -214,13 +216,15 @@ async function main() {
   await assert.rejects(as(OWNER, () => api.vehicles.update(spare.id, { ...spareData, assignedCustomerId: tepl.id, notes: "Stale" }), true, { [spare.id]: spareSeen.updatedAt }), (e: unknown) => e instanceof ConflictError, "a stale screen is still refused")
   assert.equal((await read(EMP, () => api.vehicles.list())).find((x) => x.id === spare.id)!.assignedCustomerId, tepl.id, "…and changed nothing")
 
-  /* ---------------------------------------------------------------- 9. month lock: Employee refused, Dev and Owner allowed; recorded as who did it */
+  /* ---------------------------------------------------------------- 9. month lock: locked data — Employee refused, Dev and Owner allowed; lock / unlock — all three */
   const octFill = await as(OWNER, () => api.diesel.create({ ...fill(10, 119000), date: "2026-10-30" }))
-  await as(EMP, () => api.diesel.update(octFill.id, { ...fill(11, 119000), date: "2026-10-30", vendorId: station.id }, "Employee correction in a closed month"))
+  await assert.rejects(as(EMP, () => api.diesel.update(octFill.id, { ...fill(11, 119000), date: "2026-10-30", vendorId: station.id })), /October 2026 is locked/)
+  await assert.rejects(as(EMP, () => api.diesel.remove(octFill.id, "Employee attempt")), /October 2026 is locked/)
   await as(DEV, () => api.diesel.update(octFill.id, { ...fill(12, 119000), date: "2026-10-30", vendorId: station.id }, "Dev correction in a closed month"))
   const lock = await as(DEV, () => api.monthLocks.set(today.slice(0, 7), "LOCKED"))
   assert.equal(lock.changedBy, "DEV")
-  assert.equal((await as(EMP, () => api.monthLocks.set(today.slice(0, 7), "OPEN"))).changedBy, "EMPLOYEE", "the Employee unlocks, recorded as itself")
+  await assert.rejects(as(EMP, () => api.diesel.create(fill(5, 121000))), /is locked/) // a month locked early: closed to the Employee
+  assert.equal((await as(EMP, () => api.monthLocks.set(today.slice(0, 7), "OPEN"))).changedBy, "EMPLOYEE", "…who may still unlock it, recorded as itself")
 
   /* ---------------------------------------------------------------- 10. delete with reason; Dev restores; audit identity */
   await assert.rejects(as(EMP, () => api.diesel.remove(f2.id, "")), /reason/i) // permission passes; the reason is still required

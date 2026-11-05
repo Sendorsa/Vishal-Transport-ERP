@@ -193,7 +193,7 @@ export function MonthSelect({ months, value, onChange, prominent }: { months: st
  * Owner also gets Lock / Unlock-for-users.
  */
 export function MonthLockControl({ month }: { month: string }) {
-  const { info, isOwner } = useMonthLock(month)
+  const { info, isOwner, canEdit } = useMonthLock(month)
   const setLock = useSetMonthLock()
   const label = monthLabel(month)
   const by = info.override ? ` by Owner · ${formatDate(info.override.updatedAt.slice(0, 10))}` : ""
@@ -213,7 +213,7 @@ export function MonthLockControl({ month }: { month: string }) {
       <StatusBadge status={info.state} tone={info.state === "OPEN" ? "green" : "gray"} label={info.state === "OPEN" ? "Open" : "Locked"} />
       <span className="text-muted-foreground">
         {text}
-        {!isOwner && info.state === "LOCKED" && " — only the Owner can change this month"}
+        {!canEdit && " — only the Owner or Dev can change this month"}
       </span>
       {isOwner && (
         <Button variant="outline" size="sm" onClick={toggle} disabled={setLock.isPending}>
