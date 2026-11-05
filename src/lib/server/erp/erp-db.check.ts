@@ -104,7 +104,7 @@ async function main() {
   await assert.rejects(as(OWNER, () => api.vehicles.create({ ...bus, regNo: "TN70ZZ0001", assignedSince: "2099-01-01" } as never)), /future/)
 
   /* ---------------------------------------------------------------- 3. openings at the baseline (Owner-level) */
-  await assert.rejects(as(EMP, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })), /Only the Owner or Dev/)
+  await assert.rejects(as(EMP, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })), /is locked/) // Employee: open months only
   await as(OWNER, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })) // we owe ₹50,000 at 31 Oct
   await as(DEV, () => api.tankerLoads.createOpening({ tankerId: JIO, date: B, litres: 1000, value: 95000, notes: "Dip at go-live" }))
   await as(OWNER, () => api.adbluePurchases.createOpening({ date: B, litres: 100, value: 9000, notes: "" }))
@@ -140,6 +140,15 @@ async function main() {
   await assert.rejects(as(EMP, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: B, amount: 1000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" })), /is locked/)
   await as(EMP, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 1000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }))
   const pay = await as(OWNER, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 19000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }))
+  // The Employee's whole pump flow on the shared database (owner, 5 Nov 2026): add a pump, set its opening balance, pay it.
+  const empPump = await as(EMP, () => api.fuelStations.create({ name: "Employee Check Pump" }))
+  await as(EMP, () => api.fuelStations.setOpeningBalance(empPump.id, { amount: 7500, date: today }))
+  const empPay = await as(EMP, () => api.fuelStationPayments.create({ stationId: empPump.id, paymentDate: today, amount: 2500, paymentMode: "UPI", notes: "", companyCode: "VT", forMonth: today.slice(0, 7) }))
+  const ownerPump = (await read(OWNER, () => api.fuelStations.list())).find((s) => s.id === empPump.id)!
+  assert.deepEqual([ownerPump.openingBalance, ownerPump.openingBalanceDate], [7500, today], "the Owner sees the Employee's pump and opening balance")
+  assert.ok((await read(OWNER, () => api.fuelStationPayments.list())).some((p) => p.id === empPay.id && p.amount === 2500), "…and its payment")
+  await assert.rejects(as(EMP, () => api.fuelStationPayments.update(empPay.id, { paymentDate: today, amount: 3000, paymentMode: "UPI", notes: "" })), /can't edit payment/)
+  await assert.rejects(as(EMP, () => api.fuelStationPayments.remove(empPay.id, "Employee attempt")), /can't delete payment/)
   const st = (await read(OWNER, () => api.fuelStations.list())).find((s) => s.id === station.id)!
   const purchases = [...fills, ...loadsAsStationPurchases(loads)]
   const led = stationLedger(station.id, purchases, await read(OWNER, () => api.payments.list()), today.slice(0, 7), openingOf(st))

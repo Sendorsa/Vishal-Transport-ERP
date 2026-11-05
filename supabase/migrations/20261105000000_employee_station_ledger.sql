@@ -3,9 +3,9 @@
 -- (diesel:edit) may record a fuel station payment (never TDS) and a station's opening balance. The Monthly Sheet Lock
 -- still applies (private.month_open). core.role_permissions is unchanged: no general payment access is granted —
 -- receipts, expenses, TDS, payment edits / deletes stay with payment users. Additive: earlier migrations are not edited.
+-- Authorization only: one policy altered in place and one guard function replaced; no table, row or data is changed.
 
-drop policy "Record payments" on finance.payments;
-create policy "Record payments" on finance.payments for insert to authenticated
+alter policy "Record payments" on finance.payments
   with check (
     (
       (select private.can('payments', 'create'))
