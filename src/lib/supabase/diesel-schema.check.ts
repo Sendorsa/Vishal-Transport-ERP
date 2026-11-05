@@ -245,8 +245,12 @@ async function main() {
   /* ---------------------------------------------------------------- who reads what */
   const audited = async (who: string) => (await asUser<{ m: string }>(who, `select distinct module as m from audit.events order by 1`)).map((r) => r.m)
   assert.ok((await audited(DEV)).includes("Month Lock"), "Dev reads the whole audit log")
-  assert.deepEqual(await audited(EMP), ["AdBlue", "Diesel", "Diesel Tanker", "Fuel Stations", "Vehicles"], "Employee reads only the history of modules it can view")
-  assert.equal((await asUser<{ n: number }>(EMP, `select count(*)::int as n from audit.reviews`))[0].n, 0, "Employee doesn't see deletion reviews")
+  // The Employee reads the Audit Log (audit:view, owner 5 Nov 2026): only modules it can view, plus month locks; never
+  // payments, customers or accounts. Deletion reviews are readable (statuses on the log), never written by it.
+  assert.deepEqual(await audited(EMP), ["AdBlue", "Diesel", "Diesel Tanker", "Fuel Stations", "Month Lock", "Vehicles"], "Employee reads only the events of modules it can view")
+  const reviews = `select count(*)::int as n from audit.reviews`
+  assert.equal((await asUser<{ n: number }>(EMP, reviews))[0].n, (await asUser<{ n: number }>(DEV, reviews))[0].n, "Employee reads deletion reviews (read-only)")
+  await refused(tx(EMP, `insert into audit.reviews (event_id, actor_user_id, actor_role) values ('${del}', private.current_profile_id(), 'EMPLOYEE')`), /row-level security/, "…and never reviews one")
   await refused(asUser(null, `select * from fuel.diesel_entries`), /permission denied/, "signed-out visitors read nothing")
   await db.exec(`insert into auth.users values ('00000000-0000-0000-0000-0000000000a9', 'stranger@example.com')`)
   assert.equal((await asUser<{ n: number }>("00000000-0000-0000-0000-0000000000a9", `select count(*)::int as n from fuel.diesel_entries`))[0].n, 0, "a Google account without an ERP account sees nothing")

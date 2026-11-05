@@ -27,9 +27,10 @@ async function main() {
   for (const role of ["OWNER", "EMPLOYEE"] as const) for (const r of DEV_ONLY) assert.equal(can(role, r, "view"), false, `${role} never reaches ${r}`)
   assert.ok(hasOwnerAuthority("OWNER") && hasOwnerAuthority("DEV") && !hasOwnerAuthority("EMPLOYEE"))
   assert.ok(can("OWNER", "audit") && can("DEV", "audit"))
-  // Employee is exactly as before (pinned); it gained nothing when Accountant and Operations Manager were removed.
+  // Employee pinned; it gained nothing when Accountant and Operations Manager were removed, and audit:view (read-only,
+  // its own modules' events) at the owner's instruction, 5 Nov 2026.
   const before: Record<string, string[]> = {
-    EMPLOYEE: ["dashboard:view", "vehicles:view", "trips:view", "trips:create", "trips:edit", "diesel:view", "diesel:create", "diesel:edit"],
+    EMPLOYEE: ["dashboard:view", "vehicles:view", "trips:view", "trips:create", "trips:edit", "diesel:view", "diesel:create", "diesel:edit", "audit:view"],
   }
   for (const [role, perms] of Object.entries(before))
     for (const r of RESOURCES)
@@ -52,11 +53,11 @@ async function main() {
   assert.deepEqual(shown("DEV"), NAV_ITEMS.map((i) => i.title))
   assert.deepEqual(shown("OWNER"), [...fuel, "Audit Log"], "OWNER sidebar: Fuel + Audit Log; no Settings, no other section")
   assert.deepEqual(shown("OWNER"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Audit Log"])
-  assert.deepEqual(shown("EMPLOYEE"), fuel, "EMPLOYEE sidebar: Fuel (the Audit Log needs the audit permission, which the Employee doesn't have)")
-  assert.deepEqual(shown("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"])
+  assert.deepEqual(shown("EMPLOYEE"), [...fuel, "Audit Log"], "EMPLOYEE sidebar: Fuel + Audit Log (read-only); no Settings, no other section")
+  assert.deepEqual(shown("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Audit Log"])
   // Visibility only: the hidden modules keep every permission (direct URLs and the API behave as before).
   for (const r of ["dashboard", "customers", "vehicles", "trips", "invoices", "payments", "reports", "settings", "audit"] as const) assert.ok(can("OWNER", r), `OWNER keeps ${r}`)
-  assert.ok(!can("EMPLOYEE", "audit") && !can("EMPLOYEE", "settings") && can("EMPLOYEE", "trips") && can("EMPLOYEE", "dashboard"), "EMPLOYEE permissions unchanged")
+  assert.ok(can("EMPLOYEE", "audit") && !can("EMPLOYEE", "audit", "edit") && !can("EMPLOYEE", "settings") && can("EMPLOYEE", "trips") && can("EMPLOYEE", "dashboard"), "EMPLOYEE permissions unchanged")
 
   // Phone tab bar: four of the role's own items; "More" (the drawer) holds the rest of that same list.
   const { mobileTabs, navFor, isActive } = await import("@/components/layout/nav")

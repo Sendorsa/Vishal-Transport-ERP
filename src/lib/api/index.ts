@@ -1705,10 +1705,15 @@ export const api = {
    * GET /api/audit-events (Owner and Dev), GET /api/audit-events?recordId=… and the edited-record list.
    */
   audit: {
-    /** The central Audit Log, newest first. Owner and Dev (`audit` permission) — refused for every other role. */
+    /**
+     * The central Audit Log, newest first, read-only. Owner and Dev see every event; the Employee (audit:view, owner
+     * 5 Nov 2026) only events of modules it can view, never account events — RLS does the same on the database.
+     */
     async list(): Promise<AuditLogRow[]> {
       await latency()
-      if (!can(currentRole(), "audit")) throw new Error("Only the Owner and Dev can view the audit log.")
+      const role = currentRole()
+      if (!can(role, "audit")) throw new Error("Your role can't view the audit log.")
+      const visible = (e: AuditEvent) => hasOwnerAuthority(role) || (e.module !== "Accounts" && can(role, MODULE_RESOURCE[e.module] ?? "audit"))
       ensureSeeded()
       const ids = new Map<string, Set<string>>()
       const exists = (e: AuditEvent) => {
@@ -1719,7 +1724,7 @@ export const api = {
       }
       const reviews = new Map(readAuditReviews().map((r) => [r.eventId, { at: r.at, actor: r.actor }]))
       const restored = restorations(readAuditEvents())
-      return newestFirst(readAuditEvents()).map((e) => ({
+      return newestFirst(readAuditEvents().filter(visible)).map((e) => ({
         ...e,
         recordExists: exists(e),
         review: reviews.get(e.id) ?? null,

@@ -15,7 +15,7 @@ export const RESOURCES = [
   "payments",
   "reports",
   "settings",
-  "audit", // central Audit Log — view only; Owner and Dev
+  "audit", // central Audit Log — view only; Owner and Dev (every event), Employee (events of its own modules)
   "accounts", // ERP user accounts (add, role, deactivate, recovery) — Dev only
   "system", // system configuration: permission definitions, data backend, read-only data export — Dev only
 ] as const
@@ -47,7 +47,7 @@ const MAP: Record<Role, Permission[]> = {
   DEV: ["*"],
   OWNER: BUSINESS_ACCESS,
   // Employees edit their own rows too; the month lock (src/domain/month-lock.ts) decides which months.
-  EMPLOYEE: ["dashboard:view", "vehicles:view", "trips:view", "trips:create", "trips:edit", "diesel:view", "diesel:create", "diesel:edit"],
+  EMPLOYEE: ["dashboard:view", "vehicles:view", "trips:view", "trips:create", "trips:edit", "diesel:view", "diesel:create", "diesel:edit", "audit:view"],
 }
 
 export function can(role: Role, resource: Resource, action: Action = "view") {

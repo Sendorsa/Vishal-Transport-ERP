@@ -235,7 +235,9 @@ async function main() {
   assert.deepEqual([empEvent.actor.userId, empEvent.actor.role, empEvent.actor.name], [P.EMP, "EMPLOYEE", "emp@example.com"], "the Employee's own identity — never another user's")
   // An Employee can't write an event in someone else's name, even straight to the database.
   await assert.rejects(sqlAs(EMP, `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', '${P.OWNER}', 'OWNER', 'CREATED', 'Diesel', 'Diesel entry', 'x')`), /row-level security/)
-  await assert.rejects(read(EMP, () => api.audit.list()), /Only the Owner and Dev/)
+  // The Employee reads the log (owner, 5 Nov 2026) — only its own modules' events, never receipts, invoices or accounts.
+  const empLog = await read(EMP, () => api.audit.list())
+  assert.ok(empLog.some((e) => e.recordId === f1.id) && !empLog.some((e) => ["Payments", "Customers", "Invoices", "Settings", "Accounts"].includes(e.module)), "Employee: its own modules' events only")
 
   /* ---------------------------------------------------------------- 11. transfer: entries after the effective date follow the new customer */
   await as(OWNER, () => api.vehicles.transfer(bus.id, tepl.id, today, "Moved to TEPL"))

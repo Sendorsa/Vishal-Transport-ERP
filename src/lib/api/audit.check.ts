@@ -83,10 +83,13 @@ async function main() {
   assert.ok(edited.has(entry.id))
   assert.ok(!edited.has(station.id))
 
-  // 7 / 8. Central log: Owner and Dev only (Dev in check:roles), refused in the API for every other role. History respects module access.
+  // 7 / 8. Central log: Owner and Dev see everything (Dev in check:roles); the Employee (owner, 5 Nov 2026) reads only
+  // events of modules it can view; a browser holding a removed role acts as Employee. History respects module access.
   for (const r of ["EMPLOYEE", "ACCOUNTANT", "OPS_MANAGER"] as const) {
     setRole(r)
-    await assert.rejects(api.audit.list(), /Only the Owner and Dev can view the audit log/)
+    const mine = await api.audit.list()
+    assert.ok(mine.some((e) => e.recordId === entry.id), `${r} reads diesel events`)
+    assert.ok(!mine.some((e) => ["Payments", "Customers", "Invoices", "Settings", "Drivers", "Accounts"].includes(e.module)), `${r} never reads other modules' events`)
   }
   setRole("EMPLOYEE")
   assert.equal((await api.audit.history(entry.id)).length, 5) // diesel: employees can see diesel records

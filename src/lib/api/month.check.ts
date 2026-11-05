@@ -177,7 +177,8 @@ async function main() {
 
   /* ---------------------------------------------------------------- 6. The three roles: Audit Log and restore */
   setRole("EMPLOYEE")
-  await assert.rejects(api.audit.list(), /Only the Owner and Dev/)
+  assert.ok((await api.audit.list()).length > 0) // the Employee reads the log (owner, 5 Nov 2026), read-only…
+  await assert.rejects(api.audit.markReviewed([]), /Only the Owner or Dev/) // …never reviews
   setRole("DEV")
   assert.ok((await api.audit.list()).length > 0) // Dev views the log…
   const devDel = (await api.audit.list()).find((e) => e.action === "DELETED" && e.recordId === ownerLate.id)!
