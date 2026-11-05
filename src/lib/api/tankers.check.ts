@@ -49,7 +49,7 @@ async function main() {
   await api.tankers.update(c.id, { ...blank, name: "Mini Tanker KA51AF1429", regNo: "KA51AF1429", capacityLitres: 3000 })
   assert.equal((await api.tankers.get(c.id))!.capacityLitres, 3000)
   setRole("EMPLOYEE")
-  await assert.rejects(api.tankers.create({ ...blank, name: "Nope", regNo: "KA00NO0000" }), /can't edit tanker/) // master data needs vehicles:edit
+  await assert.rejects(api.tankers.create({ ...blank, name: "Nope", regNo: "KA51AF1429" }), /already/) // the Employee manages tankers like the Owner (5 Nov 2026); duplicates still refused
   setRole("OWNER")
 
   /* ---------------------------------------------------------------- 2. Every load / dispense names its tanker; stock is per tanker */
@@ -117,7 +117,7 @@ async function main() {
   const adjEvents = await api.audit.history(adj.id)
   assert.deepEqual([adjEvents[0].action, adjEvents[0].reason], ["CREATED", "Dip reading 30 Sep: 12.5 L less"])
   setRole("EMPLOYEE")
-  await assert.rejects(api.tankerAdjustments.remove(adj.id, "Not mine"), /can't delete fuel records/)
+  await assert.rejects(api.tankerAdjustments.remove(adj.id, ""), /reason/) // the Employee may delete (5 Nov 2026), with a reason like everyone
   setRole("OWNER")
 
   /* ---------------------------------------------------------------- 6. Archive / restore keeps history */
@@ -172,11 +172,10 @@ async function main() {
   assert.equal((await api.payments.list()).filter((p) => p.direction === "OUT").reduce((t, p) => t + p.amount, 0), paidOut0) // a TDS entry pays no money out
   await assert.rejects(api.fuelStationPayments.recordTds({ stationId: station, month: "2026-09", amount: 1, companyCode: "VT", notes: "" }), /already recorded/)
   await assert.rejects(api.fuelStationPayments.recordTds({ stationId: station, month: "2026-10", amount: 1, companyCode: "VT", notes: "" }), /dated 31-10-2026|record it on or after/) // month not over
-  // An older month's TDS: no grace period any more — the Owner (or Dev) may record it; the Employee handles no money.
+  // An older month's TDS: no grace period any more — Owner-level authority (Owner, Dev, Employee) may record it.
   setRole("EMPLOYEE")
-  await assert.rejects(api.fuelStationPayments.recordTds({ stationId: station, month: "2026-08", amount: 1, companyCode: "VT", notes: "" }), /can't/)
-  setRole("OWNER")
   const augTds = await api.fuelStationPayments.recordTds({ stationId: station, month: "2026-08", amount: 1, companyCode: "VT", notes: "" })
+  setRole("OWNER")
   assert.deepEqual([augTds.date, augTds.forMonth], ["2026-08-31", "2026-08"])
   const stp = (await api.fuelStationPayments.list()).find((p) => p.id === tds.id)!
   assert.deepEqual([stp.tds, stp.amount], [true, due])

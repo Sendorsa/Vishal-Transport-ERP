@@ -139,17 +139,20 @@ async function main() {
   const payB = await api.fuelStationPayments.create({ stationId: station, paymentDate: today, amount: 500, paymentMode: "UPI", notes: "", companyCode: "VT" })
   const trip = (await api.trips.list()).find((t) => !t.invoiceId && t.date.startsWith(month))!
   const n1 = await logSize()
+  // The Employee has the Owner's access except Settings (owner, 5 Nov 2026): permission is checked first, so a missing
+  // reason proves the delete was allowed; Settings and Settings → Data stay refused. A removed role acts as the Employee.
   for (const [role, call, msg] of [
-    ["EMPLOYEE", () => api.diesel.remove(entry.id, "Check: test record"), /can't delete fuel records/],
-    ["EMPLOYEE", () => api.tankerLoads.remove(loadB.id, "Check: test record"), /can't delete fuel records/],
-    ["EMPLOYEE", () => api.adbluePurchases.remove("anything", "Check: test record"), /can't delete fuel records/],
-    ["EMPLOYEE", () => api.fuelStationPayments.remove(payB.id, "Check: test record"), /can't delete payment records/],
-    ["EMPLOYEE", () => api.fuelStationPayments.update(payB.id, { paymentDate: today, amount: 1, paymentMode: "UPI", notes: "" }), /can't edit payment records/],
-    ["EMPLOYEE", () => api.payments.remove(payB.id, "Check: test record"), /can't delete payment records/],
-    ["EMPLOYEE", () => api.trips.remove(trip.id, "Check: test record"), /can't delete trip records/],
-    // A browser still holding a removed role (31 Oct 2026) acts as an Employee — never the Owner fallback.
-    ["ACCOUNTANT", () => api.fuelStationPayments.update(payB.id, { paymentDate: today, amount: 1, paymentMode: "UPI", notes: "" }), /can't edit payment records/],
-    ["OPS_MANAGER", () => api.diesel.remove(entry.id, "Check: test record"), /can't delete fuel records/],
+    ["EMPLOYEE", () => api.diesel.remove(entry.id, ""), /reason/i],
+    ["EMPLOYEE", () => api.tankerLoads.remove(loadB.id, ""), /reason/i],
+    ["EMPLOYEE", () => api.fuelStationPayments.remove(payB.id, ""), /reason/i],
+    ["EMPLOYEE", () => api.payments.remove(payB.id, ""), /reason/i],
+    ["EMPLOYEE", () => api.trips.remove(trip.id, ""), /reason/i],
+    ["EMPLOYEE", () => api.settings.update({ companies: [] }), /can't/],
+    ["EMPLOYEE", () => api.admin.resetDemoData(), /Only the Owner or Dev/],
+    ["EMPLOYEE", () => api.admin.clearAllData(), /Only the Owner or Dev/],
+    ["EMPLOYEE", () => api.admin.exportBackup(), /Only the Owner or Dev/],
+    ["ACCOUNTANT", () => api.settings.update({ companies: [] }), /can't/],
+    ["OPS_MANAGER", () => api.diesel.remove(entry.id, ""), /reason/i],
   ] as const) {
     setRole(role)
     await assert.rejects(call(), msg)
@@ -158,9 +161,10 @@ async function main() {
   assert.equal(await logSize(), n1) // refused actions record nothing
   assert.ok(await api.diesel.get(entry.id))
   assert.ok(await api.trips.get(trip.id))
-  // Roles keep what their permissions grant: Employees edit fuel entries; Dev edits payments and deletes fuel entries.
+  // Roles keep what their permissions grant: Employees edit fuel entries and payments; Dev deletes fuel entries.
   setRole("EMPLOYEE")
   await api.diesel.update(entry.id, fill(81, odo0 + 1200))
+  await api.fuelStationPayments.update(payB.id, { paymentDate: today, amount: 550, paymentMode: "UPI", notes: "" })
   setRole("DEV")
   await api.fuelStationPayments.update(payB.id, { paymentDate: today, amount: 600, paymentMode: "UPI", notes: "" })
   await api.diesel.remove(entry.id, "Check: test record")
@@ -170,17 +174,12 @@ async function main() {
 
   /* ---------------------------------------------------------------- 6. Month lock */
   const old = (await api.diesel.list()).find((e) => e.date.startsWith(lastMonth) && e.vendorId !== "dv_tanker")!
-  setRole("EMPLOYEE") // may edit fuel records, but not in a locked month (Dev and the Owner may)
-  await assert.rejects(api.diesel.update(old.id, { date: old.date, vendorId: old.vendorId, litres: old.litres + 1, rate: old.rate, odometerKm: old.odometerKm, billNo: old.billNo, paymentMode: old.paymentMode }), /is locked/)
-  await assert.rejects(api.diesel.remove(old.id, "Check: test record"), /can't delete/) // …and deletes nothing
-  setRole("OWNER") // the Owner can change any month (Monthly Sheet Lock)…
-  assert.ok(await api.diesel.get(old.id))
-  await api.diesel.remove(old.id, "Owner correction")
+  setRole("EMPLOYEE") // Owner-level authority (5 Nov 2026): the Employee, like the Owner, can change a locked month
+  await api.diesel.remove(old.id, "Employee correction")
   assert.deepEqual(await events(old.id), ["DELETED"])
-  // Station payments: only the Owner and Dev handle money; the Employee is refused outright.
+  // Station payments in a locked month: the Employee handles money like the Owner (permission and lock pass first).
   const oldPay = (await api.payments.list()).find((p) => p.categoryCode === "DIESEL_SETTLEMENT" && p.date < `${lastMonth}-01`)!
-  setRole("EMPLOYEE")
-  await assert.rejects(api.fuelStationPayments.remove(oldPay.id, "Check: test record"), /can't/)
+  await assert.rejects(api.fuelStationPayments.remove(oldPay.id, ""), /reason/i)
   setRole("OWNER")
   assert.ok(await api.payments.get(oldPay.id))
 
@@ -236,8 +235,6 @@ async function main() {
   await api.customers.archive(cust.id)
   await api.customers.restore(cust.id)
   await assert.rejects(api.diesel.remove(x.id, " "), /reason/i)
-  setRole("EMPLOYEE")
-  await assert.rejects(api.diesel.remove(x.id, "Not allowed"), /can't delete/)
   setRole("OWNER")
   assert.equal(await count(), c0)
   // Each successful deletion is one more — events, not records (a re-entered and re-deleted entry counts twice).
@@ -246,11 +243,11 @@ async function main() {
   await api.diesel.remove(again.id, "Duplicate entry again")
   await Promise.all([api.diesel.remove(again.id, "Double click"), api.diesel.remove(again.id, "Double click")]) // already gone: no event
   assert.equal(await count(), c0 + 2)
-  // Only the Owner and Dev see or clear the count.
+  // Owner-level authority sees and clears the count: Owner, Dev and the Employee (5 Nov 2026; a removed role acts as it).
   for (const role of ["EMPLOYEE", "ACCOUNTANT"] as const) {
     setRole(role)
-    await assert.rejects(count(), /Only the Owner or Dev/)
-    await assert.rejects(api.audit.markReviewed([x.id]), /Only the Owner or Dev/)
+    assert.equal(await count(), c0 + 2)
+    assert.equal(await api.audit.markReviewed([]), 0)
   }
   setRole("DEV")
   assert.equal(await count(), c0 + 2) // Dev sees the same count (reviewing is tested below as the Owner)

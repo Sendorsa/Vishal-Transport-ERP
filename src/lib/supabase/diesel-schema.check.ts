@@ -165,8 +165,8 @@ async function main() {
   await refused(tx(OWNER, `delete from fuel.tanker_loads where id = 'tkl_1'; ${ev("DELETED", "Diesel Tanker", "Tanker load", "tkl_1", "Wrong load")}`), /Insufficient tanker inventory/, "a load whose diesel is used can't be deleted")
 
   /* ---------------------------------------------------------------- opening stock (fresh start) */
-  await refused(tx(EMP, `insert into fuel.tanker_loads (tanker_id, date, opening, litres, rate, amount) values ('tnk_office', '${today}', true, 142, 0, 0); ${ev("CREATED", "Diesel Tanker", "Tanker load", "x")}`), /row-level security/, "opening stock: Owner / Dev only")
-  await tx(DEV, `insert into fuel.tanker_loads (id, tanker_id, date, opening, litres, rate, amount) values ('tkl_open', 'tnk_office', '${today}', true, 142, 0, 13500); ${ev("CREATED", "Diesel Tanker", "Tanker load", "tkl_open")}`)
+  // Owner-level openings: Owner, Dev and (owner, 5 Nov 2026) the Employee.
+  await tx(EMP, `insert into fuel.tanker_loads (id, tanker_id, date, opening, litres, rate, amount) values ('tkl_open', 'tnk_office', '${today}', true, 142, 0, 13500); ${ev("CREATED", "Diesel Tanker", "Tanker load", "tkl_open")}`)
   assert.deepEqual(await one(`select rate::text, amount::text from fuel.tanker_loads where id = 'tkl_open'`), { rate: "95.0700", amount: "13500.00" }, "opening keeps its value; rate = value ÷ litres")
   await refused(tx(DEV, `insert into fuel.tanker_loads (tanker_id, date, opening, litres, rate, amount) values ('tnk_office', '${today}', true, 1, 0, 0); ${ev("CREATED", "Diesel Tanker", "Tanker load", "x")}`), /tanker_loads_one_opening/, "one opening stock per tanker")
   await tx(OWNER, `update fuel.tanker_loads set litres = 150 where id = 'tkl_open'`) // RLS: opening rows aren't editable
@@ -185,17 +185,16 @@ async function main() {
   await refused(tx(OWNER, `delete from fuel.adblue_purchases where id = 'adp_1'; ${ev("DELETED", "AdBlue", "AdBlue purchase", "adp_1", "Duplicate")}`), /Insufficient AdBlue inventory/, "a purchase whose AdBlue is used can't be deleted")
 
   /* ---------------------------------------------------------------- month lock (RLS) */
-  await refused(tx(EMP, `insert into fuel.diesel_entries (company_code, date, vehicle_id, station_id, litres, rate, odometer_km) values ('VT', '${lastMonthDay}', 'veh_car', 'dv_raghuveer', 10, 95, 400); ${ev("CREATED", "Diesel", "Diesel entry", "x")}`), /row-level security/, "last month is locked for Employee")
+  const monthOpen = async (who: string, d: string) => (await asUser<{ o: boolean }>(who, `select private.month_open('${d}'::date) as o`))[0].o
+  assert.equal(await monthOpen(EMP, lastMonthDay), true, "last month is locked, but not for the Employee's Owner-level authority (5 Nov 2026)")
   // Dev has the Owner's month-lock authority (owner, 3 Nov 2026).
   await tx(DEV, `insert into fuel.diesel_entries (id, company_code, date, vehicle_id, station_id, litres, rate, odometer_km) values ('dsl_dev_old', 'VT', '${lastMonthDay}', 'veh_car', 'dv_raghuveer', 10, 95, 390); ${ev("CREATED", "Diesel", "Diesel entry", "dsl_dev_old")}`)
   await tx(OWNER, `insert into fuel.diesel_entries (id, company_code, date, vehicle_id, station_id, litres, rate, odometer_km) values ('dsl_old', 'VT', '${lastMonthDay}', 'veh_car', 'dv_raghuveer', 10, 95, 400); ${ev("CREATED", "Diesel", "Diesel entry", "dsl_old")}`)
-  await refused(tx(EMP, `insert into core.month_locks (month, state, changed_by_role) values ('${thisMonth}', 'LOCKED', 'EMPLOYEE'); ${ev("MONTH_LOCKED", "Month Lock", "Month lock", thisMonth)}`), /row-level security/, "the Employee never locks a month")
+  await refused(tx(EMP, `insert into core.month_locks (month, state, changed_by_role) values ('${thisMonth}', 'LOCKED', 'OWNER'); ${ev("MONTH_LOCKED", "Month Lock", "Month lock", thisMonth)}`), /row-level security/, "an Employee lock is never labelled Owner")
   await refused(tx(DEV, `insert into core.month_locks (month, state, changed_by_role) values ('${thisMonth}', 'LOCKED', 'OWNER'); ${ev("MONTH_LOCKED", "Month Lock", "Month lock", thisMonth)}`), /row-level security/, "a Dev lock is never labelled Owner")
   await tx(DEV, `insert into core.month_locks (month, state, changed_by_role, changed_by) values ('${thisMonth}', 'LOCKED', 'DEV', private.current_profile_id()); ${ev("MONTH_LOCKED", "Month Lock", "Month lock", thisMonth)}`)
-  await refused(tx(EMP, `insert into fuel.diesel_entries (company_code, date, vehicle_id, station_id, litres, rate, odometer_km) values ('VT', '${today}', 'veh_car', 'dv_raghuveer', 10, 95, 700); ${ev("CREATED", "Diesel", "Diesel entry", "x")}`), /row-level security/, "a month locked early is closed to Employee")
-  await tx(EMP, `update fuel.diesel_entries set litres = 40 where id = 'dsl_p1'`) // RLS: the row isn't editable, so nothing changes
-  assert.equal((await one<{ l: string }>(`select litres::text as l from fuel.diesel_entries where id = 'dsl_p1'`)).l, "37.640", "…including edits")
-  await tx(OWNER, `update core.month_locks set state = 'OPEN', changed_by_role = 'OWNER' where month = '${thisMonth}'; ${ev("MONTH_UNLOCKED", "Month Lock", "Month lock", thisMonth)}`)
+  assert.equal(await monthOpen(EMP, today), true, "a month locked early stays open to Owner-level authority (Employee included)")
+  await tx(EMP, `update core.month_locks set state = 'OPEN', changed_by_role = 'EMPLOYEE', changed_by = private.current_profile_id() where month = '${thisMonth}'; ${ev("MONTH_UNLOCKED", "Month Lock", "Month lock", thisMonth)}`) // the Employee unlocks, recorded as EMPLOYEE
 
   /* ---------------------------------------------------------------- fuel station payments and TDS */
   await tx(OWNER, `insert into finance.payments (id, company_code, direction, date, party_type, station_id, party_name, category_code, amount, mode, for_month) values ('pay_1', 'VT', 'OUT', '${today}', 'VENDOR', 'dv_raghuveer', 'Raghuveer Fuel Station', 'DIESEL_SETTLEMENT', 70000, 'NEFT', '${lastMonthDay.slice(0, 7)}'); ${ev("PAYMENT_RECORDED", "Fuel Stations", "Fuel station payment", "pay_1")}`)
@@ -206,34 +205,29 @@ async function main() {
   await refused(tx(OWNER, pay(`'VT', 'OUT', '${today}', 'VENDOR', 'dv_tanker', 'Diesel Tanker', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', null)`, "pay_x1")), /foreign key/, "nobody pays the tanker source")
   await refused(tx(OWNER, pay(`'VT', 'OUT', '${today}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', '2099-01')`, "pay_x2")), /check constraint/, "not paid against a later month")
   await refused(tx(OWNER, pay(`'VT', 'OUT', '${tomorrow}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', null)`, "pay_x3")), /future/, "no future-dated payment")
-  // The Employee records station payments (diesel:edit, owner 5 Nov 2026) — never TDS, never in a locked month.
-  await refused(tx(EMP, pay(`'VT', 'OUT', '${lastMonthEnd}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 0, 1, 'TDS', '${lastMonthEnd.slice(0, 7)}')`, "pay_x5")), /row-level security/, "Employee doesn't record TDS")
-  await refused(tx(EMP, pay(`'VT', 'OUT', '${lastMonthDay}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', null)`, "pay_x6")), /row-level security/, "Employee follows the month lock on payments")
+  // The Employee handles money like the Owner (owner, 5 Nov 2026): station payments and TDS.
   await tx(EMP, pay(`'VT', 'OUT', '${today}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 10, 0, 'NEFT', null)`, "pay_x4"))
-  assert.equal((await asUser<{ n: number }>(EMP, `select count(*)::int as n from finance.payments`))[0].n, 3, "…and sees station payments on the ledger (diesel:view)")
-  await tx(OWNER, pay(`'VT', 'OUT', '${lastMonthEnd}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 0, 94.80, 'TDS', '${lastMonthEnd.slice(0, 7)}')`, "pay_tds5"))
+  assert.equal((await asUser<{ n: number }>(EMP, `select count(*)::int as n from finance.payments`))[0].n, 3, "…and sees them on the ledger")
+  await tx(EMP, pay(`'VT', 'OUT', '${lastMonthEnd}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 0, 94.80, 'TDS', '${lastMonthEnd.slice(0, 7)}')`, "pay_tds5"))
   await refused(tx(OWNER, pay(`'VT', 'OUT', '${lastMonthEnd}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 0, 1, 'TDS', '${lastMonthEnd.slice(0, 7)}')`, "pay_tds6")), /payments_one_tds_per_station_month/, "one TDS per station per month")
   await refused(tx(OWNER, pay(`'VT', 'OUT', '${lastMonthDay}', 'VENDOR', 'dv_raghuveer', 'R', 'DIESEL_SETTLEMENT', 0, 1, 'TDS', '${lastMonthDay.slice(0, 7)}')`, "pay_tds7")), /check constraint/, "TDS is dated the month's last day")
   await tx(OWNER, pay(`'VT', 'IN', '${today}', 'CUSTOMER', null, 'Minda', null, 100, 0, 'NEFT', null)`, "pay_rct8")) // receipts are stored too now
-  assert.equal((await asUser<{ n: number }>(EMP, `select count(*)::int as n from finance.payments where id = 'pay_rct8'`))[0].n, 0, "…but a diesel-only reader never sees a receipt")
+  assert.equal((await asUser<{ n: number }>(EMP, `select count(*)::int as n from finance.payments where id = 'pay_rct8'`))[0].n, 1, "…and the Employee reads receipts like the Owner")
 
   /* ---------------------------------------------------------------- opening balance */
-  await refused(tx(EMP, `update fuel.fuel_stations set opening_balance = 9455.49, opening_balance_date = '${lastMonthDay}' where id = 'dv_raghuveer'; ${ev("UPDATED", "Fuel Stations", "Fuel station", "dv_raghuveer")}`), /month is locked/, "opening balances follow the month lock")
-  await tx(EMP, `update fuel.fuel_stations set opening_balance = 9455.49, opening_balance_date = '${today}' where id = 'dv_raghuveer'; ${ev("UPDATED", "Fuel Stations", "Fuel station", "dv_raghuveer")}`) // diesel:edit (owner, 5 Nov 2026)
+  await tx(EMP, `update fuel.fuel_stations set opening_balance = 9455.49, opening_balance_date = '${lastMonthDay}' where id = 'dv_raghuveer'; ${ev("UPDATED", "Fuel Stations", "Fuel station", "dv_raghuveer")}`) // Owner-level authority (Employee, 5 Nov 2026), locked month too
   await tx(DEV, `update fuel.fuel_stations set opening_balance = -2500, opening_balance_date = '${today}' where id = 'dv_raghuveer'; ${ev("UPDATED", "Fuel Stations", "Fuel station", "dv_raghuveer")}`)
   assert.equal((await one<{ b: string }>(`select opening_balance::text as b from fuel.fuel_stations where id = 'dv_raghuveer'`)).b, "-2500.00", "a Credit opening balance is kept signed")
 
   /* ---------------------------------------------------------------- delete, reason, restore, review */
   await refused(tx(OWNER, `delete from fuel.diesel_entries where id = 'dsl_p1'`), /has no audit event/, "a delete needs its DELETED event")
   await refused(tx(OWNER, `delete from fuel.diesel_entries where id = 'dsl_p1'; ${ev("DELETED", "Diesel", "Diesel entry", "dsl_p1", "  x ")}`), /check constraint/, "…with a reason of at least 3 characters")
-  await refused(tx(EMP, `delete from fuel.diesel_entries where id = 'dsl_p1'; ${ev("DELETED", "Diesel", "Diesel entry", "dsl_p1", "Wrong vehicle")}`), /row-level security/, "Employee can't delete (nor write a deletion event)")
-  await tx(OWNER, `delete from fuel.diesel_entries where id = 'dsl_p1'; ${ev("DELETED", "Diesel", "Diesel entry", "dsl_p1", "Wrong vehicle")}`)
+  await tx(EMP, `delete from fuel.diesel_entries where id = 'dsl_p1'; ${ev("DELETED", "Diesel", "Diesel entry", "dsl_p1", "Wrong vehicle")}`) // the Employee deletes, like the Owner
   const del = (await one<{ id: string }>(`select id from audit.events where action = 'DELETED' and record_id = 'dsl_p1' order by at limit 1`)).id
   const restore = (who: string) => tx(who, `insert into fuel.diesel_entries (id, company_code, date, vehicle_id, station_id, litres, rate, odometer_km, payment_mode) values ('dsl_p1', 'VT', '${today}', 'veh_car', 'dv_raghuveer', 37.64, 94.8, 500, 'CASH'); ${ev("RESTORED", "Diesel", "Diesel entry", "dsl_p1", "Deleted by mistake", del)}`)
-  await refused(restore(EMP), /row-level security/, "the Employee never restores")
-  await restore(DEV) // Dev restores, like the Owner (owner, 3 Nov 2026)
+  await restore(EMP) // the Employee restores, like the Owner and Dev (owner, 5 Nov 2026)
   await refused(tx(OWNER, `delete from fuel.diesel_entries where id = 'dsl_p1'; ${ev("DELETED", "Diesel", "Diesel entry", "dsl_p1", "Again")}`).then(() => restore(OWNER)), /audit_events_restores_event_id_key|duplicate key/, "a deletion is restored once")
-  await refused(tx(EMP, `insert into audit.reviews (event_id, actor_user_id, actor_role) values ('${del}', private.current_profile_id(), 'EMPLOYEE')`), /row-level security/, "the Employee never reviews deletions")
+  await refused(tx(EMP, `insert into audit.reviews (event_id, actor_user_id, actor_role) values ('${del}', private.current_profile_id(), 'OWNER')`), /row-level security/, "an Employee review is never labelled Owner")
   await refused(tx(DEV, `insert into audit.reviews (event_id, actor_user_id, actor_role) values ('${del}', private.current_profile_id(), 'OWNER')`), /row-level security/, "a Dev review is never labelled Owner")
   await tx(DEV, `insert into audit.reviews (event_id, actor_user_id, actor_role) values ('${del}', private.current_profile_id(), 'DEV')`)
   const created = (await one<{ id: string }>(`select id from audit.events where action = 'CREATED' limit 1`)).id
@@ -245,12 +239,13 @@ async function main() {
   /* ---------------------------------------------------------------- who reads what */
   const audited = async (who: string) => (await asUser<{ m: string }>(who, `select distinct module as m from audit.events order by 1`)).map((r) => r.m)
   assert.ok((await audited(DEV)).includes("Month Lock"), "Dev reads the whole audit log")
-  // The Employee reads the Audit Log (audit:view, owner 5 Nov 2026): only modules it can view, plus month locks; never
-  // payments, customers or accounts. Deletion reviews are readable (statuses on the log), never written by it.
-  assert.deepEqual(await audited(EMP), ["AdBlue", "Diesel", "Diesel Tanker", "Fuel Stations", "Month Lock", "Vehicles"], "Employee reads only the events of modules it can view")
+  assert.deepEqual(await audited(EMP), await audited(OWNER), "the Employee reads the whole audit log, like the Owner (5 Nov 2026)")
   const reviews = `select count(*)::int as n from audit.reviews`
-  assert.equal((await asUser<{ n: number }>(EMP, reviews))[0].n, (await asUser<{ n: number }>(DEV, reviews))[0].n, "Employee reads deletion reviews (read-only)")
-  await refused(tx(EMP, `insert into audit.reviews (event_id, actor_user_id, actor_role) values ('${del}', private.current_profile_id(), 'EMPLOYEE')`), /row-level security/, "…and never reviews one")
+  assert.equal((await asUser<{ n: number }>(EMP, reviews))[0].n, (await asUser<{ n: number }>(DEV, reviews))[0].n, "…and the deletion reviews")
+  // Settings — the Employee's one exception — stay refused in the database.
+  await refused(tx(EMP, `insert into core.companies (code, name, invoice_prefix) values ('ZZ', 'Check', 'ZZ'); ${ev("UPDATED", "Settings", "Settings", "settings")}`), /row-level security/, "the Employee never changes Settings")
+  await tx(EMP, `update core.app_settings set tds_rate = tds_rate + 1`) // RLS: not editable for the Employee, so nothing changes
+  assert.deepEqual(await asUser(EMP, `select tds_rate::text from core.app_settings`), await asUser(OWNER, `select tds_rate::text from core.app_settings`))
   await refused(asUser(null, `select * from fuel.diesel_entries`), /permission denied/, "signed-out visitors read nothing")
   await db.exec(`insert into auth.users values ('00000000-0000-0000-0000-0000000000a9', 'stranger@example.com')`)
   assert.equal((await asUser<{ n: number }>("00000000-0000-0000-0000-0000000000a9", `select count(*)::int as n from fuel.diesel_entries`))[0].n, 0, "a Google account without an ERP account sees nothing")

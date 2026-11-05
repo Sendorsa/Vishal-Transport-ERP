@@ -9,7 +9,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { FormModal } from "@/components/shared/form-modal"
-import { Field, PageSkeleton } from "@/components/shared/misc"
+import { Field, NoAccess, PageSkeleton } from "@/components/shared/misc"
+import { useCan } from "@/lib/app-state"
 import { PageHeader } from "@/components/shared/page-header"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { GoogleSignInButton, signOutToLogin } from "@/features/auth/sign-in-buttons"
@@ -27,6 +28,7 @@ const STATUS_LABEL = { INVITED: "Approved · not signed in yet", ACTIVE: "Active
 
 /** Settings → User accounts: your account, and (for an active DEV) every account with its management actions. */
 export function UserAccounts({ error }: { error?: string }) {
+  const can = useCan()
   const [state, setState] = useState<AccountState | null>(null)
   const refresh = useCallback(() => getAccountState().then(setState), [])
   useEffect(() => {
@@ -46,6 +48,7 @@ export function UserAccounts({ error }: { error?: string }) {
       backLabel="Settings"
     />
   )
+  if (!can("settings")) return <NoAccess what="settings" /> // Employee: no Settings (owner, 5 Nov 2026)
   if (!state) return <PageSkeleton />
 
   if (state.kind === "unconfigured")

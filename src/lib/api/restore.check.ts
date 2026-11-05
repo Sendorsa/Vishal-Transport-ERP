@@ -99,12 +99,10 @@ async function main() {
   assert.equal((await log()).length, n0)
   assert.equal(await api.diesel.get(e3.id), null)
 
-  /* ---------------------------------------------------------------- 11. Only the Owner and Dev restore */
+  /* ---------------------------------------------------------------- 11. Owner-level authority restores: Owner, Dev and the Employee (5 Nov 2026) */
   for (const role of ["EMPLOYEE", "ACCOUNTANT"] as const) {
-    setRole(role)
-    await assert.rejects(restore(del3.id), /Only the Owner or Dev/)
-    const c = await api.audit.checkRestore(del3.id)
-    assert.ok(!c.ok && /Only the Owner or Dev/.test(c.reason))
+    setRole(role) // a removed role acts as the Employee
+    assert.ok((await api.audit.checkRestore(del3.id)).ok, `${role} may restore`)
   }
   setRole("DEV")
   assert.ok((await api.audit.checkRestore(del3.id)).ok, "Dev may restore (owner, 3 Nov 2026)")

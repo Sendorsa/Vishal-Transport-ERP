@@ -46,6 +46,7 @@ import { formatDate, formatINR, formatNumber, monthKey, previousMonthEnd, todayI
 import type { Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer } from "@/lib/types"
 import { MonthLockControl, useDieselIndex } from "../diesel/parts"
 import { usePeriod } from "../diesel/period"
+import { hasOwnerAuthority } from "@/lib/permissions"
 
 const L = formatLitres
 const ALL = "__all__"
@@ -181,7 +182,7 @@ export function DieselTanker() {
   const mayDelete = can("diesel", "delete")
   const mayManage = can("vehicles", "edit")
   // Fresh-start opening stock (Owner / Dev): one per tanker.
-  const mayOpen = role === "OWNER" || role === "DEV"
+  const mayOpen = hasOwnerAuthority(role)
   const hasOpening = new Set((loads.data ?? []).filter((l) => l.opening).map((l) => tankerOf(l)))
   const active = all.filter((t) => t.status === "ACTIVE")
   const tankerCount = all.filter((t) => t.status === "ACTIVE").length

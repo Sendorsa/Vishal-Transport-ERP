@@ -15,7 +15,7 @@ export const RESOURCES = [
   "payments",
   "reports",
   "settings",
-  "audit", // central Audit Log — view only; Owner and Dev (every event), Employee (events of its own modules)
+  "audit", // central Audit Log — view only; Owner, Dev and Employee
   "accounts", // ERP user accounts (add, role, deactivate, recovery) — Dev only
   "system", // system configuration: permission definitions, data backend, read-only data export — Dev only
 ] as const
@@ -36,7 +36,7 @@ export type Permission = `${Resource}:${Action}` | `${Resource}:*` | "*"
 export const ROLES: { value: Role; label: string; description: string }[] = [
   { value: "OWNER", label: "Owner", description: "Every business module and Owner-level control (month locks, restore, deletion review); no account or system administration" },
   { value: "DEV", label: "Dev", description: "Everything the Owner can do, plus exclusive account and system administration" },
-  { value: "EMPLOYEE", label: "Employee", description: "Log trips and diesel fills" },
+  { value: "EMPLOYEE", label: "Employee", description: "Everything the Owner can do except Settings" },
 ]
 
 /**
@@ -46,8 +46,8 @@ export const ROLES: { value: Role; label: string; description: string }[] = [
 const MAP: Record<Role, Permission[]> = {
   DEV: ["*"],
   OWNER: BUSINESS_ACCESS,
-  // Employees edit their own rows too; the month lock (src/domain/month-lock.ts) decides which months.
-  EMPLOYEE: ["dashboard:view", "vehicles:view", "trips:view", "trips:create", "trips:edit", "diesel:view", "diesel:create", "diesel:edit", "audit:view"],
+  // Owner's instruction, 5 Nov 2026: the Owner's access and Owner-level controls, except Settings.
+  EMPLOYEE: BUSINESS_ACCESS.filter((p) => p !== "settings:*"),
 }
 
 export function can(role: Role, resource: Resource, action: Action = "view") {
@@ -58,17 +58,10 @@ export function can(role: Role, resource: Resource, action: Action = "view") {
 
 /**
  * Owner-level business controls — month lock / unlock, changing a locked month, deletion review and its badge,
- * Restore / Push Back, opening balances and opening stock: the Owner and Dev, tested by name (never through can()).
+ * Restore / Push Back, opening balances and opening stock: the Owner, Dev and (owner, 5 Nov 2026) the Employee,
+ * tested by name (never through can()). Settings → Data (backup, restore, reset, clear) also needs `settings`.
  */
-export const hasOwnerAuthority = (role: Role) => role === "OWNER" || role === "DEV"
-
-/**
- * Fuel Stations → station → Add Payment and Opening Balance (owner, 5 Nov 2026): whoever may edit fuel records
- * (diesel:edit — the Employee too), besides payment users. TDS, payment edits / deletes and the Payments module are
- * unchanged. The database mirrors it (migration 20261105000000).
- */
-export const canRecordStationPayment = (role: Role) => can(role, "payments", "create") || can(role, "diesel", "edit")
-export const canSetStationOpening = (role: Role) => can(role, "diesel", "edit")
+export const hasOwnerAuthority = (role: Role) => role === "OWNER" || role === "DEV" || role === "EMPLOYEE"
 
 /** Removed roles (31 Oct 2026), named only where history shows them: audit events and the audit log's role filter. */
 export const LEGACY_ROLES: { value: LegacyRole; label: string }[] = [

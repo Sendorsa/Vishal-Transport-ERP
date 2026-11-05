@@ -14,7 +14,7 @@ import { insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from 
 import { fillAmount, insufficientTankerMessage, isStockPool, isTankerFill, normReg, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/station-ledger"
 import { currentActor, currentRole } from "@/lib/identity"
-import { can, canRecordStationPayment, canSetStationOpening, hasOwnerAuthority, type Resource } from "@/lib/permissions"
+import { can, hasOwnerAuthority, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
 import { format, parseISO } from "date-fns"
 import { assignmentIndex, assignmentOn, inferAssignments, resolveCustomers, transferPeriods, type AssignmentPeriod } from "@/domain/assignments"
@@ -180,9 +180,14 @@ function assertDriverAccess() {
   if (!can(currentRole(), "settings", "edit") && !can(currentRole(), "vehicles", "edit")) throw new Error("Your role can't change drivers.")
 }
 
-/** Only the Owner and Dev replace or wipe the whole workspace (restore, reset to demo data, clear). */
+/** Owner-level openings (go-live): the Owner, Dev and the Employee (hasOwnerAuthority). */
 function assertWorkspaceAdmin(what: string) {
   if (!hasOwnerAuthority(currentRole())) throw new Error(`Only the Owner or Dev can ${what}.`)
+}
+
+/** Settings → Data (restore, reset, clear, tanker-master setup, backup): Owner-level authority and Settings — never the Employee. */
+function assertDataAdmin(what: string) {
+  if (!hasOwnerAuthority(currentRole()) || !can(currentRole(), "settings", "edit")) throw new Error(`Only the Owner or Dev can ${what}.`)
 }
 
 /**
@@ -570,11 +575,8 @@ async function updateDriver(id: string, patch: Partial<NewEntity<Driver>>) {
 
 /** POST /api/payments — validates allocations against outstanding. */
 async function createPayment(input: Omit<NewEntity<Payment>, "paymentNo">) {
-  // A vehicle's maintenance expense is logged from its page by whoever may edit the vehicle (vehicles:edit);
-  // a fuel station payment (never TDS) by whoever may record station payments (canRecordStationPayment).
-  const maintenance = input.direction === "OUT" && !!input.vehicleId && can(currentRole(), "vehicles", "edit")
-  const stationPayment = !!input.vendorId && isStationPayment(input, input.vendorId) && !input.tdsAmount && canRecordStationPayment(currentRole())
-  if (!maintenance && !stationPayment) assertCan("payments", "create")
+  // A vehicle's maintenance expense is logged from its page by whoever may edit the vehicle (vehicles:edit).
+  if (!(input.direction === "OUT" && input.vehicleId && can(currentRole(), "vehicles", "edit"))) assertCan("payments", "create")
   ensureSeeded()
   assertMonthEditable(input.date)
   assertStationPaymentDate(input)
@@ -933,7 +935,7 @@ export const api = {
      */
     setOpeningBalance: (id: string, input: { amount: number; date: string }) =>
       tx(async () => {
-        if (!canSetStationOpening(currentRole())) throw new Error("Your role can't record opening balances.")
+        assertWorkspaceAdmin("record opening balances")
         const before = await fuelStations.get(id)
         if (!before || before.isTanker) throw new NotFoundError("Fuel station", id)
         if (!Number.isFinite(input.amount)) throw new Error("Enter the opening balance")
@@ -965,7 +967,7 @@ export const api = {
     },
     create: (input: { stationId: string; paymentDate: string; amount: number; paymentMode: PaymentMode; notes: string; companyCode: CompanyCode; reference?: string; forMonth?: string }) =>
       tx(async () => {
-        if (!canRecordStationPayment(currentRole())) throw new Error("Your role can't create payment records.")
+        assertCan("payments", "create")
         const station = readCollection("fuel_stations").find((v) => v.id === input.stationId)
         if (!station) throw new NotFoundError("Fuel station", input.stationId)
         if (!(input.amount > 0)) throw new Error("Amount must be greater than zero")
@@ -1633,6 +1635,7 @@ export const api = {
     async exportBackup(): Promise<BackupFile> {
       await latency()
       if (requestScope() && !can(currentRole(), "system")) throw new Error("Only Dev can export the shared database.")
+      if (!can(currentRole(), "settings")) throw new Error("Only the Owner or Dev can export a backup.")
       return exportBackup()
     },
     /**
@@ -1642,7 +1645,7 @@ export const api = {
      */
     setupTankerMasters: () =>
       tx(async () => {
-        assertWorkspaceAdmin("set up the tanker masters")
+        assertDataAdmin("set up the tanker masters")
         const clean = cleanWorkspace(new Date())
         let added = 0
         for (const station of clean.fuel_stations)
@@ -1675,7 +1678,7 @@ export const api = {
       tx(async () => {
         await latency()
         assertNotShared("Restore from file")
-        assertWorkspaceAdmin("restore a backup")
+        assertDataAdmin("restore a backup")
         const file = parseBackup(raw)
         restoreBackup(file)
         const counts = (["customers", "vehicles", "fuel_stations", "diesel_entries", "tanker_loads", "payments"] as const).map((k) => `${(file.collections[k] ?? []).length} ${k.replace("_", " ")}`).join(", ")
@@ -1686,7 +1689,7 @@ export const api = {
       tx(async () => {
         await latency()
         assertNotShared("Reset to demo data")
-        assertWorkspaceAdmin("reset the data")
+        assertDataAdmin("reset the data")
         loadDemoData()
         audit({ action: "DATA_RESET", module: "System", recordType: "Data", recordId: "workspace", label: "All data replaced with demo data (Settings → Reset)" })
       }),
@@ -1694,7 +1697,7 @@ export const api = {
       tx(async () => {
         await latency()
         assertNotShared("Clear all data")
-        assertWorkspaceAdmin("clear the data")
+        assertDataAdmin("clear the data")
         loadEmptyWorkspace()
         audit({ action: "DATA_RESET", module: "System", recordType: "Data", recordId: "workspace", label: "All data cleared to an empty workspace (Settings → Clear)" })
       }),
@@ -1705,15 +1708,10 @@ export const api = {
    * GET /api/audit-events (Owner and Dev), GET /api/audit-events?recordId=… and the edited-record list.
    */
   audit: {
-    /**
-     * The central Audit Log, newest first, read-only. Owner and Dev see every event; the Employee (audit:view, owner
-     * 5 Nov 2026) only events of modules it can view, never account events — RLS does the same on the database.
-     */
+    /** The central Audit Log, newest first — every role with the `audit` permission (Owner, Dev, Employee). */
     async list(): Promise<AuditLogRow[]> {
       await latency()
-      const role = currentRole()
-      if (!can(role, "audit")) throw new Error("Your role can't view the audit log.")
-      const visible = (e: AuditEvent) => hasOwnerAuthority(role) || (e.module !== "Accounts" && can(role, MODULE_RESOURCE[e.module] ?? "audit"))
+      if (!can(currentRole(), "audit")) throw new Error("Your role can't view the audit log.")
       ensureSeeded()
       const ids = new Map<string, Set<string>>()
       const exists = (e: AuditEvent) => {
@@ -1724,7 +1722,7 @@ export const api = {
       }
       const reviews = new Map(readAuditReviews().map((r) => [r.eventId, { at: r.at, actor: r.actor }]))
       const restored = restorations(readAuditEvents())
-      return newestFirst(readAuditEvents().filter(visible)).map((e) => ({
+      return newestFirst(readAuditEvents()).map((e) => ({
         ...e,
         recordExists: exists(e),
         review: reviews.get(e.id) ?? null,

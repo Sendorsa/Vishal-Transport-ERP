@@ -22,19 +22,13 @@ async function main() {
       assert.ok(can("DEV", r, a), `DEV has ${r}:${a}`) // Dev: everything
       // The Owner: every business module, never a Dev-only resource (account / system administration).
       assert.equal(can("OWNER", r, a), !DEV_ONLY.includes(r), `OWNER ${r}:${a}`)
+      // The Employee (owner, 5 Nov 2026): exactly the Owner, except Settings.
+      assert.equal(can("EMPLOYEE", r, a), can("OWNER", r, a) && r !== "settings", `EMPLOYEE ${r}:${a}`)
     }
   assert.deepEqual([...DEV_ONLY], ["accounts", "system"])
   for (const role of ["OWNER", "EMPLOYEE"] as const) for (const r of DEV_ONLY) assert.equal(can(role, r, "view"), false, `${role} never reaches ${r}`)
-  assert.ok(hasOwnerAuthority("OWNER") && hasOwnerAuthority("DEV") && !hasOwnerAuthority("EMPLOYEE"))
-  assert.ok(can("OWNER", "audit") && can("DEV", "audit"))
-  // Employee pinned; it gained nothing when Accountant and Operations Manager were removed, and audit:view (read-only,
-  // its own modules' events) at the owner's instruction, 5 Nov 2026.
-  const before: Record<string, string[]> = {
-    EMPLOYEE: ["dashboard:view", "vehicles:view", "trips:view", "trips:create", "trips:edit", "diesel:view", "diesel:create", "diesel:edit", "audit:view"],
-  }
-  for (const [role, perms] of Object.entries(before))
-    for (const r of RESOURCES)
-      for (const a of actions) assert.equal(can(role as never, r, a), perms.includes(`${r}:*`) || perms.includes(`${r}:${a}`), `${role} ${r}:${a} changed`)
+  assert.ok(hasOwnerAuthority("OWNER") && hasOwnerAuthority("DEV") && hasOwnerAuthority("EMPLOYEE"))
+  assert.ok(can("OWNER", "audit") && can("DEV", "audit") && can("EMPLOYEE", "audit"))
   // Only three roles (owner, 31 Oct 2026); the removed ones still label the audit events recorded under them.
   assert.deepEqual(ROLES.map((r) => r.value), ["OWNER", "DEV", "EMPLOYEE"])
   assert.equal(roleLabel("DEV"), "Dev")
@@ -57,7 +51,8 @@ async function main() {
   assert.deepEqual(shown("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Audit Log"])
   // Visibility only: the hidden modules keep every permission (direct URLs and the API behave as before).
   for (const r of ["dashboard", "customers", "vehicles", "trips", "invoices", "payments", "reports", "settings", "audit"] as const) assert.ok(can("OWNER", r), `OWNER keeps ${r}`)
-  assert.ok(can("EMPLOYEE", "audit") && !can("EMPLOYEE", "audit", "edit") && !can("EMPLOYEE", "settings") && can("EMPLOYEE", "trips") && can("EMPLOYEE", "dashboard"), "EMPLOYEE permissions unchanged")
+  for (const r of ["dashboard", "customers", "vehicles", "trips", "invoices", "payments", "reports", "audit"] as const) assert.ok(can("EMPLOYEE", r), `EMPLOYEE has ${r}`)
+  assert.ok(!can("EMPLOYEE", "settings"), "EMPLOYEE: no Settings")
 
   // Phone tab bar: four of the role's own items; "More" (the drawer) holds the rest of that same list.
   const { mobileTabs, navFor, isActive } = await import("@/components/layout/nav")
@@ -72,10 +67,8 @@ async function main() {
   }
   assert.ok(isActive("/diesel/minda/2026-11", "/diesel") && isActive("/fuel-stations/dv_tanker", "/fuel-stations"), "a tab stays active on its sub-pages")
   assert.ok(!isActive("/dashboard", "/diesel") && isActive("/dashboard", "/dashboard"), "…and only its own pages")
-  // The Monthly Sheet Lock bypass: the Owner and Dev, never the Employee.
-  assert.equal(canEditMonth("OWNER", "2020-01", todayISO(), []), true)
-  assert.equal(canEditMonth("DEV", "2020-01", todayISO(), []), true)
-  assert.equal(canEditMonth("EMPLOYEE", "2020-01", todayISO(), []), false)
+  // The Monthly Sheet Lock bypass: Owner-level authority — the Owner, Dev and (owner, 5 Nov 2026) the Employee.
+  for (const r of ["OWNER", "DEV", "EMPLOYEE"] as const) assert.equal(canEditMonth(r, "2020-01", todayISO(), []), true)
 
   /* ---------------------------------------------------------------- 6. Role persistence (mock session) */
   setRole("DEV")
@@ -162,32 +155,32 @@ async function main() {
   /* ---------------------------------------------------------------- 9. Every write is permission-checked in the API, not only hidden */
   {
     const refused = /can't|Only the Owner or Dev/
-    // Employee (the only non-Owner, non-Dev role since 31 Oct 2026): logs trips and diesel, and may add a pump while doing
-    // so; no master data, money, settings, drivers, invoices, payments, or workspace reset / clear / restore.
+    // Employee (owner, 5 Nov 2026): the Owner's business access and Owner-level controls; only Settings is refused.
     const driver = await api.drivers.create({ name: "Roles Check Driver", phone: "", licenseNo: "", licenseValidTill: "", companyCode: "VT", status: "ACTIVE" })
     setRole("EMPLOYEE")
-    await assert.rejects(api.vehicles.create({} as never), refused)
-    await assert.rejects(api.vehicles.archive(vehicle.id), refused)
-    await assert.rejects(api.vehicles.update(vehicle.id, { notes: "x" }), refused)
-    await assert.rejects(api.customers.create({} as never), refused)
-    await assert.rejects(api.customers.archive((await api.customers.list())[0].id), refused)
-    await assert.rejects(api.invoices.create({} as never), refused)
-    await assert.rejects(api.payments.create({ direction: "IN", vehicleId: null } as never), refused)
-    await assert.rejects(api.fuelStationPayments.recordTds({} as never), refused)
-    await assert.rejects(api.drivers.update(driver.id, { status: "INACTIVE" }), refused)
+    await api.vehicles.update(vehicle.id, { notes: "Employee note" })
+    const cust = (await api.customers.list())[0]
+    await api.customers.archive(cust.id)
+    await api.customers.restore(cust.id)
+    await api.drivers.update(driver.id, { status: "INACTIVE" })
+    await api.settings.update({ vehicleTypes: (await api.settings.get()).vehicleTypes }) // adding vehicle types from a vehicle form, like the Owner
+    const pump = await api.fuelStations.create({ name: "Roles Check Pump" })
+    assert.equal((await api.fuelStations.setOpeningBalance(pump.id, { amount: 500, date: today })).openingBalance, 500)
+    const empPay = await api.fuelStationPayments.create({ stationId: pump.id, paymentDate: today, amount: 250, paymentMode: "CASH", notes: "", companyCode: "VT" })
+    await api.fuelStationPayments.update(empPay.id, { paymentDate: today, amount: 300, paymentMode: "CASH", notes: "" })
+    await api.fuelStationPayments.remove(empPay.id, "Employee correction")
+    await api.monthLocks.set(month, "LOCKED")
+    await api.monthLocks.set(month, "OPEN")
+    // Settings — the one exception: refused in the API.
     await assert.rejects(api.settings.update({ companies: [] }), refused)
-    await assert.rejects(api.settings.update({ vehicleTypes: (await api.settings.get()).vehicleTypes }), refused)
+    await assert.rejects(api.settings.update({ tdsRate: 3 }), refused)
     await assert.rejects(api.admin.resetDemoData(), refused)
     await assert.rejects(api.admin.clearAllData(), refused)
     await assert.rejects(api.admin.restoreBackup({}, "x.json"), refused)
-    const pump = await api.fuelStations.create({ name: "Roles Check Pump" })
-    // Fuel Stations → station → Add Payment and Opening Balance (owner, 5 Nov 2026) — not TDS, edits or deletes.
-    const empPay = await api.fuelStationPayments.create({ stationId: pump.id, paymentDate: today, amount: 250, paymentMode: "CASH", notes: "", companyCode: "VT" })
-    await assert.rejects(api.fuelStationPayments.update(empPay.id, { paymentDate: today, amount: 300, paymentMode: "CASH", notes: "" }), refused)
-    await assert.rejects(api.fuelStationPayments.remove(empPay.id, "Employee attempt"), refused)
-    assert.equal((await api.fuelStations.setOpeningBalance(pump.id, { amount: 500, date: today })).openingBalance, 500)
+    await assert.rejects(api.admin.exportBackup(), refused)
+    await assert.rejects(api.admin.setupTankerMasters(), refused)
     setRole("OWNER")
-    assert.equal((await api.audit.list()).find((e) => e.recordId === empPay.id)?.actor.role, "EMPLOYEE")
+    assert.deepEqual((await api.audit.history(empPay.id)).map((e) => [e.action, e.actor.role]), [["PAYMENT_RECORDED", "EMPLOYEE"], ["UPDATED", "EMPLOYEE"], ["DELETED", "EMPLOYEE"]])
   }
 
   /* ---------------------------------------------------------------- Regression: a data reset never changes who you are */
@@ -197,9 +190,7 @@ async function main() {
   assert.equal(currentRole(), "DEV")
   assert.equal(typeof (await api.audit.unreviewedDeletions()), "number") // still Dev, still Owner-level authority
   setRole("EMPLOYEE")
-  await assert.rejects(api.audit.unreviewedDeletions(), /Only the Owner or Dev/)
-  await assert.rejects(api.monthLocks.set(month, "LOCKED"), /Only the Owner or Dev/)
-  await assert.rejects(api.audit.restoreDeleted("x", "Employee attempt"), /Only the Owner or Dev/)
+  assert.equal(typeof (await api.audit.unreviewedDeletions()), "number") // the Employee has Owner-level authority too
   setRole("OWNER")
   const reset = (await api.audit.list())[0]
   assert.deepEqual([reset.action, reset.actor.role], ["DATA_RESET", "DEV"])

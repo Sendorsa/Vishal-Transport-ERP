@@ -100,16 +100,14 @@ async function main() {
   assert.equal((await read(OWNER, () => api.customers.list())).find((c) => c.id === minda.id)!.pricing.routes[0].rate, 2000)
   const asg = (await read(EMP, () => api.assignments.list())).filter((a) => a.vehicleId === bus.id)
   assert.deepEqual(asg.map((a) => [a.customerId, a.startDate, a.endDate]), [[minda.id, "2026-10-01", null]], "Assigned since back-dates the first assignment")
-  await assert.rejects(as(EMP, () => api.customers.create({ ...minda, code: "X" } as never)), /can't create customer/)
+  await assert.rejects(as(EMP, () => api.settings.update({ tdsRate: 3 })), /can't edit settings/) // Employee: the Owner's access except Settings (5 Nov 2026)
   await assert.rejects(as(OWNER, () => api.vehicles.create({ ...bus, regNo: "TN70ZZ0001", assignedSince: "2099-01-01" } as never)), /future/)
 
   /* ---------------------------------------------------------------- 3. openings at the baseline (Owner-level) */
-  await assert.rejects(as(EMP, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })), /is locked/) // Employee: open months only
-  await as(OWNER, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })) // we owe ₹50,000 at 31 Oct
+  await as(EMP, () => api.fuelStations.setOpeningBalance(station.id, { amount: 50000, date: B })) // we owe ₹50,000 at 31 Oct — Owner-level, the Employee too (5 Nov 2026)
   await as(DEV, () => api.tankerLoads.createOpening({ tankerId: JIO, date: B, litres: 1000, value: 95000, notes: "Dip at go-live" }))
   await as(OWNER, () => api.adbluePurchases.createOpening({ date: B, litres: 100, value: 9000, notes: "" }))
-  await as(OWNER, () => api.vehicles.setOpeningOdometer(bus.id, { km: 120000, date: "2026-10-28" }))
-  await assert.rejects(as(EMP, () => api.vehicles.setOpeningOdometer(bus.id, { km: 1, date: B })), /Only the Owner or Dev/)
+  await as(EMP, () => api.vehicles.setOpeningOdometer(bus.id, { km: 120000, date: "2026-10-28" }))
   const oldInv = await as(OWNER, () => api.invoices.createOpening({ customerId: minda.id, invoiceNo: "VT/2026-27/045", date: "2026-10-05", dueDate: "2026-11-04", outstanding: 118000, notes: "Unpaid at go-live" }))
   assert.deepEqual([oldInv.opening, oldInv.status, oldInv.total, oldInv.lines.length], [true, "ISSUED", 118000, 0])
 
@@ -135,9 +133,7 @@ async function main() {
   assert.equal(v.stock.get(JIO)!.litres, 1200, "JIO: 1,000 opening + 500 loaded − 300 filled")
 
   /* ---------------------------------------------------------------- 5. station ledger: Opening + Purchased − Paid = Closing; partial payment */
-  // The Employee records a station payment (owner, 5 Nov 2026) — but no TDS, and never in a locked month.
-  await assert.rejects(as(EMP, () => api.fuelStationPayments.recordTds({ stationId: station.id, month: "2026-10", amount: 1, companyCode: "VT", notes: "" })), /can't create payment/)
-  await assert.rejects(as(EMP, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: B, amount: 1000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" })), /is locked/)
+  // The Employee records station payments like the Owner (owner, 5 Nov 2026).
   await as(EMP, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 1000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }))
   const pay = await as(OWNER, () => api.fuelStationPayments.create({ stationId: station.id, paymentDate: today, amount: 19000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10" }))
   // The Employee's whole pump flow on the shared database (owner, 5 Nov 2026): add a pump, set its opening balance, pay it.
@@ -147,8 +143,9 @@ async function main() {
   const ownerPump = (await read(OWNER, () => api.fuelStations.list())).find((s) => s.id === empPump.id)!
   assert.deepEqual([ownerPump.openingBalance, ownerPump.openingBalanceDate], [7500, today], "the Owner sees the Employee's pump and opening balance")
   assert.ok((await read(OWNER, () => api.fuelStationPayments.list())).some((p) => p.id === empPay.id && p.amount === 2500), "…and its payment")
-  await assert.rejects(as(EMP, () => api.fuelStationPayments.update(empPay.id, { paymentDate: today, amount: 3000, paymentMode: "UPI", notes: "" })), /can't edit payment/)
-  await assert.rejects(as(EMP, () => api.fuelStationPayments.remove(empPay.id, "Employee attempt")), /can't delete payment/)
+  await as(EMP, () => api.fuelStationPayments.update(empPay.id, { paymentDate: today, amount: 3000, paymentMode: "UPI", notes: "" }))
+  await as(EMP, () => api.fuelStationPayments.remove(empPay.id, "Entered on the wrong pump"))
+  assert.ok(!(await read(OWNER, () => api.fuelStationPayments.list())).some((p) => p.id === empPay.id), "the Employee edits and deletes payments, like the Owner")
   const st = (await read(OWNER, () => api.fuelStations.list())).find((s) => s.id === station.id)!
   const purchases = [...fills, ...loadsAsStationPurchases(loads)]
   const led = stationLedger(station.id, purchases, await read(OWNER, () => api.payments.list()), today.slice(0, 7), openingOf(st))
@@ -178,7 +175,7 @@ async function main() {
   const ownerTrips = await read(OWNER, () => api.trips.list())
   assert.ok(ownerTrips.filter((t) => t.invoiceId === invoice.id).length === 2, "trips are locked to the invoice")
   await assert.rejects(as(EMP, () => api.trips.update(t1.id, trip(1))), /Invoiced trips are locked/)
-  assert.equal((await read(EMP, () => api.invoices.list())).length, 0, "an Employee reads no invoices (RLS)")
+  assert.equal((await read(EMP, () => api.invoices.list())).length, (await read(OWNER, () => api.invoices.list())).length, "the Employee reads invoices, like the Owner")
   const receipt = (amount: number, invoiceId: string, alloc: number) => ({ companyCode: "VT" as const, direction: "IN" as const, date: today, partyType: "CUSTOMER" as const, customerId: minda.id, vendorId: null, vehicleId: null, partyName: "Minda", categoryCode: null, amount, tdsAmount: 0, mode: "NEFT" as const, reference: "", allocations: [{ invoiceId, amount: alloc }], notes: "" })
   await as(OWNER, () => api.payments.create(receipt(2000, invoice.id, 2000))) // partial
   await assert.rejects(as(OWNER, () => api.payments.create(receipt(3000, invoice.id, 3000))), /exceeds outstanding/)
@@ -189,7 +186,7 @@ async function main() {
   const numbers = allPay.map((p) => p.paymentNo)
   assert.equal(new Set(numbers).size, numbers.length, "voucher numbers never collide")
   assert.equal(revenueInRange({ trips: ownerTrips } as never, { from: "2026-10-01", to: today }), 4000, "revenue comes from trips — the opening invoice is never revenue")
-  assert.equal((await read(EMP, () => api.payments.list())).some((p) => p.direction === "IN"), false, "an Employee never sees receipts")
+  assert.equal((await read(EMP, () => api.payments.list())).length, allPay.length, "the Employee reads receipts and vouchers, like the Owner")
 
   /* ---------------------------------------------------------------- 8. optimistic concurrency: a stale screen never overwrites */
   const seen = (await read(OWNER, () => api.diesel.list())).find((e) => e.id === f1.id)! // OWNER opens the edit dialog
@@ -219,21 +216,20 @@ async function main() {
 
   /* ---------------------------------------------------------------- 9. month lock: Employee refused, Dev and Owner allowed; recorded as who did it */
   const octFill = await as(OWNER, () => api.diesel.create({ ...fill(10, 119000), date: "2026-10-30" }))
-  await assert.rejects(as(EMP, () => api.diesel.update(octFill.id, { ...fill(11, 119000), date: "2026-10-30", vendorId: station.id })), /October 2026 is locked/)
+  await as(EMP, () => api.diesel.update(octFill.id, { ...fill(11, 119000), date: "2026-10-30", vendorId: station.id }, "Employee correction in a closed month"))
   await as(DEV, () => api.diesel.update(octFill.id, { ...fill(12, 119000), date: "2026-10-30", vendorId: station.id }, "Dev correction in a closed month"))
   const lock = await as(DEV, () => api.monthLocks.set(today.slice(0, 7), "LOCKED"))
   assert.equal(lock.changedBy, "DEV")
-  await assert.rejects(as(EMP, () => api.diesel.create(fill(5, 121000))), /is locked/)
-  await assert.rejects(as(EMP, () => api.monthLocks.set(today.slice(0, 7), "OPEN")), /Only the Owner or Dev/)
-  await as(OWNER, () => api.monthLocks.set(today.slice(0, 7), "OPEN"))
+  assert.equal((await as(EMP, () => api.monthLocks.set(today.slice(0, 7), "OPEN"))).changedBy, "EMPLOYEE", "the Employee unlocks, recorded as itself")
 
   /* ---------------------------------------------------------------- 10. delete with reason; Dev restores; audit identity */
-  await assert.rejects(as(EMP, () => api.diesel.remove(f2.id, "Employee attempt")), /can't delete/)
+  await assert.rejects(as(EMP, () => api.diesel.remove(f2.id, "")), /reason/i) // permission passes; the reason is still required
   await as(OWNER, () => api.diesel.remove(f2.id, "Entered twice"))
   const log = await read(DEV, () => api.audit.list())
   const del = log.find((e) => e.recordId === f2.id && e.action === "DELETED")!
   assert.deepEqual([del.actor.userId, del.actor.name, del.actor.role, del.reason], [P.OWNER, "Owner Person", "OWNER", "Entered twice"])
-  assert.equal(await read(DEV, () => api.audit.unreviewedDeletions()), 1)
+  assert.equal(await read(DEV, () => api.audit.unreviewedDeletions()), 2) // this one and the Employee's payment deletion
+  assert.equal(await read(EMP, () => api.audit.unreviewedDeletions()), 2, "the Employee sees the same deletion badge")
   await as(DEV, () => api.audit.restoreDeleted(del.id, "Not a duplicate after all"))
   assert.ok(await read(OWNER, () => api.diesel.get(f2.id)), "restored with its original id")
   const after = await read(OWNER, () => api.audit.list())
@@ -244,9 +240,8 @@ async function main() {
   assert.deepEqual([empEvent.actor.userId, empEvent.actor.role, empEvent.actor.name], [P.EMP, "EMPLOYEE", "emp@example.com"], "the Employee's own identity — never another user's")
   // An Employee can't write an event in someone else's name, even straight to the database.
   await assert.rejects(sqlAs(EMP, `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', '${P.OWNER}', 'OWNER', 'CREATED', 'Diesel', 'Diesel entry', 'x')`), /row-level security/)
-  // The Employee reads the log (owner, 5 Nov 2026) — only its own modules' events, never receipts, invoices or accounts.
-  const empLog = await read(EMP, () => api.audit.list())
-  assert.ok(empLog.some((e) => e.recordId === f1.id) && !empLog.some((e) => ["Payments", "Customers", "Invoices", "Settings", "Accounts"].includes(e.module)), "Employee: its own modules' events only")
+  // The Employee reads the whole log, like the Owner (owner, 5 Nov 2026) — RLS gives both the same events.
+  assert.deepEqual((await read(EMP, () => api.audit.list())).map((e) => e.id), (await read(OWNER, () => api.audit.list())).map((e) => e.id), "Employee and Owner read the same audit log")
 
   /* ---------------------------------------------------------------- 11. transfer: entries after the effective date follow the new customer */
   await as(OWNER, () => api.vehicles.transfer(bus.id, tepl.id, today, "Moved to TEPL"))
@@ -262,15 +257,16 @@ async function main() {
   await as(OWNER, () => api.diesel.create(fill(5, 122000, { customerId: tepl.id })))
   const empSees = await changesSince(transact as never, EMP, c0.cursor)
   assert.ok(empSees.modules.includes("Diesel"), "an Employee is told about new diesel entries")
-  assert.ok(!empSees.modules.includes("Payments"), "…never about receipts it can't see")
+  assert.ok(empSees.modules.includes("Payments"), "…and about receipts, like the Owner (5 Nov 2026)")
   assert.ok((await changesSince(transact as never, OWNER, c0.cursor)).modules.includes("Payments"))
 
   /* ---------------------------------------------------------------- 13. the shared database is never reset from the app */
-  for (const id of [DEV, OWNER]) {
+  for (const id of [DEV, OWNER, EMP]) {
     await assert.rejects(as(id, () => api.admin.clearAllData()), /isn't available on the shared database/)
     await assert.rejects(as(id, () => api.admin.resetDemoData()), /isn't available on the shared database/)
   }
   await assert.rejects(read(OWNER, () => api.admin.exportBackup()), /Only Dev/)
+  await assert.rejects(read(EMP, () => api.admin.exportBackup()), /Only Dev/)
   const backup = await read(DEV, () => api.admin.exportBackup())
   assert.ok((backup.collections.diesel_entries ?? []).length >= 5 && backup.format === "vishal-erp-backup", "Dev's read-only export (the rollback path)")
   void tf
@@ -374,7 +370,7 @@ async function main() {
   const fresh2 = await as(OWNER, () => api.fuelStations.create({ name: "Vishal Gasoline" }))
   assert.ok((await read(EMP, () => api.fuelStations.list())).some((x) => x.id === fresh2.id), "a new record after the reset is saved and visible to another account")
   assert.equal((await read(DEV, () => api.audit.list())).filter((e) => e.recordId === fresh2.id).length, 1, "…with its audit event")
-  await assert.rejects(as(EMP, () => api.customers.create({ ...minda, code: "Y" } as never)), /can't create customer/, "role permissions still apply")
+  await assert.rejects(as(EMP, () => api.settings.update({ tdsRate: 3 })), /can't edit settings/, "role permissions still apply")
 
   console.log("shared database (engine + RLS + every migration, three accounts): all checks passed")
 }

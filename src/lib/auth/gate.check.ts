@@ -82,7 +82,7 @@ for (const asset of ["/_next/static/chunks/a.js", "/_next/image", "/favicon.ico"
 setRole("OWNER") // what the old demo switcher would have stored
 setVerifiedRole("EMPLOYEE")
 assert.equal(currentRole(), "EMPLOYEE", "the API acts as the signed-in account's role, not the stored one")
-assert.equal(can(currentRole(), "payments", "create"), false, "…so an Employee can't act as Owner")
+assert.equal(can(currentRole(), "settings", "edit"), false, "…so an Employee can't reach the Owner's Settings")
 setVerifiedRole("DEV")
 assert.equal(currentRole(), "DEV")
 setVerifiedRole(null)

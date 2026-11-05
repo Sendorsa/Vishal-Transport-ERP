@@ -35,6 +35,7 @@ async function main() {
   const { inventoryLedger, stockFor, purchasedIn, vendorAnalytics, valueInventory, stockDraws } = await import("@/domain/adblue-inventory")
   const { buildDieselIndex, statsOf } = await import("@/domain/diesel")
   const { writeCollection, AUDIT_KEY } = await import("@/lib/storage/local-store")
+  const { hasOwnerAuthority } = await import("@/lib/permissions")
   assert.equal(todayISO(), "2026-11-10")
   const OCT = "2026-10-31"
   const NOV = "2026-11"
@@ -62,9 +63,7 @@ async function main() {
 
   /* ---------------------------------------------------------------- 1a. Tanker opening stock, one per tanker, never a purchase */
   const octPurchasedBefore = await stationsPurchased("2026-10")
-  setRole("EMPLOYEE")
-  await assert.rejects(api.tankerLoads.createOpening({ tankerId: jio.id, date: OCT, litres: 1000, value: 95000, notes: "" }), /Only the Owner or Dev/)
-  setRole("OWNER")
+  assert.ok(hasOwnerAuthority("EMPLOYEE"), "the Employee records openings like the Owner (5 Nov 2026)")
   await assert.rejects(api.tankerLoads.createOpening({ tankerId: "tnk_default", date: OCT, litres: 1000, value: 0, notes: "" }), /Choose the tanker/) // no hidden pool absorbs it
   await assert.rejects(api.tankerLoads.createOpening({ tankerId: jio.id, date: "2026-11-11", litres: 1000, value: 0, notes: "" }), /future/)
   await assert.rejects(api.tankerLoads.createOpening({ tankerId: jio.id, date: OCT, litres: 0, value: 0, notes: "" }), /greater than 0/)
@@ -204,8 +203,7 @@ async function main() {
 
   /* ---------------------------------------------------------------- 4. Month lock and history */
   setRole("EMPLOYEE")
-  await assert.rejects(api.diesel.create(fill(10, jio.id, 95.5, { date: "2026-10-30" })), /October 2026 is locked/) // October follows the lock
-  const emp = await api.diesel.create(fill(10, jio.id, 95.5)) // November open: Employees record tanker fills
+  const emp = await api.diesel.create(fill(10, jio.id, 95.5)) // Employees record tanker fills (and, like the Owner, may change a locked month)
   assert.deepEqual(await stockOf(), [2840, 500, 180])
   setRole("OWNER")
   // November activity never rewrote October: each tanker's October is exactly the baseline.
@@ -216,10 +214,9 @@ async function main() {
   await api.diesel.remove(emp.id, "Check cleanup")
 
   /* ---------------------------------------------------------------- 5. Fuel station opening balance at 31 Oct */
-  setRole("EMPLOYEE")
-  await assert.rejects(api.fuelStations.setOpeningBalance("dv_vishal", { amount: 1000, date: OCT }), /Only the Owner or Dev/)
-  setRole("OWNER")
+  setRole("EMPLOYEE") // Owner-level openings (5 Nov 2026): the same rules apply
   await assert.rejects(api.fuelStations.setOpeningBalance("dv_vishal", { amount: 1000, date: OCT }), /already has records before October 2026/) // would be ignored by the ledger
+  setRole("OWNER")
   const fresh = await api.fuelStations.create({ name: "Fresh Start Pump" })
   const credit = await api.fuelStations.create({ name: "Advance Paid Pump" })
   await api.fuelStations.setOpeningBalance(fresh.id, { amount: 50000, date: OCT }) // we owe it ₹50,000 on 31 Oct
@@ -243,9 +240,8 @@ async function main() {
   writeCollection("adblue_purchases", [])
   writeCollection("adblue_entries", [])
   setRole("EMPLOYEE")
-  await assert.rejects(api.adbluePurchases.createOpening({ date: OCT, litres: 100, value: 9000, notes: "" }), /Only the Owner or Dev/)
+  await assert.rejects(api.adbluePurchases.createOpening({ date: OCT, litres: 100, value: 0, notes: "" }), /value of the stock/) // the Employee records it too (5 Nov 2026); draws are costed from it
   setRole("OWNER")
-  await assert.rejects(api.adbluePurchases.createOpening({ date: OCT, litres: 100, value: 0, notes: "" }), /value of the stock/) // draws are costed from it
   await assert.rejects(api.adbluePurchases.createOpening({ date: "2026-11-11", litres: 100, value: 9000, notes: "" }), /future/)
   const abOpen = await api.adbluePurchases.createOpening({ date: OCT, litres: 100, value: 9000, notes: "On hand at go-live" })
   assert.deepEqual([abOpen.opening, abOpen.totalLitres, abOpen.totalCost, abOpen.vendorName], [true, 100, 9000, ""])
