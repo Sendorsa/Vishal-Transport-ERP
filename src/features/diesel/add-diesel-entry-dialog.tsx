@@ -10,7 +10,7 @@ import { Field } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { useCreateDiesel, useCreateFuelStation, useDieselEntries, useFuelStations, useTankerAdjustments, useTankerDispenses, useTankerLoads, useTankerTransfers, useTankers, useUpdateDiesel } from "@/lib/api/hooks"
 import { fillMileage, fillOrder, odometerConflict } from "@/domain/diesel"
-import { TANKER_SOURCE_ID, insufficientTankerMessage, isStockPool, tankerLabel, tankerOf, valueTankers } from "@/domain/tanker"
+import { TANKER_SOURCE_ID, availabilityMessage, fitsTanker, isStockPool, tankerAvailability, tankerLabel, tankerOf } from "@/domain/tanker"
 import { CreatableSelect } from "@/components/shared/creatable-select"
 import { fuelLabel } from "@/lib/constants"
 import { formatDate, formatINR, formatNumber, round2, toISODate, todayISO } from "@/lib/format"
@@ -64,6 +64,8 @@ export function AddDieselEntryDialog({
   const [f, setF] = useState(blank)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [reason, setReason] = useState("")
+  // A new fill is ordered after every record entered before it on the same day — as the API orders it on save.
+  const [openedAt] = useState(() => new Date().toISOString())
   const set = (k: keyof typeof f) => (v: string) => setF((s) => ({ ...s, [k]: v }))
 
   const vehicleFills = useMemo(
@@ -99,8 +101,17 @@ export function AddDieselEntryDialog({
     ...(pool ? [{ value: pool.id, label: `${pool.name} (historical stock)` }] : []),
   ]
   const tankerId = fromTanker ? f.tankerId : ""
-  const valuation = valueTankers({ loads: loads.data ?? [], fills: (entries.data ?? []).filter((e) => e.id !== entry?.id), external: external.data ?? [], transfers: transfers.data ?? [], adjustments: adjustments.data ?? [] })
-  const cargo = valuation.stock.get(tankerId) ?? { litres: 0, value: 0, avgRate: null }
+  // Stock available to this fill ON ITS DATE — the same rule the API checks on save (tankerAvailability): a load
+  // dated after the fill doesn't count, and later fills that already need the diesel are kept covered.
+  const records = useMemo(
+    () => ({ loads: loads.data ?? [], fills: entries.data ?? [], external: external.data ?? [], transfers: transfers.data ?? [], adjustments: adjustments.data ?? [] }),
+    [loads.data, entries.data, external.data, transfers.data, adjustments.data]
+  )
+  const cargo = useMemo(
+    () => (tankerId && /^\d{4}-\d{2}-\d{2}$/.test(f.date) ? tankerAvailability(records, { id: entry?.id ?? "new", date: f.date, createdAt: entry?.createdAt ?? openedAt, tankerId }) : null),
+    [records, tankerId, f.date, entry?.id, entry?.createdAt, openedAt]
+  )
+  const tankerName = (tankers.data ?? []).find((t) => t.id === tankerId)?.name ?? "the tanker"
   // Shown for reference only — the user enters the rate actually used for this fill.
   const lastLoad = useMemo(
     () => (loads.data ?? []).filter((l) => !l.opening && tankerOf(l) === tankerId).sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))[0],
@@ -135,7 +146,7 @@ export function AddDieselEntryDialog({
     if (fromTanker) {
       if (ownTanker && !wasTankerFill) errs.vendorId = `${ownTanker.name}'s own fuel isn't taken from tanker cargo — pick a fuel station`
       else if (!tankerId) errs.vendorId = "Choose the tanker"
-      else if (litres > cargo.litres) errs.litres = insufficientTankerMessage(cargo.litres)
+      else if (cargo && !fitsTanker(cargo, litres)) errs.litres = availabilityMessage(cargo, tankerName, f.date)
       if (!f.rate.trim()) errs.rate = "Enter the source rate per litre for this fill"
       else if (!(rate > 50 && rate < 200)) errs.rate = "Rate should be ₹50–200 per litre"
     } else if (!f.vendorId) errs.vendorId = "Choose the fuel station (or add it)"
@@ -187,9 +198,9 @@ export function AddDieselEntryDialog({
         </Field>
         {/* The tanker's stock takes the Fuel Station's place, so every later field keeps its position in both states. */}
         {fromTanker ? (
-          <Field label="Tanker stock">
-            <div className={READ_ONLY_BOX} title="This fill is taken out of the tanker's stock">
-              <span className="num truncate">{pool || !tankerId ? "—" : `${formatNumber(cargo.litres, 2)} L`}</span>
+          <Field label={cargo && !pool ? `Tanker stock on ${formatDate(f.date)}` : "Tanker stock"}>
+            <div className={READ_ONLY_BOX} title="Diesel this fill can take on its date: loads dated later don't count, and later fills from this tanker stay covered">
+              <span className="num truncate">{pool || !cargo ? "—" : `${formatNumber(cargo.available, 2)} L`}</span>
               <span className="ml-auto shrink-0 text-xs text-muted-foreground">{pool ? "historical stock" : "available"}</span>
             </div>
           </Field>

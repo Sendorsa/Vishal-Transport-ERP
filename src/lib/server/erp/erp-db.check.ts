@@ -20,9 +20,9 @@ async function main() {
   const { api, ConflictError } = await import("@/lib/api")
   const { withVersions } = await import("@/lib/versions")
   const { currentRole } = await import("@/lib/identity")
-  const { todayISO, round2 } = await import("@/lib/format")
+  const { todayISO, round2, formatDate } = await import("@/lib/format")
   const { stationLedger, ledgerFor, openingOf } = await import("@/domain/station-ledger")
-  const { loadsAsStationPurchases, valueTankers } = await import("@/domain/tanker")
+  const { loadsAsStationPurchases, valueTankers, tankerAvailability } = await import("@/domain/tanker")
   const { valueInventory, stockDraws, purchasedIn } = await import("@/domain/adblue-inventory")
   const { settlementIndex, invoiceOutstanding, revenueInRange } = await import("@/domain/analytics")
   const { buildDieselIndex, fillMileage, fillRow } = await import("@/domain/diesel")
@@ -283,6 +283,35 @@ async function main() {
   assert.ok(empSees.modules.includes("Diesel"), "an Employee is told about new diesel entries")
   assert.ok(empSees.modules.includes("Payments"), "…and about receipts, like the Owner (5 Nov 2026)")
   assert.ok((await changesSince(transact as never, OWNER, c0.cursor)).modules.includes("Payments"))
+
+  /* ---------------------------------------------------------------- 12a. tanker reloads: the API and the database agree, tanker by tanker */
+  // Mini, on a vehicle of its own (Minda since October): load 6,000 → fill 5,500 → reload 5,000 dated today.
+  const MINI = tk.find((t) => t.name === "Mini")!.id
+  const OFFICE = tk.find((t) => t.name === "Office")!.id
+  const day = (n: number) => new Date(Date.parse(today) - n * 86_400_000).toISOString().slice(0, 10)
+  const van = await as(OWNER, () => api.vehicles.create({ regNo: "TN70ZZ4242", companyCode: "VT", typeCode: "BUS_55", make: "", model: "", year: 0, seats: 55, fuelType: "DIESEL", mileageKmpl: 4.3, ownership: "OWNED", ownerName: null, status: "ACTIVE", odometerKm: 0, assignedCustomerId: minda.id, defaultDriverId: null, insurance: { provider: "", policyNo: "", validTill: "", premium: 0 }, roadTax: { validTill: "", amount: 0, period: "ANNUAL" }, fitnessValidTill: "", permitValidTill: "", emiAmount: 0, notes: "", assignedSince: "2026-10-01" }))
+  const vanFill = (tankerId: string, date: string, litres: number, odometerKm: number) => ({ date, vehicleId: van.id, customerId: minda.id, vendorId: "dv_tanker", tankerId, litres, rate: 95, odometerKm, billNo: "", paymentMode: "CREDIT" as const })
+  const rawFill = (tankerId: string, date: string, litres: number, km: number) =>
+    `insert into fuel.diesel_entries (company_code, date, vehicle_id, customer_id, station_id, tanker_id, litres, rate, odometer_km) values ('VT', '${date}', '${van.id}', '${minda.id}', 'dv_tanker', '${tankerId}', ${litres}, 95, ${km}); insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) select 'SESSION', '${P.OWNER}', 'OWNER', 'CREATED', 'Diesel', 'Diesel entry', id from fuel.diesel_entries where vehicle_id = '${van.id}' and odometer_km = ${km};`
+  await as(OWNER, () => api.tankerLoads.create({ tankerId: MINI, date: day(3), stationId: station.id, invoiceNo: "M1", litres: 6000, rate: 95, notes: "" }))
+  await as(OWNER, () => api.diesel.create(vanFill(MINI, day(2), 5500, 1000)))
+  await as(OWNER, () => api.tankerLoads.create({ tankerId: MINI, date: today, stationId: station.id, invoiceNo: "M2", litres: 5000, rate: 95, notes: "" }))
+  // A fill dated before the reload: 500 L was there — the API and the database's own trigger both say so.
+  await assert.rejects(as(OWNER, () => api.diesel.create(vanFill(MINI, day(1), 1000, 2000))), (e: Error) => e.message.startsWith(`Insufficient tanker inventory in Mini. Available: 500 L on ${formatDate(day(1))}. The next load into Mini (5,000 L) is dated ${formatDate(today)}`))
+  await assert.rejects(sqlAs(OWNER, rawFill(MINI, day(1), 1000, 2000)), /Insufficient tanker inventory in Mini\. Available: 500\.00 L/)
+  // On the reload's own date it fits (the load comes first); both draw the line at exactly the same litres.
+  await as(OWNER, () => api.diesel.create(vanFill(MINI, today, 1000, 3000)))
+  const miniNow = tankerAvailability({ loads: await read(OWNER, () => api.tankerLoads.list()), fills: await read(OWNER, () => api.diesel.list()), external: [], transfers: [], adjustments: [] }, { id: "new", date: today, createdAt: new Date().toISOString(), tankerId: MINI })
+  assert.equal(miniNow.available, 4500)
+  await assert.rejects(sqlAs(OWNER, rawFill(MINI, today, 4500.01, 4000)), /Insufficient tanker inventory in Mini\. Available: 4500\.00 L/)
+  await assert.rejects(as(OWNER, () => api.diesel.create(vanFill(MINI, today, 4500.01, 4000))), /Insufficient tanker inventory in Mini\. Available: 4,500 L/)
+  await as(OWNER, () => api.diesel.create(vanFill(MINI, today, 4500, 4000)))
+  // Office's history goes below zero (a row written with the triggers off — e.g. old data): Mini is not blocked.
+  await db.exec(`set session_replication_role = replica; insert into fuel.diesel_entries (id, company_code, date, vehicle_id, customer_id, station_id, tanker_id, litres, rate, odometer_km) values ('dsl_broken_office', 'VT', '2026-10-02', '${van.id}', '${minda.id}', 'dv_tanker', '${OFFICE}', 100, 95, 1); set session_replication_role = origin;`)
+  await as(OWNER, () => api.tankerLoads.create({ tankerId: MINI, date: today, stationId: station.id, invoiceNo: "M3", litres: 200, rate: 95, notes: "" }))
+  await as(OWNER, () => api.diesel.create(vanFill(MINI, today, 200, 5000))) // the API and the database check Mini only
+  await assert.rejects(as(OWNER, () => api.diesel.create(vanFill(OFFICE, today, 1, 6000))), /Office's records already go below zero on 02-10-2026/)
+  await db.exec(`set session_replication_role = replica; delete from fuel.diesel_entries where id = 'dsl_broken_office'; set session_replication_role = origin;`)
 
   /* ---------------------------------------------------------------- 13. the shared database is never reset from the app */
   for (const id of [DEV, OWNER, EMP]) {

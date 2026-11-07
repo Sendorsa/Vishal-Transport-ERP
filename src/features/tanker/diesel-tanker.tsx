@@ -21,7 +21,7 @@ import { StatusBadge } from "@/components/shared/status-badge"
 import { monthLabel } from "@/domain/diesel"
 import { canEditMonth } from "@/domain/month-lock"
 import { inEntryOrder } from "@/domain/payment-order"
-import { fillAmount, isStockPool, isTankerFill, tankerLabel, tankerLedger, tankerMoves, tankerOf, tankerPeriod, valueTankers, type TankerValuation } from "@/domain/tanker"
+import { fillAmount, isStockPool, isTankerFill, tankerLabel, tankerLedger, tankerMoves, tankerOf, tankerPeriod, tankerAvailability, valueTankers, type TankerRecords } from "@/domain/tanker"
 import {
   useArchiveTanker,
   useCreateFuelStation,
@@ -152,7 +152,7 @@ export function DieselTanker() {
     ])
     // Opening + Loaded + Transfers + Adjustments − Dispensed = Closing per tanker (tankerLedger / tankerPeriod),
     // asserted in npm run check:diesel. Closing and carry-forward show in the ledgers, never as extra cards (CLAUDE.md).
-    return { v, moves, through, dispenses, movements, byId, name, loads: inEntryOrder(loads.data.filter((l) => shown(tankerOf(l)))), stations: new Map(ds.fuelStations.map((s) => [s.id, s.name])) }
+    return { v, records, moves, through, dispenses, movements, byId, name, loads: inEntryOrder(loads.data.filter((l) => shown(tankerOf(l)))), stations: new Map(ds.fuelStations.map((s) => [s.id, s.name])) }
   }, [ds, idx, tankers.data, loads.data, external.data, transfers.data, adjustments.data])
 
   if (!can("diesel")) return <NoAccess what="the diesel tankers" />
@@ -587,7 +587,7 @@ export function DieselTanker() {
       {historyOf && <RecordHistoryDialog recordId={historyOf} onOpenChange={(o) => !o && setHistoryOf(null)} />}
       {openingFor && <OpeningStockDialog tanker={openingFor} onOpenChange={(o) => !o && setOpeningFor(null)} />}
       {loading && <LoadDialog key={loading.load?.id ?? "new"} load={loading.load} tankers={all} defaultTanker={scope} onOpenChange={(o) => !o && setLoading(null)} />}
-      {moving && <MovementDialog kind={moving} tankers={all} defaultTanker={scope} valuation={d.v} onOpenChange={(o) => !o && setMoving(null)} />}
+      {moving && <MovementDialog kind={moving} tankers={all} defaultTanker={scope} records={d.records} onOpenChange={(o) => !o && setMoving(null)} />}
       {deleting && (
         <DeleteDialog
           title={
@@ -801,14 +801,19 @@ function OpeningStockDialog({ tanker, onOpenChange }: { tanker: Tanker; onOpenCh
 }
 
 /** Transfer between two tankers (never a purchase), or a stock adjustment with a mandatory reason. */
-function MovementDialog({ kind, tankers, defaultTanker, valuation, onOpenChange }: { kind: "TRANSFER" | "ADJUSTMENT"; tankers: Tanker[]; defaultTanker: string | null; valuation: TankerValuation; onOpenChange: (o: boolean) => void }) {
+function MovementDialog({ kind, tankers, defaultTanker, records, onOpenChange }: { kind: "TRANSFER" | "ADJUSTMENT"; tankers: Tanker[]; defaultTanker: string | null; records: TankerRecords; onOpenChange: (o: boolean) => void }) {
   const transfer = useCreateTankerTransfer()
   const adjust = useCreateTankerAdjustment()
   const today = todayISO()
   const [f, setF] = useState({ from: firstActive(tankers, defaultTanker), to: "", date: today, litres: "", direction: "-" as "+" | "-", text: "" })
   const [error, setError] = useState<string | null>(null)
   const litres = Number(f.litres)
-  const available = valuation.stock.get(f.from)?.litres ?? 0
+  // What can leave the tanker ON THE CHOSEN DATE — the API's rule (tankerAvailability): later loads don't count.
+  const [openedAt] = useState(() => new Date().toISOString())
+  const available = useMemo(
+    () => (f.from && /^\d{4}-\d{2}-\d{2}$/.test(f.date) ? tankerAvailability(records, { id: "new", date: f.date, createdAt: openedAt, tankerId: f.from, kind: kind === "TRANSFER" ? "TRANSFER_OUT" : "FILL" }).available : null),
+    [records, f.from, f.date, openedAt, kind]
+  )
   const submit = async () => {
     setError(null)
     if (!(litres > 0)) return setError("Enter the litres")
@@ -835,7 +840,7 @@ function MovementDialog({ kind, tankers, defaultTanker, valuation, onOpenChange 
       className="sm:max-w-2xl"
     >
       <div className="grid grid-cols-1 items-start gap-x-6 gap-y-4 sm:grid-cols-2">
-        <Field label={kind === "TRANSFER" ? "From tanker" : "Tanker"} required hint={f.from ? `Available Inventory: ${L(available)}` : undefined}>
+        <Field label={kind === "TRANSFER" ? "From tanker" : "Tanker"} required hint={available !== null ? `Available on ${formatDate(f.date)}: ${L(available)}` : undefined}>
           <SimpleSelect value={f.from} onChange={(v) => setF({ ...f, from: v })} placeholder="Select tanker" options={tankerOptions(tankers)} />
         </Field>
         {kind === "TRANSFER" ? (

@@ -27,7 +27,7 @@
  */
 import { addMonths, format, parseISO } from "date-fns"
 import type { DieselEntry, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer } from "@/lib/types"
-import { round2 } from "@/lib/format"
+import { formatDate, round2 } from "@/lib/format"
 
 /** The Diesel Tanker fuel source (a FuelStation record with isTanker) — which tanker is on the fill (`tankerId`). */
 export const TANKER_SOURCE_ID = "dv_tanker"
@@ -62,9 +62,6 @@ export const isTankerFill = (e: { vendorId: string }) => e.vendorId === TANKER_S
 
 /** A record's tanker; records saved before tankers existed (no tankerId) belong to the default tanker. */
 export const tankerOf = (r: { tankerId?: string }) => r.tankerId || DEFAULT_TANKER_ID
-
-export const insufficientTankerMessage = (available: number, tanker?: string) =>
-  `Insufficient tanker inventory${tanker ? ` in ${tanker}` : ""}. Available: ${round2(available).toLocaleString("en-IN")} L`
 
 /* ------------------------------------------------------------------ movements */
 
@@ -115,14 +112,37 @@ const RANK: Record<MoveKind, number> = { OPENING: 0, LOAD: 0, ADJUST: 0, TRANSFE
 const rank = (m: TankerMove) => (m.kind === "ADJUST" && m.litres < 0 ? 3 : RANK[m.kind])
 const moveOrder = (a: TankerMove, b: TankerMove) => a.date.localeCompare(b.date) || rank(a) - rank(b) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
 
+/** Diesel coming into a tanker (a load, opening stock, a transfer in, a + adjustment). */
+export interface TankerIncoming {
+  date: string
+  litres: number
+  kind: MoveKind
+}
+
+/** The first moment one tanker's stock would go below zero. */
+export interface TankerShortfall {
+  tankerId: string
+  date: string
+  available: number
+  needed: number
+  id: string
+  /** The next diesel into that tanker after this moment — e.g. a reload dated after the draw it would have covered. */
+  nextIn: TankerIncoming | null
+}
+
 export interface TankerValuation {
   /** Fill / external dispense / transfer id → cost at the tanker's weighted-average rate when it was drawn. */
   costOf: Map<string, number>
   /** Per tanker, after the last movement. */
   stock: Map<string, { litres: number; value: number; avgRate: number | null }>
-  /** First moment a tanker's stock would go below zero, if any (for validation). */
-  shortfall: { tankerId: string; date: string; available: number; needed: number; id: string } | null
+  /** First moment any tanker's stock would go below zero, if any. */
+  shortfall: TankerShortfall | null
+  /** Per tanker, its own first shortfall — validation checks only the tankers a change touches (as the database does). */
+  shortfalls: Map<string, TankerShortfall>
 }
+
+const EPS = 1e-9
+const incoming = (m: TankerMove | undefined): TankerIncoming | null => (m ? { date: m.date, litres: m.litres, kind: m.kind } : null)
 
 /** Runs every movement in order, one moving weighted average per tanker. */
 export function valueTankers(r: TankerRecords): TankerValuation {
@@ -131,8 +151,9 @@ export function valueTankers(r: TankerRecords): TankerValuation {
   const of = (id: string) => state.get(id) ?? (state.set(id, { litres: 0, value: 0 }), state.get(id)!)
   const costOf = new Map<string, number>()
   let shortfall: TankerValuation["shortfall"] = null
+  const shortfalls = new Map<string, TankerShortfall>()
   const transferCost = new Map<string, number>()
-  for (const m of moves) {
+  for (const [i, m] of moves.entries()) {
     const s = of(m.tankerId)
     const avg = s.litres > 0 ? s.value / s.litres : 0
     if (m.litres >= 0) {
@@ -142,7 +163,11 @@ export function valueTankers(r: TankerRecords): TankerValuation {
       continue
     }
     const q = -m.litres
-    if (q > s.litres + 1e-9 && !shortfall) shortfall = { tankerId: m.tankerId, date: m.date, available: round2(s.litres), needed: q, id: m.id }
+    if (q > s.litres + EPS && !shortfalls.has(m.tankerId)) {
+      const next = moves.slice(i + 1).find((n) => n.tankerId === m.tankerId && n.litres > 0)
+      shortfalls.set(m.tankerId, { tankerId: m.tankerId, date: m.date, available: round2(s.litres), needed: q, id: m.id, nextIn: incoming(next) })
+      shortfall ??= shortfalls.get(m.tankerId)!
+    }
     const cost = round2(Math.min(q, s.litres) * avg)
     if (m.kind === "TRANSFER_OUT") transferCost.set(m.id, cost)
     else costOf.set(m.id, cost)
@@ -150,8 +175,72 @@ export function valueTankers(r: TankerRecords): TankerValuation {
     s.litres = Math.max(0, s.litres - q)
   }
   const stock = new Map([...state].map(([id, s]) => [id, { litres: round2(s.litres), value: round2(s.value), avgRate: s.litres > 0 ? round2(s.value / s.litres) : null }]))
-  return { costOf, stock, shortfall }
+  return { costOf, stock, shortfall, shortfalls }
 }
+
+/** How much one new (or edited) draw can take from its tanker — the dialogs and the API use this one rule. */
+export interface TankerAvailability {
+  /** Litres the draw can take: the lowest stock from its moment on, so no later record goes below zero (≥ 0). */
+  available: number
+  /** The date of that lowest point — the draw's own date, or a later draw that already needs the rest. */
+  limitedOn: string
+  /** The next diesel into the tanker after that point — a reload dated too late to cover this draw. */
+  nextIn: TankerIncoming | null
+  /** The tanker's records already go below zero without this draw (correct those first). */
+  existing: TankerShortfall | null
+}
+
+/**
+ * Stock available to one draw out of `draw.tankerId` on `draw.date`, in the same event order as `valueTankers`
+ * (loads before transfers before fills on the same day; then createdAt, id). Any stored record with the draw's id
+ * (the fill being edited) is left out. `kind`: FILL for vehicle fills and − adjustments (same-day rank), TRANSFER_OUT
+ * for a transfer. A draw of q litres keeps the tanker at or above zero exactly when q ≤ available.
+ */
+export function tankerAvailability(r: TankerRecords, draw: { id: string; date: string; createdAt: string; tankerId: string; kind?: "FILL" | "TRANSFER_OUT" }): TankerAvailability {
+  const rest = { ...r, fills: r.fills.filter((e) => e.id !== draw.id) }
+  const existing = valueTankers(rest).shortfalls.get(draw.tankerId) ?? null
+  const probe: TankerMove = { id: draw.id, date: draw.date, createdAt: draw.createdAt, tankerId: draw.tankerId, kind: draw.kind ?? "FILL", litres: 0 }
+  const moves = [...tankerMoves(rest).filter((m) => m.tankerId === draw.tankerId), probe].sort(moveOrder)
+  let run = 0
+  let min = Infinity
+  const from = moves.indexOf(probe)
+  let minAt = from
+  for (const [i, m] of moves.entries()) {
+    run += m.litres
+    if (i >= from && run < min - EPS) [min, minAt] = [run, i]
+  }
+  return { available: existing ? 0 : Math.max(0, min), limitedOn: moves[minAt].date, nextIn: incoming(moves.slice(minAt + 1).find((m) => m.litres > 0)), existing }
+}
+
+const INCOMING_LABEL: Partial<Record<MoveKind, string>> = { LOAD: "load", OPENING: "opening stock", TRANSFER_IN: "transfer", ADJUST: "stock adjustment" }
+const fmtL = (n: number) => `${round2(n).toLocaleString("en-IN")} L`
+
+/**
+ * "Insufficient tanker inventory in JIO. Available: 500 L on 04-11-2026. The next load into JIO (5,000 L) is dated
+ * 05-11-2026 …" — the explanation says which date the stock was measured on, and why a later reload doesn't count.
+ * Dates are never changed for the user: the message says what to check.
+ */
+export function insufficientTankerMessage(available: number, tanker?: string, ctx: { date?: string; limitedOn?: string; nextIn?: TankerIncoming | null; existing?: TankerShortfall | null } = {}) {
+  const head = `Insufficient tanker inventory${tanker ? ` in ${tanker}` : ""}. Available: ${fmtL(available)}`
+  if (!ctx.date) return head
+  const name = tanker ?? "the tanker"
+  if (ctx.existing) return `${head} on ${formatDate(ctx.date)}. ${name}'s records already go below zero on ${formatDate(ctx.existing.date)} (${fmtL(ctx.existing.available)} in stock, ${fmtL(ctx.existing.needed)} drawn) — correct that record first.`
+  const later = ctx.limitedOn && ctx.limitedOn > ctx.date ? ` Later records of ${name} (up to ${formatDate(ctx.limitedOn)}) already use the rest.` : ""
+  const n = ctx.nextIn
+  const reload = n
+    ? ` The next ${INCOMING_LABEL[n.kind] ?? "addition"} into ${name} (${fmtL(n.litres)}) is dated ${formatDate(n.date)}, so it can't cover diesel taken out before that date. If this diesel was taken after it, check this entry's date (or that ${INCOMING_LABEL[n.kind] ?? "record"}'s date).`
+    : ""
+  return `${head} on ${formatDate(ctx.date)}.${later}${reload}`
+}
+
+/** The message for a tanker's first shortfall (any change other than a vehicle fill). */
+export const shortfallMessage = (s: TankerShortfall, tanker: string) => insufficientTankerMessage(s.available, tanker, { date: s.date, nextIn: s.nextIn })
+
+/** The message for a draw larger than `tankerAvailability` allows. */
+export const availabilityMessage = (a: TankerAvailability, tanker: string, date: string) => insufficientTankerMessage(a.available, tanker, { date, limitedOn: a.limitedOn, nextIn: a.nextIn, existing: a.existing })
+
+/** True when `litres` fits (same tolerance as `valueTankers`). */
+export const fitsTanker = (a: TankerAvailability, litres: number) => litres <= a.available + EPS
 
 /** A tanker fill's amount (answer 23): litres × the rate recorded on the fill; only a fill saved without a rate is costed at the weighted average. */
 export const fillAmount = (e: Pick<DieselEntry, "id" | "litres" | "rate">, costOf: Map<string, number>) => (e.rate > 0 ? round2(e.litres * e.rate) : (costOf.get(e.id) ?? 0))

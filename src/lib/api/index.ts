@@ -12,7 +12,7 @@ import { odometerConflict } from "@/domain/diesel"
 import { statusOn, withStatus } from "@/domain/status-history"
 import { canEditMonth } from "@/domain/month-lock"
 import { insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from "@/domain/adblue-inventory"
-import { fillAmount, insufficientTankerMessage, isStockPool, isTankerFill, normReg, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
+import { availabilityMessage, fillAmount, fitsTanker, isStockPool, isTankerFill, normReg, shortfallMessage, tankerAvailability, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/station-ledger"
 import { currentActor, currentRole } from "@/lib/identity"
 import { can, hasOwnerAuthority, type Resource } from "@/lib/permissions"
@@ -303,10 +303,24 @@ function tankerRecords(patch: Partial<TankerRecords> = {}): TankerRecords {
   }
 }
 
-/** No tanker's stock may go below zero at any point in time (each tanker on its own). */
-function assertTankerStock(records: TankerRecords) {
-  const v = valueTankers(records)
-  if (v.shortfall) throw new Error(insufficientTankerMessage(v.shortfall.available, tankerName(v.shortfall.tankerId)))
+/**
+ * The tankers a change touches may never go below zero at any point in time (each tanker on its own). Only those
+ * tankers are checked — as the database's stock trigger does — so a shortfall in another tanker's history never
+ * blocks a valid record. A record without a tanker belongs to the default pool (`tankerOf`).
+ */
+function assertTankerStock(records: TankerRecords, tankerIds: (string | undefined)[]) {
+  const { shortfalls } = valueTankers(records)
+  for (const id of new Set(tankerIds.map((t) => tankerOf({ tankerId: t })))) {
+    const s = shortfalls.get(id)
+    if (s) throw new Error(shortfallMessage(s, tankerName(id)))
+  }
+}
+
+/** A vehicle fill from a tanker: refused when it exceeds the stock available on its date (`tankerAvailability`, as the dialog shows). */
+function assertTankerFill(fill: { id: string; date: string; createdAt: string; tankerId?: string; litres: number }) {
+  const tankerId = tankerOf(fill)
+  const a = tankerAvailability(tankerRecords(), { ...fill, tankerId })
+  if (!fitsTanker(a, fill.litres)) throw new Error(availabilityMessage(a, tankerName(tankerId), fill.date))
 }
 
 /** A tanker's own fuel is an ordinary pump fill — never drawn from tanker cargo. */
@@ -720,7 +734,7 @@ function planRestore(eventId: string): RestorePlan {
       if (isTankerFill(d)) {
         Object.assign(r, { paymentMode: "CREDIT", tankerId: tankerOf(d) })
         if (!readCollection("tankers").some((t) => t.id === tankerOf(d))) throw new Error("Its tanker no longer exists, so it can't be restored.")
-        assertTankerStock(tankerRecords({ fills: [...readCollection("diesel_entries"), r as unknown as DieselEntry] }))
+        assertTankerStock(tankerRecords({ fills: [...readCollection("diesel_entries"), r as unknown as DieselEntry] }), [tankerOf(d)])
       }
       const amount = d.averageCost ? (e.before.amount as number) : (r.amount as number)
       return {
@@ -783,7 +797,7 @@ function planRestore(eventId: string): RestorePlan {
       const d = r as unknown as TankerDispense
       if (!readCollection("tankers").some((t) => t.id === tankerOf(d))) throw new Error("Its tanker no longer exists, so it can't be restored.")
       r.tankerId = tankerOf(d)
-      assertTankerStock(tankerRecords({ external: [...readCollection("tanker_dispenses"), d] }))
+      assertTankerStock(tankerRecords({ external: [...readCollection("tanker_dispenses"), d] }), [tankerOf(d)])
       return {
         key,
         record: r,
@@ -794,7 +808,7 @@ function planRestore(eventId: string): RestorePlan {
     case "tanker_transfers": {
       const t = r as unknown as TankerTransfer
       for (const id of [t.fromTankerId, t.toTankerId]) if (!readCollection("tankers").some((x) => x.id === id)) throw new Error("One of its tankers no longer exists, so it can't be restored.")
-      assertTankerStock(tankerRecords({ transfers: [...readCollection("tanker_transfers"), t] }))
+      assertTankerStock(tankerRecords({ transfers: [...readCollection("tanker_transfers"), t] }), [t.fromTankerId, t.toTankerId])
       return {
         key,
         record: r,
@@ -805,7 +819,7 @@ function planRestore(eventId: string): RestorePlan {
     case "tanker_adjustments": {
       const a = r as unknown as TankerAdjustment
       if (!readCollection("tankers").some((x) => x.id === a.tankerId)) throw new Error("Its tanker no longer exists, so it can't be restored.")
-      assertTankerStock(tankerRecords({ adjustments: [...readCollection("tanker_adjustments"), a] }))
+      assertTankerStock(tankerRecords({ adjustments: [...readCollection("tanker_adjustments"), a] }), [a.tankerId])
       return {
         key,
         record: r,
@@ -1202,7 +1216,7 @@ export const api = {
           assertDieselVehicle(vehicle)
           if (!(input.rate > 0)) throw new Error("Enter the source rate per litre for this tanker fill")
           input = { ...input, paymentMode: "CREDIT" }
-          assertTankerStock(tankerRecords({ fills: [...readCollection("diesel_entries"), { ...input, id: "new", createdAt: new Date().toISOString() }] }))
+          assertTankerFill({ ...input, id: "new", createdAt: new Date().toISOString() })
         } else {
           assertPumpStation(input.vendorId)
           delete input.tankerId
@@ -1239,8 +1253,9 @@ export const api = {
           if (input.vendorId !== before.vendorId) assertPumpStation(input.vendorId) // an existing fill keeps its station
           input = { ...input, tankerId: undefined }
         }
+        if (isTankerFill(input)) assertTankerFill({ ...before, ...input })
         if (isTankerFill(input) || isTankerFill(before))
-          assertTankerStock(tankerRecords({ fills: readCollection("diesel_entries").map((e) => (e.id === id ? { ...e, ...input } : e)) }))
+          assertTankerStock(tankerRecords({ fills: readCollection("diesel_entries").map((e) => (e.id === id ? { ...e, ...input } : e)) }), [isTankerFill(before) ? tankerOf(before) : undefined, isTankerFill(input) ? tankerOf(input) : undefined].filter(Boolean))
         // The reading: an imported fill recorded without one may stay without one; any other fill keeps a valid reading,
         // checked against its neighbours when the reading or the date changes (unchanged history isn't re-judged).
         if (input.odometerKm === null) {
@@ -1320,7 +1335,7 @@ export const api = {
         assertMonthEditable(before.date)
         assertMonthEditable(input.date)
         const next = checkLoad(input, before)
-        assertTankerStock(tankerRecords({ loads: readCollection("tanker_loads").map((l) => (l.id === id ? { ...l, ...next } : l)) }))
+        assertTankerStock(tankerRecords({ loads: readCollection("tanker_loads").map((l) => (l.id === id ? { ...l, ...next } : l)) }), [before.tankerId, next.tankerId])
         const after = await tankerLoads.update(id, next)
         audit({ action: "UPDATED", ...meta.load(after), before, after, reason })
         return after
@@ -1365,7 +1380,7 @@ export const api = {
         const before = await tankerLoads.get(id)
         if (!before) return
         assertMonthEditable(before.date)
-        assertTankerStock(tankerRecords({ loads: readCollection("tanker_loads").filter((l) => l.id !== id) }))
+        assertTankerStock(tankerRecords({ loads: readCollection("tanker_loads").filter((l) => l.id !== id) }), [before.tankerId])
         await tankerLoads.remove(id)
         audit({ action: "DELETED", ...meta.load(before), before, reason })
       }),
@@ -1380,7 +1395,7 @@ export const api = {
         ensureSeeded()
         assertMonthEditable(input.date)
         const d = checkExternal(input)
-        assertTankerStock(tankerRecords({ external: [...readCollection("tanker_dispenses"), { ...d, id: "new", createdAt: new Date().toISOString() }] }))
+        assertTankerStock(tankerRecords({ external: [...readCollection("tanker_dispenses"), { ...d, id: "new", createdAt: new Date().toISOString() }] }), [d.tankerId])
         const after = await tankerDispenses.create(d)
         audit({ action: "CREATED", ...meta.dispense(after), after })
         return after
@@ -1393,7 +1408,7 @@ export const api = {
         assertMonthEditable(before.date)
         assertMonthEditable(input.date)
         const d = checkExternal(input, before)
-        assertTankerStock(tankerRecords({ external: readCollection("tanker_dispenses").map((x) => (x.id === id ? { ...x, ...d } : x)) }))
+        assertTankerStock(tankerRecords({ external: readCollection("tanker_dispenses").map((x) => (x.id === id ? { ...x, ...d } : x)) }), [before.tankerId, d.tankerId])
         const after = await tankerDispenses.update(id, d)
         audit({ action: "UPDATED", ...meta.dispense(after), before, after, reason })
         return after
@@ -1448,7 +1463,7 @@ export const api = {
         ensureSeeded()
         assertMonthEditable(input.date)
         const t = checkTransfer(input)
-        assertTankerStock(tankerRecords({ transfers: [...readCollection("tanker_transfers"), { ...t, id: "new", createdAt: new Date().toISOString() }] }))
+        assertTankerStock(tankerRecords({ transfers: [...readCollection("tanker_transfers"), { ...t, id: "new", createdAt: new Date().toISOString() }] }), [t.fromTankerId, t.toTankerId])
         const after = await tankerTransfers.create(t)
         audit({ action: "CREATED", ...meta.transfer(after), after })
         return after
@@ -1460,7 +1475,7 @@ export const api = {
         const before = await tankerTransfers.get(id)
         if (!before) return
         assertMonthEditable(before.date)
-        assertTankerStock(tankerRecords({ transfers: readCollection("tanker_transfers").filter((t) => t.id !== id) }))
+        assertTankerStock(tankerRecords({ transfers: readCollection("tanker_transfers").filter((t) => t.id !== id) }), [before.fromTankerId, before.toTankerId])
         await tankerTransfers.remove(id)
         audit({ action: "DELETED", ...meta.transfer(before), before, reason })
       }),
@@ -1483,7 +1498,7 @@ export const api = {
         if (!input.litres) throw new Error("Enter the litres to add (+) or remove (−)")
         if (input.date > todayISO()) throw new Error("An adjustment can't be dated in the future.")
         const a = { ...input, litres: round2(input.litres), reason: input.reason.trim() }
-        assertTankerStock(tankerRecords({ adjustments: [...readCollection("tanker_adjustments"), { ...a, id: "new", createdAt: new Date().toISOString() }] }))
+        assertTankerStock(tankerRecords({ adjustments: [...readCollection("tanker_adjustments"), { ...a, id: "new", createdAt: new Date().toISOString() }] }), [a.tankerId])
         const after = await tankerAdjustments.create(a)
         audit({ action: "CREATED", ...meta.adjustment(after), after, reason: a.reason })
         return after
@@ -1495,7 +1510,7 @@ export const api = {
         const before = await tankerAdjustments.get(id)
         if (!before) return
         assertMonthEditable(before.date)
-        assertTankerStock(tankerRecords({ adjustments: readCollection("tanker_adjustments").filter((a) => a.id !== id) }))
+        assertTankerStock(tankerRecords({ adjustments: readCollection("tanker_adjustments").filter((a) => a.id !== id) }), [before.tankerId])
         await tankerAdjustments.remove(id)
         audit({ action: "DELETED", ...meta.adjustment(before), before, reason })
       }),
