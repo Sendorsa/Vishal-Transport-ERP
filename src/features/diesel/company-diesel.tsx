@@ -2,7 +2,7 @@
 
 import { useDeferredValue, useMemo, useRef, useState } from "react"
 import Link from "next/link"
-import { Archive, ArchiveRestore, ArrowRightLeft, Bus, Droplet, Droplets, Fuel, Gauge, ImagePlus, IndianRupee, MoreVertical, Pencil, Plus, Route } from "lucide-react"
+import { Archive, ArchiveRestore, ArrowRightLeft, Bus, CalendarClock, Droplet, Droplets, Fuel, Gauge, ImagePlus, IndianRupee, MoreVertical, Pencil, Plus, Route } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -21,7 +21,7 @@ import { useCan } from "@/lib/app-state"
 import { formatINR, formatDate, formatNumber, todayISO } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { AddVehicleDialog } from "./add-vehicle-dialog"
-import { TransferVehicleDialog } from "./transfer-vehicle-dialog"
+import { EditAssignmentDialog, TransferVehicleDialog } from "./transfer-vehicle-dialog"
 import { activeVehicleIds, assignmentIndex, handoverFrom, vehicleMatches } from "@/domain/assignments"
 import { CompanyLogo, DieselBreadcrumb, MonthSelect, dieselHref, kpiExplain, readLogoFile, useDieselIndex, useDieselMonth, useDieselMonthOptions, MonthLockControl } from "./parts"
 
@@ -42,6 +42,7 @@ export function CompanyDiesel({ slug }: { slug: string }) {
   const archiveVehicle = useArchiveVehicle()
   const [showArchived, setShowArchived] = useState(false)
   const [transferring, setTransferring] = useState<Vehicle | null>(null)
+  const [editingAssignment, setEditingAssignment] = useState<Vehicle | null>(null)
   // This customer's vehicle search (same match as Customers → Vehicles); the page is keyed by customer, so it starts empty.
   const [q, setQ] = useState("")
   const query = useDeferredValue(q)
@@ -298,6 +299,11 @@ export function CompanyDiesel({ slug }: { slug: string }) {
                               <ArrowRightLeft /> Transfer Vehicle
                             </DropdownMenuItem>
                           )}
+                          {can("vehicles", "edit") && v.vehicle.assignedCustomerId === group.id && (
+                            <DropdownMenuItem onSelect={() => setEditingAssignment(v.vehicle)}>
+                              <CalendarClock /> Edit Assignment
+                            </DropdownMenuItem>
+                          )}
                           {can("vehicles", "delete") &&
                             (v.vehicle.status === "ARCHIVED" ? (
                               <DropdownMenuItem
@@ -357,6 +363,7 @@ export function CompanyDiesel({ slug }: { slug: string }) {
       {group.customer && <AddVehicleDialog open={adding} onOpenChange={setAdding} customer={group.customer} />}
       {group.customer && editingVehicle && <AddVehicleDialog key={editingVehicle.id} open vehicle={editingVehicle} customer={group.customer} onOpenChange={(o) => !o && setEditingVehicle(null)} />}
       {transferring && <TransferVehicleDialog vehicle={transferring} onOpenChange={(o) => !o && setTransferring(null)} />}
+      {group.customer && editingAssignment && <EditAssignmentDialog vehicle={editingAssignment} customer={group.customer} onOpenChange={(o) => !o && setEditingAssignment(null)} />}
       {archivingVehicle && (
         <FormModal
           open

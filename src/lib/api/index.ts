@@ -17,11 +17,11 @@ import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/st
 import { currentActor, currentRole } from "@/lib/identity"
 import { can, hasOwnerAuthority, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
-import { format, parseISO } from "date-fns"
-import { assignmentIndex, assignmentOn, inferAssignments, resolveCustomers, transferPeriods, type AssignmentPeriod } from "@/domain/assignments"
+import { addMonths, format, parseISO, subDays } from "date-fns"
+import { assignmentIndex, assignmentOn, inferAssignments, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type StartDateProblem } from "@/domain/assignments"
 import { formatDate, formatINR, formatNumber, round2, todayISO, formatLitres } from "@/lib/format"
 import { appendAuditEvent, appendAuditReviews, readAuditEvents, readAuditReviews, readCollection, readSettings, runInTransaction, writeCollection, writeSettings } from "@/lib/storage/local-store"
-import type { AdBlueEntry, AdBluePurchase, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, Invoice, NewEntity, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle } from "@/lib/types"
+import type { AdBlueEntry, AdBluePurchase, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, Invoice, NewEntity, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
 import { ensureSeeded, exportBackup, loadDemoData, loadEmptyWorkspace, parseBackup, restoreBackup, type BackupFile } from "./bootstrap"
 import { createLocalRepository, latency, newId, NotFoundError } from "./repository"
 import { ConflictError, pendingVersions, runWithVersions } from "@/lib/versions"
@@ -197,6 +197,28 @@ function assignedCustomer(vehicleId: string, date: string, customerId: string | 
 }
 
 const resolved = <E extends { vehicleId: string; customerId: string | null; date: string }>(list: E[]) => resolveCustomers(list, readCollection("vehicle_assignments"))
+
+/** Why an assignment's start date can't be corrected, in the Owner's words (see `startDateProblem`). */
+function startDateMessage(p: StartDateProblem, a: VehicleAssignment) {
+  const reg = regNo(a.vehicleId)
+  const who = (id: string | null) => (id ? customerName(id) : "no customer")
+  switch (p.kind) {
+    case "INVALID_DATE":
+      return "Enter the new start date."
+    case "UNCHANGED":
+      return `The assignment already starts on ${formatDate(a.startDate)}. Choose a different date.`
+    case "FUTURE":
+      return "The start date can't be in the future."
+    case "AFTER_END":
+      return `The start date can't be after the assignment's end date (${formatDate(p.endDate)}).`
+    case "OVERLAP":
+      return `${reg} is assigned to ${who(p.other.customerId)} from ${formatDate(p.other.startDate)} to ${p.other.endDate ? formatDate(p.other.endDate) : "today"}. An assignment can't overlap another one of the same vehicle — choose a start date after that.`
+    case "MOVES_ENTRY":
+      return `${reg} has a ${p.record} entry on ${formatDate(p.date)} reported under ${who(p.from)}. This start date would move it to ${who(p.to)}, and history never moves silently. Correct that entry first, or choose a start date that leaves it where it is.`
+    case "MOVES_TRIP":
+      return `${reg} has a trip on ${formatDate(p.date)} billed to ${who(p.customerId)}. This start date would change where that trip is shown. Correct that trip first, or choose a start date that leaves it where it is.`
+  }
+}
 
 /* ------------------------------------------------------------------ Permissions */
 
@@ -1112,8 +1134,55 @@ export const api = {
         return after
       }),
   },
-  /** GET /api/vehicle-assignments — read-only; changed only through vehicles.transfer. */
-  assignments: { list: assignments.list },
+  /** GET /api/vehicle-assignments; changed through vehicles.transfer, or a start date corrected (correctStartDate). */
+  assignments: {
+    list: assignments.list,
+    /**
+     * PUT /api/vehicle-assignments/:id/start-date — corrects a start date entered wrongly (e.g. 07-11-2026 typed for
+     * 01-11-2026). Not a transfer: the same assignment (id, customer, end date, status) gets the new start date.
+     * `vehicles:edit`; mandatory reason; every month whose days change must be open for the role. Refused when the
+     * date is invalid / in the future / after the end date, overlaps another assignment, or would move a diesel /
+     * AdBlue entry to another customer or show / hide a trip on a customer's page (`startDateProblem`). No entry, trip,
+     * invoice or payment is changed. Audited as UPDATED on the vehicle (the database's assignment trigger requires it).
+     */
+    correctStartDate: (id: string, input: { startDate: string; reason: string }) =>
+      tx(async () => {
+        assertCan("vehicles", "edit")
+        const before = await assignments.get(id)
+        if (!before) throw new NotFoundError("Vehicle assignment", id)
+        const reasonError = deletionReasonError(input.reason, "correcting")
+        if (reasonError) throw new Error(reasonError)
+        const startDate = input.startDate?.trim() ?? ""
+        const periods = readCollection("vehicle_assignments").filter((a) => a.vehicleId === before.vehicleId)
+        const records = {
+          entries: [...readCollection("diesel_entries").map((e) => ({ ...e, kind: "diesel" as const })), ...readCollection("adblue_entries").map((e) => ({ ...e, kind: "AdBlue" as const }))],
+          trips: readCollection("trips"),
+        }
+        const invalid = startDateProblem(periods, id, startDate, { entries: [], trips: [] }, todayISO())
+        if (invalid) throw new Error(startDateMessage(invalid, before))
+        // The Monthly Sheet Lock: every month whose days move in or out of the assignment.
+        const [from, to] = [startDate, before.startDate].sort()
+        const last = format(subDays(parseISO(to), 1), "yyyy-MM")
+        for (let m = from.slice(0, 7); m <= last; m = format(addMonths(parseISO(`${m}-01`), 1), "yyyy-MM")) assertMonthEditable(`${m}-01`)
+        if (startDate < before.startDate) assertCustomerOpen(before.customerId, startDate)
+        const problem = startDateProblem(periods, id, startDate, records, todayISO())
+        if (problem) throw new Error(startDateMessage(problem, before))
+        const after = await assignments.update(id, { startDate })
+        audit({
+          action: "UPDATED",
+          module: "Vehicles",
+          recordType: "Vehicle assignment",
+          recordId: before.vehicleId,
+          label: `${regNo(before.vehicleId)} · ${customerName(before.customerId)} · assignment start ${formatDate(before.startDate)} → ${formatDate(startDate)}`,
+          recordDate: from,
+          before,
+          after,
+          reason: input.reason.trim(),
+          note: `Start date corrected — same assignment (${before.id}); no entry, trip, invoice or payment changed.`,
+        })
+        return after
+      }),
+  },
   drivers: {
     list: drivers.list,
     get: drivers.get,

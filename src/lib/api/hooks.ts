@@ -228,6 +228,18 @@ export function useTransferVehicle() {
   })
 }
 
+/**
+ * Corrects an assignment's start date (same assignment, customer and history; audited with the reason). No toast on
+ * failure: the dialog shows the API's explanation (e.g. an entry the new date would move) next to the date.
+ */
+export function useCorrectAssignmentStart() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, startDate, reason, version }: { id: string; startDate: string; reason: string; version: string }) => v(id, version, () => api.assignments.correctStartDate(id, { startDate, reason })),
+    onSuccess: () => invalidate("vehicle_assignments", "vehicles", "diesel_entries", "adblue_entries"),
+  })
+}
+
 export function useArchiveVehicle() {
   const invalidate = useInvalidate()
   return useMutation({

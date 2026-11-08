@@ -313,6 +313,25 @@ async function main() {
   await assert.rejects(as(OWNER, () => api.diesel.create(vanFill(OFFICE, today, 1, 6000))), /Office's records already go below zero on 02-10-2026/)
   await db.exec(`set session_replication_role = replica; delete from fuel.diesel_entries where id = 'dsl_broken_office'; set session_replication_role = origin;`)
 
+  /* ---------------------------------------------------------------- 12b. Edit Assignment: start-date correction, audited in the same transaction */
+  const late = await as(OWNER, () => api.vehicles.create({ regNo: "TN70ZZ5151", companyCode: "VT", typeCode: "BUS_55", make: "", model: "", year: 0, seats: 55, fuelType: "DIESEL", mileageKmpl: 4.3, ownership: "OWNED", ownerName: null, status: "ACTIVE", odometerKm: 0, assignedCustomerId: minda.id, defaultDriverId: null, insurance: { provider: "", policyNo: "", validTill: "", premium: 0 }, roadTax: { validTill: "", amount: 0, period: "ANNUAL" }, fitnessValidTill: "", permitValidTill: "", emiAmount: 0, notes: "", assignedSince: today }))
+  const asgRow = async () => (await db.query<{ id: string; start_date: string; customer_id: string; end_date: string | null; status: string }>(`select id, to_char(start_date, 'YYYY-MM-DD') as start_date, customer_id, end_date, status from core.vehicle_assignments where vehicle_id = '${late.id}'`)).rows
+  const [lateAsg] = await asgRow()
+  assert.deepEqual([lateAsg.start_date, lateAsg.customer_id], [today, minda.id])
+  // Straight to the database without an audit event: refused by private.require_parent_audit_event at COMMIT.
+  await assert.rejects(sqlAs(OWNER, `update core.vehicle_assignments set start_date = '${day(1)}' where id = '${lateAsg.id}'`), /has no audit event in the same transaction/)
+  // A session without an ERP account changes nothing (RLS: the row isn't visible to update).
+  await sqlAs({ ...OWNER, userId: "00000000-0000-4000-8000-0000000000ff", profileId: "nobody" }, `update core.vehicle_assignments set start_date = '${day(1)}' where id = '${lateAsg.id}'`)
+  assert.equal((await asgRow())[0].start_date, today)
+  // Through the API: the same row, a new start date, and its UPDATED event in the same transaction.
+  await as(OWNER, () => api.assignments.correctStartDate(lateAsg.id, { startDate: day(1), reason: "Correction of incorrectly entered assignment start date" }), true, { [lateAsg.id]: (await read(OWNER, () => api.assignments.list())).find((a) => a.id === lateAsg.id)!.updatedAt })
+  assert.deepEqual(await asgRow(), [{ ...lateAsg, start_date: day(1) }], "same id, customer, end date and status")
+  const corr = (await db.query<{ action: string; reason: string; actor_role: string; same_tx: boolean }>(`select e.action, e.reason, e.actor_role, e.txid = (select xmin::text::bigint from core.vehicle_assignments where id = '${lateAsg.id}') as same_tx from audit.events e where e.record_id = '${late.id}' and e.record_type = 'Vehicle assignment' order by e.at desc limit 1`)).rows[0]
+  assert.deepEqual(corr, { action: "UPDATED", reason: "Correction of incorrectly entered assignment start date", actor_role: "OWNER", same_tx: true })
+  // A stale screen (someone corrected it meanwhile) is refused, nothing saved.
+  await assert.rejects(as(OWNER, () => api.assignments.correctStartDate(lateAsg.id, { startDate: day(2), reason: "Second correction" }), true, { [lateAsg.id]: "2000-01-01T00:00:00.000000+00:00" }), /Someone else changed this record/)
+  assert.equal((await asgRow())[0].start_date, day(1))
+
   /* ---------------------------------------------------------------- 13. the shared database is never reset from the app */
   for (const id of [DEV, OWNER, EMP]) {
     await assert.rejects(as(id, () => api.admin.clearAllData()), /isn't available on the shared database/)

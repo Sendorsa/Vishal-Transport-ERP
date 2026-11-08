@@ -36,12 +36,14 @@ export function DeletionReasonField({
   onChange: (v: string) => void
   onBlur?: () => void
   error?: string | null
-  /** The same mandatory reason serves deleting and restoring. */
-  purpose?: "deletion" | "restoration"
+  /** The same mandatory reason serves deleting, restoring and correcting (an assignment's start date). */
+  purpose?: "deletion" | "restoration" | "correction"
 }) {
+  const label = { deletion: "Reason for deletion", restoration: "Reason for restoring", correction: "Reason for correction" }[purpose]
+  const placeholder = { deletion: "Enter the reason for deleting this record…", restoration: "e.g. Deleted by mistake — restoring the original entry", correction: "e.g. Correction of incorrectly entered assignment start date" }[purpose]
   return (
-    <Field label={purpose === "deletion" ? "Reason for deletion" : "Reason for restoring"} required error={error ?? undefined} hint={`Required — kept in the audit log with this ${purpose}`}>
-      <Input value={value} onChange={(e) => onChange(e.target.value)} onBlur={onBlur} placeholder={purpose === "deletion" ? "Enter the reason for deleting this record…" : "e.g. Deleted by mistake — restoring the original entry"} maxLength={200} aria-required="true" aria-invalid={!!error} autoFocus />
+    <Field label={label} required error={error ?? undefined} hint={`Required — kept in the audit log with this ${purpose}`}>
+      <Input value={value} onChange={(e) => onChange(e.target.value)} onBlur={onBlur} placeholder={placeholder} maxLength={200} aria-required="true" aria-invalid={!!error} autoFocus={purpose !== "correction"} />
     </Field>
   )
 }
