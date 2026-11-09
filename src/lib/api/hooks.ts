@@ -219,23 +219,25 @@ export function useSetMonthLock() {
 }
 
 /** Transfer a vehicle to another customer from an effective date (earlier months stay as they were). */
-export function useTransferVehicle() {
+/** `toast: false` — the caller shows the API's explanation itself (the Transfer Vehicle dialog, next to the date). */
+export function useTransferVehicle({ toast = true }: { toast?: boolean } = {}) {
   const invalidate = useInvalidate()
   return useMutation({
     mutationFn: ({ id, customerId, effectiveDate, reason, version }: { id: string; customerId: string | null; effectiveDate: string; reason?: string; version?: string }) => v(id, version, () => api.vehicles.transfer(id, customerId, effectiveDate, reason)),
     onSuccess: () => invalidate("vehicles", "vehicle_assignments", "diesel_entries", "adblue_entries"),
-    onError,
+    onError: toast ? onError : undefined,
   })
 }
 
 /**
- * Corrects an assignment's start date (same assignment, customer and history; audited with the reason). No toast on
+ * Corrects an assignment's start date (same assignment, customer and history; audited with the reason) — and, for a
+ * transfer date, the previous assignment's end. `versions`: both assignments as the screen showed them. No toast on
  * failure: the dialog shows the API's explanation (e.g. an entry the new date would move) next to the date.
  */
 export function useCorrectAssignmentStart() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, startDate, reason, version }: { id: string; startDate: string; reason: string; version: string }) => v(id, version, () => api.assignments.correctStartDate(id, { startDate, reason })),
+    mutationFn: ({ id, startDate, reason, versions }: { id: string; startDate: string; reason: string; versions: Record<string, string> }) => withVersions(versions, () => api.assignments.correctStartDate(id, { startDate, reason })),
     onSuccess: () => invalidate("vehicle_assignments", "vehicles", "diesel_entries", "adblue_entries"),
   })
 }

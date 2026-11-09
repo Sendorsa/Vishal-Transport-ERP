@@ -19,7 +19,7 @@ export function periodOn<P extends Span>(history: P[], date: string): P | null {
   return history.find((p) => p.startDate <= date && (p.endDate === null || date <= p.endDate)) ?? null
 }
 
-const dayBefore = (date: string) => format(subDays(parseISO(date), 1), "yyyy-MM-dd")
+export const dayBefore = (date: string) => format(subDays(parseISO(date), 1), "yyyy-MM-dd")
 
 /**
  * Closes the open period the day before `date` and opens `next` from `date`. History is only

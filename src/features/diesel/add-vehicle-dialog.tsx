@@ -201,7 +201,7 @@ export function AddVehicleDialog({ open, onOpenChange, customer, vehicle }: { op
               placeholder="Select driver"
             />
           </Field>
-          <Field label="Customer">
+          <Field label="Customer" hint={vehicle ? "Changing it transfers the vehicle from today. To choose the day it started, use ⋮ → Transfer Vehicle." : undefined}>
             <SimpleSelect
               value={n.customerId}
               onChange={(v) => setN((cur) => ({ ...cur, customerId: v }))}

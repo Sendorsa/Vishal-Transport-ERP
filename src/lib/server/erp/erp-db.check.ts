@@ -332,6 +332,32 @@ async function main() {
   await assert.rejects(as(OWNER, () => api.assignments.correctStartDate(lateAsg.id, { startDate: day(2), reason: "Second correction" }), true, { [lateAsg.id]: "2000-01-01T00:00:00.000000+00:00" }), /Someone else changed this record/)
   assert.equal((await asgRow())[0].start_date, day(1))
 
+  /* ---------------------------------------------------------------- 12c. Back-dated transfer, then its date corrected: both assignments, one transaction */
+  const moving = await as(OWNER, () => api.vehicles.create({ regNo: "TN70ZZ5252", companyCode: "VT", typeCode: "BUS_55", make: "", model: "", year: 0, seats: 55, fuelType: "DIESEL", mileageKmpl: 4.3, ownership: "OWNED", ownerName: null, status: "ACTIVE", odometerKm: 0, assignedCustomerId: minda.id, defaultDriverId: null, insurance: { provider: "", policyNo: "", validTill: "", premium: 0 }, roadTax: { validTill: "", amount: 0, period: "ANNUAL" }, fitnessValidTill: "", permitValidTill: "", emiAmount: 0, notes: "", assignedSince: day(10) }))
+  type Asg = { id: string; customer_id: string; start_date: string; end_date: string | null; status: string; xmin: string }
+  const movingRows = async () => (await db.query<Asg>(`select id, customer_id, to_char(start_date, 'YYYY-MM-DD') as start_date, to_char(end_date, 'YYYY-MM-DD') as end_date, status, xmin::text as xmin from core.vehicle_assignments where vehicle_id = '${moving.id}' order by start_date`)).rows
+  const shape = (rows: Asg[]) => rows.map((r) => [r.customer_id, r.start_date, r.end_date, r.status])
+  const lastEvents = async (n: number) => (await db.query<{ action: string; reason: string; actor_role: string; txid: string }>(`select action, reason, actor_role, txid::text as txid from audit.events where record_id = '${moving.id}' and record_type = 'Vehicle assignment' order by at desc limit ${n}`)).rows
+  await assert.rejects(as(OWNER, () => api.vehicles.transfer(moving.id, tepl.id, day(3))), /Enter the reason for back-dating/)
+  await as(OWNER, () => api.vehicles.transfer(moving.id, tepl.id, day(3), "Started with TEPL; transfer entered late"))
+  const [mOld, mNew] = await movingRows()
+  assert.deepEqual(shape([mOld, mNew]), [[minda.id, day(10), day(4), "ENDED"], [tepl.id, day(3), null, "ACTIVE"]], "previous closed the day before, new one from the effective date")
+  const [tEv] = await lastEvents(1)
+  assert.deepEqual([tEv.action, tEv.reason, tEv.actor_role, tEv.txid === mOld.xmin && tEv.txid === mNew.xmin], ["TRANSFERRED", "Started with TEPL; transfer entered late", "OWNER", true], "both rows and the event in one transaction")
+  const versionsOf = async () => Object.fromEntries((await read(OWNER, () => api.assignments.list())).filter((a) => a.vehicleId === moving.id).map((a) => [a.id, a.updatedAt]))
+  // Earlier (Minda gives up days — written first, the no-overlap constraint is checked per statement), then later (TEPL gives them back).
+  for (const [start, prevEnd] of [[day(6), day(7)], [day(2), day(3)]]) {
+    await as(OWNER, () => api.assignments.correctStartDate(mNew.id, { startDate: start, reason: "Correction of incorrectly entered transfer date" }), true, await versionsOf())
+    const rows = await movingRows()
+    assert.deepEqual(shape(rows), [[minda.id, day(10), prevEnd, "ENDED"], [tepl.id, start, null, "ACTIVE"]], `transfer date corrected to ${start}`)
+    assert.deepEqual(rows.map((r) => r.id), [mOld.id, mNew.id], "the same two assignments")
+    const evs = await lastEvents(2)
+    assert.ok(evs.every((e) => e.action === "UPDATED" && e.reason === "Correction of incorrectly entered transfer date" && e.txid === rows[0].xmin && e.txid === rows[1].xmin), "one UPDATED event per assignment, in the same transaction")
+  }
+  // A stale previous assignment (someone changed it meanwhile) is refused, nothing saved.
+  await assert.rejects(as(OWNER, () => api.assignments.correctStartDate(mNew.id, { startDate: day(5), reason: "Stale" }), true, { ...(await versionsOf()), [mOld.id]: "2000-01-01T00:00:00.000000+00:00" }), /Someone else changed this record/)
+  assert.deepEqual(shape(await movingRows()), [[minda.id, day(10), day(3), "ENDED"], [tepl.id, day(2), null, "ACTIVE"]])
+
   /* ---------------------------------------------------------------- 13. the shared database is never reset from the app */
   for (const id of [DEV, OWNER, EMP]) {
     await assert.rejects(as(id, () => api.admin.clearAllData()), /isn't available on the shared database/)

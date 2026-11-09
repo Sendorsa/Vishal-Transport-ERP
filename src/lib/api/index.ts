@@ -9,7 +9,7 @@ import { calculateTripRevenue, fyLabel } from "@/domain/pricing"
 import { settlementIndex } from "@/domain/analytics"
 import { adBlueNeighbours } from "@/domain/adblue"
 import { odometerConflict } from "@/domain/diesel"
-import { statusOn, withStatus } from "@/domain/status-history"
+import { dayBefore, statusOn, withStatus } from "@/domain/status-history"
 import { canEditMonth } from "@/domain/month-lock"
 import { insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from "@/domain/adblue-inventory"
 import { availabilityMessage, fillAmount, fitsTanker, isStockPool, isTankerFill, normReg, shortfallMessage, tankerAvailability, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
@@ -17,8 +17,8 @@ import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/st
 import { currentActor, currentRole } from "@/lib/identity"
 import { can, hasOwnerAuthority, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
-import { addMonths, format, parseISO, subDays } from "date-fns"
-import { assignmentIndex, assignmentOn, inferAssignments, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type StartDateProblem } from "@/domain/assignments"
+import { addMonths, format, parseISO } from "date-fns"
+import { assignmentIndex, assignmentOn, correctedPeriods, handedOverBy, inferAssignments, isCalendarDate, movedRecords, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type AttributedRecords, type MovedRecord, type StartDateProblem } from "@/domain/assignments"
 import { formatDate, formatINR, formatNumber, round2, todayISO, formatLitres } from "@/lib/format"
 import { appendAuditEvent, appendAuditReviews, readAuditEvents, readAuditReviews, readCollection, readSettings, runInTransaction, writeCollection, writeSettings } from "@/lib/storage/local-store"
 import type { AdBlueEntry, AdBluePurchase, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, Invoice, NewEntity, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
@@ -198,10 +198,26 @@ function assignedCustomer(vehicleId: string, date: string, customerId: string | 
 
 const resolved = <E extends { vehicleId: string; customerId: string | null; date: string }>(list: E[]) => resolveCustomers(list, readCollection("vehicle_assignments"))
 
+const who = (id: string | null) => (id ? customerName(id) : "no customer")
+
+/** The records a dated assignment change must not move (`movedRecords`): every diesel / AdBlue entry and trip. */
+const attributedRecords = (): AttributedRecords => ({
+  entries: [...readCollection("diesel_entries").map((e) => ({ ...e, kind: "diesel" as const })), ...readCollection("adblue_entries").map((e) => ({ ...e, kind: "AdBlue" as const }))],
+  trips: readCollection("trips"),
+})
+
+/** A record a transfer or start-date correction would move, named exactly: vehicle, date, litres / trip number, customer. */
+function movedMessage(p: MovedRecord, reg: string, what: "start date" | "effective date") {
+  const an = what === "effective date" ? "an effective date" : "a start date"
+  const more = p.more ? ` ${p.more} more record${p.more === 1 ? "" : "s"} would move too.` : ""
+  if (p.kind === "MOVES_ENTRY")
+    return `${reg} has a ${p.record} entry on ${formatDate(p.date)}${p.litres ? ` (${formatLitres(p.litres)})` : ""} reported under ${who(p.from)}. This ${what} would move it to ${who(p.to)}, and history never moves silently. Correct that entry first, or choose ${an} that leaves it where it is.${more}`
+  return `${reg} has a trip${p.tripNo ? ` ${p.tripNo}` : ""} on ${formatDate(p.date)} billed to ${who(p.customerId)}. This ${what} would change where that trip is shown. Correct that trip first, or choose ${an} that leaves it where it is.${more}`
+}
+
 /** Why an assignment's start date can't be corrected, in the Owner's words (see `startDateProblem`). */
 function startDateMessage(p: StartDateProblem, a: VehicleAssignment) {
   const reg = regNo(a.vehicleId)
-  const who = (id: string | null) => (id ? customerName(id) : "no customer")
   switch (p.kind) {
     case "INVALID_DATE":
       return "Enter the new start date."
@@ -211,13 +227,18 @@ function startDateMessage(p: StartDateProblem, a: VehicleAssignment) {
       return "The start date can't be in the future."
     case "AFTER_END":
       return `The start date can't be after the assignment's end date (${formatDate(p.endDate)}).`
+    case "BEFORE_PREVIOUS":
+      return `${reg} was assigned to ${who(p.other.customerId)} from ${formatDate(p.other.startDate)} until this assignment began. The start date must be after ${formatDate(p.other.startDate)}, so that assignment keeps at least one day.`
     case "OVERLAP":
       return `${reg} is assigned to ${who(p.other.customerId)} from ${formatDate(p.other.startDate)} to ${p.other.endDate ? formatDate(p.other.endDate) : "today"}. An assignment can't overlap another one of the same vehicle — choose a start date after that.`
-    case "MOVES_ENTRY":
-      return `${reg} has a ${p.record} entry on ${formatDate(p.date)} reported under ${who(p.from)}. This start date would move it to ${who(p.to)}, and history never moves silently. Correct that entry first, or choose a start date that leaves it where it is.`
-    case "MOVES_TRIP":
-      return `${reg} has a trip on ${formatDate(p.date)} billed to ${who(p.customerId)}. This start date would change where that trip is shown. Correct that trip first, or choose a start date that leaves it where it is.`
+    default:
+      return movedMessage(p, reg, "start date")
   }
+}
+
+/** The Monthly Sheet Lock on every month from `from` to `to` (inclusive) — the days a dated assignment change re-files. */
+function assertMonthsEditable(from: string, to: string) {
+  for (let m = from.slice(0, 7); m <= to.slice(0, 7); m = format(addMonths(parseISO(`${m}-01`), 1), "yyyy-MM")) assertMonthEditable(`${m}-01`)
 }
 
 /* ------------------------------------------------------------------ Permissions */
@@ -574,35 +595,53 @@ async function updateCustomer(id: string, patch: Partial<NewEntity<Customer>>) {
 }
 
 /**
- * POST /api/vehicles/:id/transfer — ends the current assignment the day before `effectiveDate` and
- * starts one with `customerId`. Entries from that date on move to the new customer; earlier ones stay.
+ * POST /api/vehicles/:id/transfer — ends the current assignment the day before `effectiveDate` and starts one with
+ * `customerId`, atomically (one `tx`, one audit event). The effective date is the day the vehicle really started working
+ * for the new customer: today by default, or back-dated (a reason is then required) when the transfer is entered late.
+ * A back-dated transfer is refused when any diesel / AdBlue entry or trip already recorded would move to another
+ * customer (`movedRecords` — history never moves silently; the message names the record), and when any month from the
+ * effective date to today is locked for the role. The first assignment of a vehicle ("Assigned since") follows the same
+ * record check. Effective today, entries dated today follow the new customer (Vehicle Assignment History rule 6).
  */
 async function transferVehicle(id: string, customerId: string | null, effectiveDate: string, reason?: string) {
   assertCan("vehicles", "edit")
   ensureSeeded()
-  if (effectiveDate > todayISO()) throw new Error("Effective date can't be in the future.")
-  assertMonthEditable(effectiveDate) // a back-dated transfer re-files that month's entries
+  const today = todayISO()
+  if (!isCalendarDate(effectiveDate ?? "")) throw new Error("Enter the effective date.")
+  if (effectiveDate > today) throw new Error("Effective date can't be in the future.")
+  const stored = readCollection("vehicle_assignments").filter((a) => a.vehicleId === id)
+  const backdated = stored.length > 0 && effectiveDate < today
+  if (backdated) {
+    const reasonError = deletionReasonError(reason, "back-dating")
+    if (reasonError) throw new Error(reasonError)
+  }
+  assertMonthsEditable(effectiveDate, today) // a back-dated transfer re-files every day from the effective date
   assertCustomerOpen(customerId, effectiveDate)
   const before = readCollection("vehicles").find((v) => v.id === id)
-  // First assignment ("Assigned since", owner 3 Nov 2026): may be back-dated, but never silently re-files an entry
-  // already recorded under another customer — history doesn't move behind anyone's back.
-  if (!readCollection("vehicle_assignments").some((a) => a.vehicleId === id)) {
-    const moved = [...readCollection("diesel_entries"), ...readCollection("adblue_entries")].find((e) => e.vehicleId === id && e.date >= effectiveDate && e.customerId !== customerId)
-    if (moved) throw new Error(`${regNo(id)} has an entry on ${formatDate(moved.date)} recorded under ${customerName(moved.customerId)}. Assign it from after that date, or correct that entry first.`)
-  }
   const beforePeriods = periodsOf(id)
-  savePeriods(id, transferPeriods(beforePeriods, id, customerId, effectiveDate))
+  const afterPeriods = transferPeriods(beforePeriods, id, customerId, effectiveDate)
+  // A back-dated transfer (or a first assignment) never re-files a record already entered: it names the record instead.
+  // Effective today keeps the transfer's documented effect — today's entries follow the new customer.
+  // Reports resolve entries from the stored assignments only (none yet = the customer stamped on the entry).
+  // (A first assignment checks entries only, as since 3 Nov 2026.)
+  const records = attributedRecords()
+  const moved = backdated ? movedRecords(id, stored, afterPeriods, records) : !stored.length && movedRecords(id, stored, afterPeriods, { ...records, trips: [] })
+  if (moved) throw new Error(movedMessage(moved, regNo(id), "effective date"))
+  const previous = beforePeriods.at(-1)
+  savePeriods(id, afterPeriods)
+  const saved = periodsOf(id)
   const after = await vehicles.update(id, { assignedCustomerId: customerId })
   audit({
     action: "TRANSFERRED",
     module: "Vehicles",
     recordType: "Vehicle assignment",
     recordId: id,
-    label: `${after.regNo} · ${customerName(before?.assignedCustomerId ?? null)} → ${customerName(customerId)}`,
+    label: `${after.regNo} · ${customerName(before?.assignedCustomerId ?? null)} → ${customerName(customerId)} · from ${formatDate(effectiveDate)}`,
     recordDate: effectiveDate,
-    before: { assignedCustomerId: before?.assignedCustomerId ?? null, assignmentPeriods: beforePeriods },
-    after: { assignedCustomerId: customerId, effectiveDate, assignmentPeriods: periodsOf(id) },
-    reason,
+    before: { assignedCustomerId: before?.assignedCustomerId ?? null, previousAssignment: previous ?? null, assignmentPeriods: beforePeriods },
+    after: { assignedCustomerId: customerId, effectiveDate, previousAssignment: previous ? (saved.at(-2) ?? null) : null, newAssignment: saved.at(-1) ?? null, assignmentPeriods: saved },
+    reason: reason?.trim() || undefined,
+    note: backdated ? `Back-dated transfer: effective ${formatDate(effectiveDate)}, recorded ${formatDate(today)}.` : undefined,
   })
   return after
 }
@@ -1139,11 +1178,14 @@ export const api = {
     list: assignments.list,
     /**
      * PUT /api/vehicle-assignments/:id/start-date — corrects a start date entered wrongly (e.g. 07-11-2026 typed for
-     * 01-11-2026). Not a transfer: the same assignment (id, customer, end date, status) gets the new start date.
-     * `vehicles:edit`; mandatory reason; every month whose days change must be open for the role. Refused when the
-     * date is invalid / in the future / after the end date, overlaps another assignment, or would move a diesel /
-     * AdBlue entry to another customer or show / hide a trip on a customer's page (`startDateProblem`). No entry, trip,
-     * invoice or payment is changed. Audited as UPDATED on the vehicle (the database's assignment trigger requires it).
+     * 01-11-2026, or a transfer saved on the day it was entered instead of the day the vehicle started). Not a new
+     * transfer: the same assignment (id, customer, end date, status) gets the new start date, and when a transfer began
+     * it, the previous assignment's end date moves with it (the day before) — both in one transaction, so the timeline
+     * never overlaps or gains a gap. `vehicles:edit`; mandatory reason; every month whose days change must be open for
+     * the role. Refused when the date is invalid / in the future / after the end date, leaves the previous assignment no
+     * day, overlaps another assignment, or would move a diesel / AdBlue entry or trip (`startDateProblem`). No entry,
+     * trip, invoice or payment is changed. Audited as UPDATED on the vehicle, one event per assignment changed (the
+     * database's assignment trigger requires it).
      */
     correctStartDate: (id: string, input: { startDate: string; reason: string }) =>
       tx(async () => {
@@ -1154,32 +1196,49 @@ export const api = {
         if (reasonError) throw new Error(reasonError)
         const startDate = input.startDate?.trim() ?? ""
         const periods = readCollection("vehicle_assignments").filter((a) => a.vehicleId === before.vehicleId)
-        const records = {
-          entries: [...readCollection("diesel_entries").map((e) => ({ ...e, kind: "diesel" as const })), ...readCollection("adblue_entries").map((e) => ({ ...e, kind: "AdBlue" as const }))],
-          trips: readCollection("trips"),
-        }
         const invalid = startDateProblem(periods, id, startDate, { entries: [], trips: [] }, todayISO())
         if (invalid) throw new Error(startDateMessage(invalid, before))
         // The Monthly Sheet Lock: every month whose days move in or out of the assignment.
         const [from, to] = [startDate, before.startDate].sort()
-        const last = format(subDays(parseISO(to), 1), "yyyy-MM")
-        for (let m = from.slice(0, 7); m <= last; m = format(addMonths(parseISO(`${m}-01`), 1), "yyyy-MM")) assertMonthEditable(`${m}-01`)
+        assertMonthsEditable(from, dayBefore(to))
         if (startDate < before.startDate) assertCustomerOpen(before.customerId, startDate)
-        const problem = startDateProblem(periods, id, startDate, records, todayISO())
+        const problem = startDateProblem(periods, id, startDate, attributedRecords(), todayISO())
         if (problem) throw new Error(startDateMessage(problem, before))
+        const handedOver = handedOverBy(periods, before)
         const after = await assignments.update(id, { startDate })
+        const reason = input.reason.trim()
+        const label = (a: VehicleAssignment) => `${regNo(a.vehicleId)} · ${customerName(a.customerId)}`
         audit({
           action: "UPDATED",
           module: "Vehicles",
           recordType: "Vehicle assignment",
           recordId: before.vehicleId,
-          label: `${regNo(before.vehicleId)} · ${customerName(before.customerId)} · assignment start ${formatDate(before.startDate)} → ${formatDate(startDate)}`,
+          label: `${label(before)} · assignment start ${formatDate(before.startDate)} → ${formatDate(startDate)}`,
           recordDate: from,
           before,
           after,
-          reason: input.reason.trim(),
-          note: `Start date corrected — same assignment (${before.id}); no entry, trip, invoice or payment changed.`,
+          reason,
+          note: `Start date corrected — same assignment (${before.id})${handedOver ? `; the previous assignment (${handedOver.id}, ${customerName(handedOver.customerId)}) now ends ${formatDate(dayBefore(startDate))}` : ""}; no entry, trip, invoice or payment changed.`,
         })
+        if (handedOver) {
+          const endDate = correctedPeriods(periods, id, startDate).find((p) => p.id === handedOver.id)!.endDate
+          const prevAfter = await assignments.update(handedOver.id, { endDate })
+          audit({
+            action: "UPDATED",
+            module: "Vehicles",
+            recordType: "Vehicle assignment",
+            recordId: before.vehicleId,
+            label: `${label(handedOver)} · assignment end ${formatDate(handedOver.endDate!)} → ${formatDate(endDate!)}`,
+            recordDate: from,
+            before: handedOver,
+            after: prevAfter,
+            reason,
+            note: `Transfer date corrected — ${customerName(before.customerId)}'s assignment (${before.id}) now starts ${formatDate(startDate)}; the same two assignments, no entry, trip, invoice or payment changed.`,
+          })
+          // The database checks the no-overlap rule per statement: the assignment that gives up days is written first.
+          const order = startDate < before.startDate ? [prevAfter, after] : [after, prevAfter]
+          writeCollection("vehicle_assignments", [...readCollection("vehicle_assignments").filter((a) => a.id !== id && a.id !== handedOver.id), ...order])
+        }
         return after
       }),
   },

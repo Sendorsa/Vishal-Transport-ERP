@@ -36,14 +36,20 @@ export function DeletionReasonField({
   onChange: (v: string) => void
   onBlur?: () => void
   error?: string | null
-  /** The same mandatory reason serves deleting, restoring and correcting (an assignment's start date). */
-  purpose?: "deletion" | "restoration" | "correction"
+  /** The same mandatory reason serves deleting, restoring, correcting (an assignment's start date) and back-dating a transfer. */
+  purpose?: "deletion" | "restoration" | "correction" | "back-dating"
 }) {
-  const label = { deletion: "Reason for deletion", restoration: "Reason for restoring", correction: "Reason for correction" }[purpose]
-  const placeholder = { deletion: "Enter the reason for deleting this record…", restoration: "e.g. Deleted by mistake — restoring the original entry", correction: "e.g. Correction of incorrectly entered assignment start date" }[purpose]
+  const label = { deletion: "Reason for deletion", restoration: "Reason for restoring", correction: "Reason for correction", "back-dating": "Reason for back-dating" }[purpose]
+  const placeholder = {
+    deletion: "Enter the reason for deleting this record…",
+    restoration: "e.g. Deleted by mistake — restoring the original entry",
+    correction: "e.g. Correction of incorrectly entered assignment start date",
+    "back-dating": "e.g. Vehicle started working for the new customer on this date; transfer entered late",
+  }[purpose]
+  const what = purpose === "back-dating" ? "transfer" : purpose
   return (
-    <Field label={label} required error={error ?? undefined} hint={`Required — kept in the audit log with this ${purpose}`}>
-      <Input value={value} onChange={(e) => onChange(e.target.value)} onBlur={onBlur} placeholder={placeholder} maxLength={200} aria-required="true" aria-invalid={!!error} autoFocus={purpose !== "correction"} />
+    <Field label={label} required error={error ?? undefined} hint={`Required — kept in the audit log with this ${what}`}>
+      <Input value={value} onChange={(e) => onChange(e.target.value)} onBlur={onBlur} placeholder={placeholder} maxLength={200} aria-required="true" aria-invalid={!!error} autoFocus={purpose === "deletion" || purpose === "restoration"} />
     </Field>
   )
 }

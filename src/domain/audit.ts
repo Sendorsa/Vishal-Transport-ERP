@@ -89,7 +89,7 @@ export function buildEvent(input: AuditInput, actor: AuditActor, id: string, at:
 export const DELETION_REASON_MIN = 3
 
 /** Why a deletion reason is invalid (null when it's fine). Trimmed; empty or whitespace-only is refused. */
-export function deletionReasonError(reason: string | null | undefined, purpose: "deleting" | "restoring" | "adjusting stock" | "correcting" = "deleting") {
+export function deletionReasonError(reason: string | null | undefined, purpose: "deleting" | "restoring" | "adjusting stock" | "correcting" | "back-dating" = "deleting") {
   const r = reason?.trim() ?? ""
   if (!r) return purpose === "adjusting stock" ? "Enter the reason for adjusting stock." : `Enter the reason for ${purpose} this record.`
   if (r.length < DELETION_REASON_MIN) return `The reason must be at least ${DELETION_REASON_MIN} characters.`

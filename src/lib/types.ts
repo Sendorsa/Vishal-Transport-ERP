@@ -482,7 +482,8 @@ export interface AdBluePurchase extends BaseEntity {
  * Which customer a vehicle works for, and when. The vehicle is the permanent asset; this is
  * the temporary assignment. Periods are never rewritten — a transfer ends one and starts the
  * next; the one exception is correcting a wrongly entered start date (api.assignments.correctStartDate:
- * same assignment and customer, audited with a reason, refused if any record would move). Entries are reported under the customer assigned on their date (src/domain/assignments.ts).
+ * same assignment and customer — and, for a transfer date, the previous assignment ends the day before — audited with
+ * a reason, refused if any record would move). Entries are reported under the customer assigned on their date (src/domain/assignments.ts).
  */
 export interface VehicleAssignment extends BaseEntity {
   vehicleId: string

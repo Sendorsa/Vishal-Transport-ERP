@@ -9,7 +9,7 @@
  * Periods use the shared Span helpers (src/domain/status-history.ts).
  */
 import type { Vehicle, VehicleAssignment } from "@/lib/types"
-import { appendPeriod, periodOn } from "./status-history"
+import { appendPeriod, dayBefore, periodOn } from "./status-history"
 import { matchesSearch } from "@/lib/utils"
 
 export type AssignmentPeriod = Pick<VehicleAssignment, "vehicleId" | "customerId" | "startDate" | "endDate" | "status">
@@ -160,18 +160,23 @@ export function customerVehicles(customerId: string, assignments: AssignmentPeri
   })
 }
 
-/* ------------------------------------------------------------------ correcting a start date */
+/* ------------------------------------------------------------------ dated transfers and start-date corrections */
 
 /** An assignment as stored (with its id), for the start-date correction. */
 type StoredPeriod = AssignmentPeriod & { id: string }
 
-/** What a start-date correction must never move: entries reported by assignment, and trips shown by assignment. */
+/** What a transfer or a start-date correction must never move: entries reported by assignment, and trips shown by assignment. */
 export interface AttributedRecords {
   /** Diesel and AdBlue entries: reported under the customer assigned on their date (`resolveCustomers`). */
-  entries: (Dated & { kind: "diesel" | "AdBlue" })[]
+  entries: (Dated & { kind: "diesel" | "AdBlue"; litres?: number })[]
   /** Trips keep their own customer; the Diesel customer page lists one only while no other customer's assignment covers it. */
-  trips: Dated[]
+  trips: (Dated & { tripNo?: string })[]
 }
+
+/** The first record a timeline change would move (oldest first), and how many more it would. */
+export type MovedRecord =
+  | { kind: "MOVES_ENTRY"; record: "diesel" | "AdBlue"; date: string; litres?: number; from: string | null; to: string | null; more: number }
+  | { kind: "MOVES_TRIP"; date: string; tripNo?: string; customerId: string | null; more: number }
 
 /** Why the correction can't be made — the first problem, with what's needed to explain it. */
 export type StartDateProblem =
@@ -179,23 +184,60 @@ export type StartDateProblem =
   | { kind: "UNCHANGED" }
   | { kind: "FUTURE" }
   | { kind: "AFTER_END"; endDate: string }
+  | { kind: "BEFORE_PREVIOUS"; other: StoredPeriod }
   | { kind: "OVERLAP"; other: StoredPeriod }
-  | { kind: "MOVES_ENTRY"; record: "diesel" | "AdBlue"; date: string; from: string | null; to: string | null }
-  | { kind: "MOVES_TRIP"; date: string; customerId: string | null }
+  | MovedRecord
 
 /** A real yyyy-MM-dd date (not 2026-02-30 or 2026-13-01). */
-const isCalendarDate = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(Date.parse(d)) && new Date(d).toISOString().slice(0, 10) === d
-/** `[a, b)` on ISO dates; the days whose assignment the correction changes. */
-const between = (date: string, a: string, b: string) => date >= a && date < b
+export const isCalendarDate = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(Date.parse(d)) && new Date(d).toISOString().slice(0, 10) === d
 const overlaps = (a: { startDate: string; endDate: string | null }, b: { startDate: string; endDate: string | null }) =>
   a.startDate <= (b.endDate ?? "9999-12-31") && b.startDate <= (a.endDate ?? "9999-12-31")
 
 /**
- * Correcting the start date of one assignment (a data-entry fix — same id, customer, end date and status; never a
- * transfer). `periods`: that vehicle's assignments. Refused when the new date is invalid, in the future or after the
- * end date; when it would overlap another assignment of the vehicle (the rule the database enforces today); or when
- * any diesel / AdBlue entry would be reported under a different customer, or a trip shown or hidden on a customer's
- * Diesel page. History never moves silently: the user corrects the record first, or picks another date.
+ * The one check behind every dated assignment change (transfer, back-dated transfer, start-date correction): a diesel /
+ * AdBlue entry whose reported customer differs between the vehicle's `before` and `after` periods, or a trip shown /
+ * hidden on a customer's Diesel page. History never moves silently — the caller refuses and names the record.
+ */
+export function movedRecords(vehicleId: string, before: AssignmentPeriod[], after: AssignmentPeriod[], records: AttributedRecords): MovedRecord | null {
+  const [was, now] = [assignmentIndex(before), assignmentIndex(after)]
+  const customerOn = (idx: typeof was, e: Dated) => assignmentOn(idx, vehicleId, e.date)?.customerId ?? e.customerId
+  const listed = (idx: typeof was, t: Dated) => {
+    const a = assignmentOn(idx, vehicleId, t.date)
+    return !a || a.customerId === t.customerId
+  }
+  const byDate = (a: Dated, b: Dated) => a.date.localeCompare(b.date)
+  const moved: MovedRecord[] = [
+    ...records.entries
+      .filter((e) => e.vehicleId === vehicleId && customerOn(was, e) !== customerOn(now, e))
+      .sort(byDate)
+      .map((e): MovedRecord => ({ kind: "MOVES_ENTRY", record: e.kind, date: e.date, litres: e.litres, from: customerOn(was, e), to: customerOn(now, e), more: 0 })),
+    ...records.trips
+      .filter((t) => t.vehicleId === vehicleId && listed(was, t) !== listed(now, t))
+      .sort(byDate)
+      .map((t): MovedRecord => ({ kind: "MOVES_TRIP", date: t.date, tripNo: t.tripNo, customerId: t.customerId, more: 0 })),
+  ]
+  return moved[0] ? { ...moved[0], more: moved.length - 1 } : null
+}
+
+/** The assignment that ended the day before `target` started — the one closed by the transfer that began `target`. */
+export const handedOverBy = <P extends StoredPeriod>(periods: P[], target: P) => periods.find((p) => p.id !== target.id && p.endDate === dayBefore(target.startDate))
+
+/**
+ * The vehicle's periods with assignment `id` starting on `startDate`. When a transfer began it (the previous assignment
+ * ended the day before), that previous assignment now ends the day before the new date: a corrected transfer date moves
+ * both sides together, so the timeline stays continuous and never overlaps.
+ */
+export function correctedPeriods<P extends StoredPeriod>(periods: P[], id: string, startDate: string): P[] {
+  const prev = handedOverBy(periods, periods.find((p) => p.id === id)!)
+  return periods.map((p) => (p.id === id ? { ...p, startDate } : p.id === prev?.id ? { ...p, endDate: dayBefore(startDate) } : p))
+}
+
+/**
+ * Correcting the start date of one assignment (a data-entry fix — same id, customer, end date and status). `periods`:
+ * that vehicle's assignments. When a transfer began the assignment, the previous one's end date moves with it
+ * (`correctedPeriods`). Refused when the new date is invalid, in the future or after the end date; when it would leave
+ * the previous assignment no day; when it would overlap another assignment of the vehicle (the rule the database
+ * enforces today); or when any record would move (`movedRecords`). The user corrects the record first, or picks another date.
  *
  * ponytail: overlap is per vehicle, as the database's exclusion constraint is now; the shared-vehicle model would
  * narrow it to the same customer (`other.customerId === target.customerId`) together with that constraint.
@@ -206,26 +248,11 @@ export function startDateProblem(periods: StoredPeriod[], id: string, startDate:
   if (startDate === target.startDate) return { kind: "UNCHANGED" }
   if (startDate > todayIso) return { kind: "FUTURE" }
   if (target.endDate && startDate > target.endDate) return { kind: "AFTER_END", endDate: target.endDate }
-  const next = { ...target, startDate }
-  const other = periods.find((p) => p.id !== id && overlaps(p, next))
+  const prev = handedOverBy(periods, target)
+  if (prev && startDate <= prev.startDate) return { kind: "BEFORE_PREVIOUS", other: prev }
+  const after = correctedPeriods(periods, id, startDate)
+  const next = after.find((p) => p.id === id)!
+  const other = after.find((p) => p.id !== id && overlaps(p, next))
   if (other) return { kind: "OVERLAP", other }
-  const after = periods.map((p) => (p.id === id ? next : p))
-  const [from, to] = [startDate, target.startDate].sort()
-  const before = assignmentIndex(periods)
-  const changed = assignmentIndex(after)
-  const customerOn = (idx: typeof before, e: Dated) => assignmentOn(idx, e.vehicleId, e.date)?.customerId ?? e.customerId
-  for (const e of [...records.entries].sort((a, b) => a.date.localeCompare(b.date))) {
-    if (e.vehicleId !== target.vehicleId || !between(e.date, from, to)) continue
-    const [was, now] = [customerOn(before, e), customerOn(changed, e)]
-    if (was !== now) return { kind: "MOVES_ENTRY", record: e.kind, date: e.date, from: was, to: now }
-  }
-  const listed = (idx: typeof before, t: Dated) => {
-    const a = assignmentOn(idx, t.vehicleId, t.date)
-    return !a || a.customerId === t.customerId
-  }
-  for (const t of [...records.trips].sort((a, b) => a.date.localeCompare(b.date))) {
-    if (t.vehicleId !== target.vehicleId || !between(t.date, from, to)) continue
-    if (listed(before, t) !== listed(changed, t)) return { kind: "MOVES_TRIP", date: t.date, customerId: t.customerId }
-  }
-  return null
+  return movedRecords(target.vehicleId, periods, after, records)
 }

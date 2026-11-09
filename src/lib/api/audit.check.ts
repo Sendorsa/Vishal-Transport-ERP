@@ -108,7 +108,7 @@ async function main() {
   await api.vehicles.transfer(vehicle.id, customers[0].id, today, "Moved to new contract")
   ev = (await log())[0]
   assert.deepEqual([ev.action, ev.recordType, ev.reason], ["TRANSFERRED", "Vehicle assignment", "Moved to new contract"])
-  assert.deepEqual(ev.changes.map((c) => c.field).sort(), ["assignedCustomerId", "effectiveDate"])
+  assert.deepEqual(ev.changes.map((c) => c.field).sort(), ["assignedCustomerId", "effectiveDate", "newAssignment", "previousAssignment"]) // both sides of the handover
 
   // 10. Delete keeps history: tanker load added then deleted; inventory returns to where it was.
   const stock = async () => valueTankers(await tankerRecordsOf()).stock.get(TK)?.litres ?? 0
