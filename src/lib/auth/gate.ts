@@ -3,17 +3,38 @@
  * pre-created account is ACTIVE. One pure function so the proxy's decisions are testable (gate.check.ts).
  * `src/proxy.ts` applies it to every page request before anything renders.
  */
+import type { Role } from "@/lib/types"
+
 export type AccountStatus = "INVITED" | "ACTIVE" | "DISABLED"
 
 export interface AuthState {
   configured: boolean // Supabase URL and publishable key are set
   signedIn: boolean // a verified Supabase session (getClaims)
   status: AccountStatus | null // the caller's ERP account, null when there is none
+  role?: Role | null // that account's role (the AdBlue profiles see only AdBlue and Diesel)
 }
 
 export type GateResult = { action: "allow" } | { action: "redirect"; to: string }
 
 export const LANDING = "/fuel-stations"
+/** Where an AdBlue profile (Tata Adblue, Adblue) opens the ERP — and where any page it may not open sends it. */
+export const PROFILE_LANDING = "/adblue"
+export const landingFor = (role: Role | null | undefined) => (role === "TATA_ADBLUE" || role === "ADBLUE" ? PROFILE_LANDING : LANDING)
+
+/**
+ * The pages an AdBlue profile may open (owner, 11 Nov 2026): AdBlue, and Diesel → customer → month → vehicle. Never the
+ * Diesel ledger or any other module; the Monthly / Quarterly / Yearly Masters for Adblue only. A positive list: any
+ * other path (and any other role here) is refused. /api/* is not a page: the API enforces its own method list.
+ */
+export function profilePageAllowed(role: Role, pathname: string) {
+  if (pathname === "/adblue" || pathname === "/diesel") return true
+  const parts = pathname.split("/").filter(Boolean)
+  if (parts[0] !== "diesel" || parts.length > 4) return false
+  if (parts[1] === "ledger") return false
+  if (["monthly-master", "quarterly-master", "yearly-master"].includes(parts[1])) return role === "ADBLUE" && parts.length === 2
+  return true
+}
+
 export const COOKIE_NEXT = "erp_next" // where to return after Google sign-in (short-lived, set by the login page)
 
 /**
@@ -66,7 +87,12 @@ export function gate(path: string, s: AuthState): GateResult {
     return { action: "redirect", to: next && next !== LANDING ? `/login?next=${encodeURIComponent(next)}` : "/login" }
   }
   if (s.status !== "ACTIVE") return onLogin ? { action: "allow" } : { action: "redirect", to: "/login" } // the login page explains why
-  if (onLogin) return { action: "redirect", to: safeNext(url.searchParams.get("next")) }
-  if (url.pathname === "/") return { action: "redirect", to: LANDING }
+  const home = landingFor(s.role)
+  if (onLogin) {
+    const next = safeNext(url.searchParams.get("next"))
+    return { action: "redirect", to: next === LANDING ? home : next }
+  }
+  if (url.pathname === "/") return { action: "redirect", to: home }
+  if ((s.role === "TATA_ADBLUE" || s.role === "ADBLUE") && !url.pathname.startsWith("/api/") && !profilePageAllowed(s.role, url.pathname)) return { action: "redirect", to: home }
   return { action: "allow" }
 }

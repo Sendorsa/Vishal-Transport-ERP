@@ -5,7 +5,7 @@
  * connection), so supabase-js never needs types for them. Once a project is linked, regenerate with:
  *   npx supabase gen types typescript --linked --schema public > src/lib/supabase/database.types.ts
  */
-export type ErpRole = "OWNER" | "DEV" | "EMPLOYEE" // 20261101000000_erp_roles_three.sql
+export type ErpRole = "OWNER" | "DEV" | "EMPLOYEE" | "TATA_ADBLUE" | "ADBLUE" // 20261101000000_erp_roles_three.sql, 20261111000100_erp_roles_adblue.sql
 export type AccountStatus = "INVITED" | "ACTIVE" | "DISABLED"
 
 export type Database = {
@@ -48,6 +48,9 @@ export type Database = {
       set_account_role: { Args: { p_id: string; p_role: ErpRole; p_reason: string }; Returns: undefined }
       set_account_status: { Args: { p_id: string; p_status: AccountStatus; p_reason: string }; Returns: undefined }
       relink_account: { Args: { p_id: string; p_new_email: string; p_reason: string }; Returns: undefined }
+      // Tata Adblue's customers (20261111000200_adblue_profiles.sql), Dev only.
+      set_customer_access: { Args: { p_profile_id: string; p_customer_ids: string[]; p_reason: string }; Returns: undefined }
+      list_customer_access: { Args: Record<PropertyKey, never>; Returns: { profile_id: string; customer_id: string; granted_at: string }[] }
     }
     Enums: { erp_role: ErpRole; account_status: AccountStatus }
     CompositeTypes: { [_ in never]: never }

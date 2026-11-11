@@ -10,8 +10,8 @@ import { ReasonField } from "@/components/shared/audit"
 import { Field } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { useAdBlueEntries, useAdBluePurchases, useSaveAdBlue } from "@/lib/api/hooks"
-import { insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from "@/domain/adblue-inventory"
+import { useAdBlueEntries, useAdBluePurchases, useAdBlueStockDraws, useSaveAdBlue } from "@/lib/api/hooks"
+import { insufficientMessage, isDirectAdBlue, valueInventory } from "@/domain/adblue-inventory"
 import { adBlueNeighbours } from "@/domain/adblue"
 import { formatDate, formatINR, formatNumber, toISODate, todayISO } from "@/lib/format"
 import type { AdBlueEntry, Customer, PaymentMode, Vehicle } from "@/lib/types"
@@ -42,6 +42,7 @@ export function AddAdBlueDialog({
 }) {
   const entries = useAdBlueEntries()
   const purchases = useAdBluePurchases()
+  const stock = useAdBlueStockDraws() // every draw on the shared stock — also those of customers this account isn't shown
   const save = useSaveAdBlue()
   const today = todayISO()
   const monthEnd = toISODate(endOfMonth(parseISO(`${month}-01`)))
@@ -61,7 +62,7 @@ export function AddAdBlueDialog({
   // From stock: the draw is checked against stock and costed at the weighted-average rate.
   // Direct: litres × the vendor's rate; never checked against or taken from bulk stock.
   const direct = f.source === "DIRECT"
-  const others = stockDraws((entries.data ?? []).filter((e) => e.id !== entry?.id))
+  const others = (stock.data ?? []).filter((e) => e.id !== entry?.id)
   const draft = { id: entry?.id ?? "draft", date: f.date, createdAt: entry?.createdAt ?? new Date().toISOString(), quantityLitres: qty > 0 ? qty : 0 }
   const before = valueInventory(purchases.data ?? [], others)
   const after = valueInventory(purchases.data ?? [], direct ? others : [...others, draft])

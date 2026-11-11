@@ -14,7 +14,7 @@ import { FormModal } from "@/components/shared/form-modal"
 import { Field, NoAccess, PageSkeleton } from "@/components/shared/misc"
 import { PageHeader } from "@/components/shared/page-header"
 import { AdBlueOpeningDialog } from "@/features/go-live/opening-dialogs"
-import { hasOwnerAuthority } from "@/lib/permissions"
+import { canChangeAdBluePurchases, hasOwnerAuthority } from "@/lib/permissions"
 import { StatsCard } from "@/components/shared/stats-card"
 import { inventoryLedger, isDirectAdBlue, purchasedIn, stockDraws, stockFor, valueInventory, vendorAnalytics } from "@/domain/adblue-inventory"
 import { SimpleSelect } from "@/components/shared/simple-select"
@@ -22,7 +22,7 @@ import { AddAdBlueDialog } from "../diesel/add-adblue-dialog"
 import { monthLabel } from "@/domain/diesel"
 import { canEditMonth } from "@/domain/month-lock"
 import { inEntryOrder } from "@/domain/payment-order"
-import { useAdBlueEntries, useAdBluePurchases, useDeleteAdBluePurchase, useMonthLocks, useSaveAdBluePurchase } from "@/lib/api/hooks"
+import { useAdBlueEntries, useAdBluePurchases, useAdBlueStockDraws, useDeleteAdBluePurchase, useMonthLocks, useSaveAdBluePurchase } from "@/lib/api/hooks"
 import { useCan, useRole } from "@/lib/app-state"
 import { formatDate, formatINR, formatNumber, monthKey, todayISO, formatLitres } from "@/lib/format"
 import type { AdBluePurchase, Vehicle } from "@/lib/types"
@@ -48,6 +48,7 @@ export function AdBlueInventory() {
   const month = period.mode === "month" ? period.periodMonths?.[0] : undefined
   const purchases = useAdBluePurchases()
   const entries = useAdBlueEntries()
+  const stockData = useAdBlueStockDraws() // every draw on the shared stock, for the stock figures
   const locks = useMonthLocks()
   const del = useDeleteAdBluePurchase()
   const [editing, setEditing] = useState<{ purchase?: AdBluePurchase } | null>(null)
@@ -56,15 +57,15 @@ export function AdBlueInventory() {
   const [openingOpen, setOpeningOpen] = useState(false)
 
   const d = useMemo(() => {
-    if (!purchases.data || !entries.data) return null
-    const draws = stockDraws(entries.data)
+    if (!purchases.data || !entries.data || !stockData.data) return null
+    const draws = stockData.data
     const v = valueInventory(purchases.data, draws)
     const ledger = inventoryLedger(purchases.data, draws, monthKey(todayISO()))
     // Purchased − Consumed = Current Stock is asserted in npm run check:diesel — an internal check, never shown to users.
     return { v, ledger, draws, directs: inEntryOrder(entries.data.filter(isDirectAdBlue)), vendors: vendorAnalytics(purchases.data), history: inEntryOrder(purchases.data) }
-  }, [purchases.data, entries.data])
+  }, [purchases.data, entries.data, stockData.data])
 
-  if (!can("diesel")) return <NoAccess what="AdBlue inventory" />
+  if (!can("adblue")) return <NoAccess what="AdBlue inventory" />
   if (!d) return <PageSkeleton />
   const m = stockFor(d.ledger, period.periodMonths)
   // Money spent buying AdBlue in the period — only batches dated in it, never carry-forward or stock value.
@@ -78,11 +79,15 @@ export function AdBlueInventory() {
   const directInPeriod = d.directs.filter(period.match)
   const directCost = directInPeriod.reduce((t, e) => t + e.amount, 0)
   const directLitres = directInPeriod.reduce((t, e) => t + e.quantityLitres, 0)
+  // Expense is customer-wise: Tata Adblue's entries are its customers' only, so its bulk issued comes from those (each at
+  // its average cost); the stock, ledger and Consumed figures above stay the shared stock's.
+  const ownDraws = stockDraws(entries.data ?? []).filter(period.match)
+  const issued = role === "TATA_ADBLUE" ? { cost: ownDraws.reduce((t, e) => t + e.amount, 0), litres: ownDraws.reduce((t, e) => t + e.quantityLitres, 0) } : { cost: m.consumedCost, litres: m.consumed }
   const regOf = (id: string) => idx?.vehicles.get(id)?.regNo ?? "Unknown"
   const asOf = endedMonth ? `As of ${format(endOfMonth(parseISO(`${endedMonth}-01`)), "d MMM yyyy")}` : "As of today"
   const open = (p: AdBluePurchase) => canEditMonth(role, p.date.slice(0, 7), todayISO(), locks.data ?? [])
-  const mayEdit = can("diesel", "edit")
-  const mayDelete = can("diesel", "delete")
+  const mayEdit = canChangeAdBluePurchases(role, "edit")
+  const mayDelete = canChangeAdBluePurchases(role, "delete")
 
   return (
     <div className="space-y-5">
@@ -90,7 +95,7 @@ export function AdBlueInventory() {
         title="AdBlue Inventory"
         description="AdBlue bought in bulk, held as stock and drawn by vehicles. Separate from fuel stations — this tracks litres in stock, not money owed to pumps."
         actions={
-          can("diesel", "create") && (
+          can("adblue", "create") && (
             <div className="flex flex-wrap gap-2">
               {/* Go-live opening (owner, 3 Nov 2026): Owner / Dev, once, before any other AdBlue record. */}
               {hasOwnerAuthority(role) && !(purchases.data ?? []).some((p) => p.opening) && (
@@ -170,12 +175,12 @@ export function AdBlueInventory() {
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <StatsCard label="Direct Vendor Purchases" icon={Store} value={formatINR(directCost)} hint={`${p} · ${directInPeriod.length} purchase${directInPeriod.length === 1 ? "" : "s"}`} info="Σ amount (litres × rate) of AdBlue bought from a vendor straight into a vehicle, dated in the period. Never part of bulk stock or bulk purchases." />
           <StatsCard label="Direct Litres" icon={PackagePlus} value={L(directLitres)} hint={p} info="Σ litres of direct vendor purchases dated in the period. Not in bulk stock." />
-          <StatsCard label="Bulk Issued to Vehicles" icon={PackageMinus} value={formatINR(m.consumedCost)} hint={`${L(m.consumed)} at average cost`} info="Σ bulk-stock draws by vehicles dated in the period, valued at the weighted-average rate." />
+          <StatsCard label="Bulk Issued to Vehicles" icon={PackageMinus} value={formatINR(issued.cost)} hint={`${L(issued.litres)} at average cost`} info="Σ bulk-stock draws by vehicles dated in the period, valued at the weighted-average rate." />
           <StatsCard
             label="Total AdBlue Expense"
             icon={Sigma}
-            value={formatINR(m.consumedCost + directCost)}
-            hint={`${L(m.consumed + directLitres)} used`}
+            value={formatINR(issued.cost + directCost)}
+            hint={`${L(issued.litres + directLitres)} used`}
             info="Bulk issued to vehicles (at average cost) + direct vendor purchases. Bulk purchases are stock, not expense, so they're not added again — nothing is counted twice."
           />
         </div>

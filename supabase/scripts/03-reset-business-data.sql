@@ -54,10 +54,17 @@ begin
       t, why, t, case when t = 'fuel.fuel_stations' then 'where not x.is_tanker_source' else '' end);
   end loop;
 
+  -- Tata Adblue customer grants point at customers (20261111000200): removed with them, each with its Accounts event.
+  if to_regclass('core.profile_customer_access') is not null then
+    insert into audit.events (actor_kind, action, module, record_type, record_id, label, before, reason, note)
+    select 'SYSTEM', 'UPDATED', 'Accounts', 'Customer access', a.profile_id::text, 'Go-live reset', to_jsonb(a), why, 'Customer access removed with the business data'
+    from core.profile_customer_access a;
+  end if;
+
   -- Invoiced trips are locked to their invoice: release them first (an invoice_id-only change, as cancelling does).
   if to_regclass('ops.trips') is not null then update ops.trips set invoice_id = null where invoice_id is not null; end if;
 
-  foreach t in array array['finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices', 'ops.trips',
+  foreach t in array array['core.profile_customer_access', 'finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices', 'ops.trips',
     'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.diesel_entries', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
     'fuel.tankers', 'core.vehicle_assignments', 'core.vehicle_status_periods', 'core.customer_route_rates', 'core.customer_pricing',
     'core.customer_status_periods', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'] loop

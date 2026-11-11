@@ -18,9 +18,10 @@ import {
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar"
-import { useCan, useRole } from "@/lib/app-state"
+import { useRole } from "@/lib/app-state"
 import { useUnreviewedDeletions } from "@/lib/api/hooks"
-import { NAV_GROUPS, NAV_ITEMS, isActive, showInNav } from "./nav"
+import { NAV_GROUPS, isActive, navFor } from "./nav"
+import { landingFor } from "@/lib/auth/gate"
 import { hasOwnerAuthority } from "@/lib/permissions"
 import { isSharedBackend } from "@/lib/api/client"
 
@@ -28,10 +29,9 @@ const GROUPS = NAV_GROUPS
 
 export function AppSidebar() {
   const pathname = usePathname()
-  const can = useCan()
   const [role] = useRole()
   const { setOpenMobile } = useSidebar()
-  const items = NAV_ITEMS.filter((i) => can(i.resource) && showInNav(role, i))
+  const items = navFor(role) // permission + sidebar visibility (AdBlue profiles: AdBlue, then Diesel)
   // Owner only: deletion events not yet reviewed, shown on the Audit Log item (hidden at 0).
   const unreviewed = useUnreviewedDeletions(hasOwnerAuthority(role)).data ?? 0
   const badgeFor = (href: string) => (href === "/audit" && unreviewed > 0 ? unreviewed : null)
@@ -42,7 +42,7 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild tooltip="Vishal Transport">
-              <Link href="/fuel-stations" onClick={() => setOpenMobile(false)}>
+              <Link href={landingFor(role)} onClick={() => setOpenMobile(false)}>
                 <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
                   <Truck className="size-4" />
                 </div>

@@ -9,6 +9,7 @@ import { Toaster } from "@/components/ui/sonner"
 import { subscribeExternal } from "@/lib/storage/local-store"
 import { isSharedBackend } from "@/lib/api/client"
 import { keysForModules } from "@/lib/api/hooks"
+import { subscribePreview } from "@/lib/identity"
 
 function makeQueryClient() {
   const client: QueryClient = new QueryClient({
@@ -48,6 +49,15 @@ function StorageSync({ client }: { client: QueryClient }) {
       }),
     [client]
   )
+  return null
+}
+
+/**
+ * UI Preview Mode: starting, switching or ending a preview drops every cached query and refetches the ones on screen,
+ * so an AdBlue profile preview never shows DEV's data from the cache (and Return to Dev shows DEV's again).
+ */
+function PreviewReset({ client }: { client: QueryClient }) {
+  useEffect(() => subscribePreview(() => void client.resetQueries()), [client])
   return null
 }
 
@@ -99,6 +109,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     <QueryClientProvider client={client}>
       <TooltipProvider delayDuration={200}>
         {isSharedBackend ? <SharedSync client={client} /> : <StorageSync client={client} />}
+        <PreviewReset client={client} />
         {children}
         <Toaster position="bottom-right" richColors closeButton mobileOffset={{ bottom: "calc(8.5rem + env(safe-area-inset-bottom))" }} /> {/* phones: above the tab bar and a form's fixed Save bar */}
       </TooltipProvider>

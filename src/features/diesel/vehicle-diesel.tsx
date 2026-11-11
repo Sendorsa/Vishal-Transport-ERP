@@ -126,7 +126,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
       <Plus /> Add Diesel Entry
     </Button>
   )
-  const addAdBlueButton = can("diesel", "create") && !locked && (
+  const addAdBlueButton = can("adblue", "create") && !locked && (
     <Button onClick={() => setAdBlueOpen(true)}>
       <Plus /> Add AdBlue Entry
     </Button>
@@ -351,7 +351,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
           </section>
         </TabsContent>
         <TabsContent value="adblue" className="mt-3">
-          <AdBlueSection vehicle={vehicle} customer={group.customer} month={month} canEdit={mayEdit} canDelete={mayDelete} />
+          <AdBlueSection vehicle={vehicle} customer={group.customer} month={month} canEdit={can("adblue", "edit") && !handover} canDelete={can("adblue", "delete") && !handover} />
         </TabsContent>
       </Tabs>
 

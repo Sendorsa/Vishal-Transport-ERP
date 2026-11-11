@@ -26,11 +26,11 @@ export type AccountState =
   | { kind: "unconfigured"; message: string }
   | { kind: "signed-out" }
   | { kind: "no-account"; email: string | null }
-  | { kind: "signed-in"; me: Account; accounts: Account[] | null } // accounts: DEV only
+  | { kind: "signed-in"; me: Account; accounts: Account[] | null; customerAccess: Record<string, string[]> } // accounts, customerAccess: DEV only
 
 export type Result = { ok: true } | { ok: false; error: string }
 
-const ROLES: readonly ErpRole[] = ["OWNER", "DEV", "EMPLOYEE"]
+const ROLES: readonly ErpRole[] = ["OWNER", "DEV", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"]
 
 const toAccount = (p: ProfileRow): Account => ({
   id: p.id,
@@ -65,7 +65,10 @@ export async function getAccountState(): Promise<AccountState> {
   if (!s.me) return { kind: "no-account", email: typeof s.claims.email === "string" ? s.claims.email : null }
   const isDev = s.me.role === "DEV" && s.me.status === "ACTIVE"
   const all = isDev ? (await s.supabase.from("profiles").select("*").order("created_at")).data : null
-  return { kind: "signed-in", me: toAccount(s.me), accounts: all ? all.map(toAccount) : null }
+  // Tata Adblue grants (Dev only). Before migration 20261111000200 the function doesn't exist: no grants to show.
+  const customerAccess: Record<string, string[]> = {}
+  if (isDev) for (const g of (await s.supabase.rpc("list_customer_access")).data ?? []) (customerAccess[g.profile_id] ??= []).push(g.customer_id)
+  return { kind: "signed-in", me: toAccount(s.me), accounts: all ? all.map(toAccount) : null, customerAccess }
 }
 
 /** Runs one account operation for an ACTIVE DEV only (checked here by name, and again in the database). */
@@ -111,4 +114,10 @@ export async function setAccountStatus(id: string, status: "ACTIVE" | "DISABLED"
 
 export async function relinkAccount(id: string, newEmail: string, reason: string): Promise<Result> {
   return asDev((s) => s.rpc("relink_account", { p_id: text(id), p_new_email: text(newEmail), p_reason: text(reason) }))
+}
+
+/** Tata Adblue: the customers this account may work with — exactly `customerIds` (each grant / revocation audited). */
+export async function setCustomerAccess(id: string, customerIds: string[], reason: string): Promise<Result> {
+  if (!Array.isArray(customerIds) || customerIds.some((c) => typeof c !== "string")) return { ok: false, error: "Choose the customers." }
+  return asDev((s) => s.rpc("set_customer_access", { p_profile_id: text(id), p_customer_ids: customerIds, p_reason: text(reason) }))
 }

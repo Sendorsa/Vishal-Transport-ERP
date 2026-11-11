@@ -21,7 +21,7 @@ import { StatsCard } from "@/components/shared/stats-card"
 import { StatusBadge } from "@/components/shared/status-badge"
 import { asOfMonth, statusOn } from "@/domain/status-history"
 import { customerCards, customerSlug, monthLabel, shortMonthLabel, type CustomerCard } from "@/domain/diesel"
-import { useCan } from "@/lib/app-state"
+import { useCan, useRole } from "@/lib/app-state"
 import { matchesSearch } from "@/lib/utils"
 import { formatINR, formatNumber, todayISO } from "@/lib/format"
 import { AddCustomerDialog } from "./add-customer-dialog"
@@ -47,6 +47,7 @@ const SORTS: Record<SortKey, { label: string; fn: (a: CustomerCard, b: CustomerC
 /** Diesel landing: pick a month, see the summary, open a customer. Navigation first — no analytics charts. */
 export function DieselOverview() {
   const can = useCan()
+  const [role] = useRole()
   const { ds, idx, isLoading } = useDieselIndex()
   const months = useDieselMonthOptions(idx)
   const [month, setMonth] = useDieselMonth(months)
@@ -221,15 +222,20 @@ export function DieselOverview() {
             </Button>
           )}
           <SearchBar value={q} onChange={setQ} placeholder="Find a customer…" />
-          <Button variant="outline" asChild>
-            <Link href="/diesel/monthly-master">Monthly Master</Link>
-          </Button>
-          <Button variant="outline" asChild>
-            <Link href="/diesel/quarterly-master">Quarterly Master</Link>
-          </Button>
-          <Button variant="outline" asChild>
-            <Link href="/diesel/yearly-master">Yearly Master</Link>
-          </Button>
+          {/* The Masters are company-wide: not for Tata Adblue, whose access is per customer (owner, 11 Nov 2026). */}
+          {role !== "TATA_ADBLUE" && (
+            <>
+              <Button variant="outline" asChild>
+                <Link href="/diesel/monthly-master">Monthly Master</Link>
+              </Button>
+              <Button variant="outline" asChild>
+                <Link href="/diesel/quarterly-master">Quarterly Master</Link>
+              </Button>
+              <Button variant="outline" asChild>
+                <Link href="/diesel/yearly-master">Yearly Master</Link>
+              </Button>
+            </>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button variant={showArchived ? "secondary" : "ghost"} size="sm" onClick={() => setShowArchived((v) => !v)}>

@@ -12,7 +12,7 @@ import { currentRole, setVerifiedRole } from "@/lib/app-state"
 import { can } from "@/lib/permissions"
 import { NextRequest } from "next/server"
 import { config, proxy } from "@/proxy"
-import { gate, LANDING, oauthCallbackUrl, safeNext, type AuthState } from "./gate"
+import { gate, LANDING, landingFor, oauthCallbackUrl, PROFILE_LANDING, safeNext, type AuthState } from "./gate"
 import { sameHostRedirect } from "./redirect"
 
 const OUT: AuthState = { configured: true, signedIn: false, status: null } // signed out, or an expired session
@@ -72,6 +72,40 @@ for (const s of [OUT, ACTIVE, NOT_APPROVED, DISABLED, INVITED, UNCONFIGURED])
       assert.ok(++hops <= 2, `redirects settle within two hops (${start}, ${JSON.stringify(s)})`)
     }
   }
+
+/* ---------------------------------------------------------------- the AdBlue profiles: AdBlue and Diesel pages only (owner, 11 Nov 2026) */
+{
+  // Every page route of the app (src/app/**/page.tsx), with sample ids for its dynamic segments.
+  const appDir = fileURLToPath(new URL("../../app", import.meta.url))
+  const walk = (d: string): string[] => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : f === "page.tsx" ? [d] : []))
+  const routes = walk(appDir).map((d) => "/" + d.slice(appDir.length + 1).split("/").filter(Boolean).map((seg) => ({ "[company]": "tepl", "[month]": "2026-11", "[vehicle]": "veh_1", "[id]": "x1" })[seg] ?? seg).join("/")).map((r) => (r === "/" ? r : r.replace(/\/$/, "")))
+  assert.ok(routes.length >= 30 && routes.includes("/diesel/tepl/2026-11/veh_1"), "every page route found")
+  const expectAllowed: Record<"TATA_ADBLUE" | "ADBLUE", string[]> = {
+    TATA_ADBLUE: ["/adblue", "/diesel", "/diesel/tepl", "/diesel/tepl/2026-11", "/diesel/tepl/2026-11/veh_1"],
+    ADBLUE: ["/adblue", "/diesel", "/diesel/tepl", "/diesel/tepl/2026-11", "/diesel/tepl/2026-11/veh_1", "/diesel/monthly-master", "/diesel/quarterly-master", "/diesel/yearly-master"],
+  }
+  for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) {
+    const s: AuthState = { ...ACTIVE, role }
+    assert.equal(landingFor(role), PROFILE_LANDING)
+    assert.equal(to("/", s), "/adblue", `${role} opens on AdBlue`)
+    assert.equal(to("/login", s), "/adblue", `${role}: signed in → AdBlue`)
+    assert.equal(to("/login?next=%2Fdiesel", s), "/diesel", `${role}: back to the Diesel page it was heading for`)
+    for (const r of routes.filter((r) => r !== "/" && r !== "/login")) {
+      const allowed = expectAllowed[role].includes(r)
+      assert.equal(to(r, s), allowed ? "allow" : "/adblue", `${role}: ${r} ${allowed ? "allowed" : "→ AdBlue"}`)
+      assert.equal(to(`${r}?month=2026-11`, s), allowed ? "allow" : "/adblue", `${role}: ${r} with a query string`)
+    }
+    for (const r of ["/diesel/ledger", "/settings/users", "/audit", "/fuel-stations/dv_tanker", "/diesel/tepl/2026-11/veh_1/extra", "/diesel/../settings"]) assert.equal(to(r, s), "/adblue", `${role}: ${r} refused`)
+    assert.equal(to("/adblue", s), "allow", `${role}: the landing page itself is allowed (no redirect loop)`)
+    assert.equal(to("/api/erp", s), "allow", `${role}: the API enforces its own method list`)
+  }
+  // The other roles are unchanged: every page, the Fuel Stations landing.
+  for (const role of ["OWNER", "DEV", "EMPLOYEE"] as const) {
+    const s: AuthState = { ...ACTIVE, role }
+    assert.equal(to("/", s), LANDING)
+    for (const r of routes.filter((r) => r !== "/" && r !== "/login")) assert.equal(to(r, s), "allow", `${role}: ${r}`)
+  }
+}
 
 /* ---------------------------------------------------------------- the proxy runs on every page, not on assets or the OAuth callback */
 const matcher = new RegExp(`^${config.matcher[0]}$`)

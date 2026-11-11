@@ -7,6 +7,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Checkbox } from "@/components/ui/checkbox"
+import { useCustomers } from "@/lib/api/hooks"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { FormModal } from "@/components/shared/form-modal"
 import { Field, NoAccess, PageSkeleton } from "@/components/shared/misc"
@@ -16,12 +18,14 @@ import { SimpleSelect } from "@/components/shared/simple-select"
 import { GoogleSignInButton, signOutToLogin } from "@/features/auth/sign-in-buttons"
 import type { ErpRole } from "@/lib/supabase/database.types"
 import { formatDate } from "@/lib/format"
-import { getAccountState, addAccount, relinkAccount, setAccountRole, setAccountStatus, type Account, type AccountState, type Result } from "@/app/settings/users/actions"
+import { getAccountState, addAccount, relinkAccount, setAccountRole, setAccountStatus, setCustomerAccess, type Account, type AccountState, type Result } from "@/app/settings/users/actions"
 
 const ROLE_OPTIONS: { value: ErpRole; label: string }[] = [
   { value: "OWNER", label: "Owner" },
   { value: "EMPLOYEE", label: "Employee" },
   { value: "DEV", label: "Dev" },
+  { value: "TATA_ADBLUE", label: "Tata Adblue" }, // AdBlue for the customers Dev assigns (Customer access); Diesel read-only
+  { value: "ADBLUE", label: "Adblue" }, // AdBlue for every customer; Diesel read-only
 ]
 const roleLabel = (r: ErpRole) => ROLE_OPTIONS.find((o) => o.value === r)?.label ?? r
 const STATUS_LABEL = { INVITED: "Approved · not signed in yet", ACTIVE: "Active", DISABLED: "Deactivated" } as const
@@ -98,7 +102,7 @@ export function UserAccounts({ error }: { error?: string }) {
       </div>
     )
 
-  const { me, accounts } = state
+  const { me, accounts, customerAccess } = state
   return (
     <div className="space-y-4">
       {header}
@@ -117,7 +121,7 @@ export function UserAccounts({ error }: { error?: string }) {
         </CardContent>
       </Card>
       {accounts && can("accounts") ? ( // can(): a DEV previewing another role sees that role's page (identity.ts)
-        <AccountManager accounts={accounts} meId={me.id} onChanged={refresh} />
+        <AccountManager accounts={accounts} customerAccess={customerAccess} meId={me.id} onChanged={refresh} />
       ) : (
         me.status === "ACTIVE" && <p className="text-sm text-muted-foreground">Only Dev can manage user accounts.</p>
       )}
@@ -125,9 +129,11 @@ export function UserAccounts({ error }: { error?: string }) {
   )
 }
 
-type Dialog = { kind: "add" } | { kind: "role" | "status" | "relink"; account: Account } | null
+type Dialog = { kind: "add" } | { kind: "role" | "status" | "relink" | "access"; account: Account } | null
 
-function AccountManager({ accounts, meId, onChanged }: { accounts: Account[]; meId: string; onChanged: () => Promise<void> }) {
+function AccountManager({ accounts, customerAccess, meId, onChanged }: { accounts: Account[]; customerAccess: Record<string, string[]>; meId: string; onChanged: () => Promise<void> }) {
+  const customers = useCustomers()
+  const [picked, setPicked] = useState<Set<string>>(new Set())
   const [dialog, setDialog] = useState<Dialog>(null)
   const [pending, setPending] = useState(false)
   const [email, setEmail] = useState("")
@@ -140,6 +146,7 @@ function AccountManager({ accounts, meId, onChanged }: { accounts: Account[]; me
     setName("")
     setReason("")
     setRole(d.kind === "role" ? d.account.role : "EMPLOYEE")
+    setPicked(new Set(d.kind === "access" ? (customerAccess[d.account.id] ?? []) : []))
     setDialog(d)
   }
   const run = async (op: () => Promise<Result>, done: string) => {
@@ -195,6 +202,11 @@ function AccountManager({ accounts, meId, onChanged }: { accounts: Account[]; me
                 </TableCell>
                 <TableCell>{a.activatedAt ? formatDate(a.activatedAt.slice(0, 10)) : "—"}</TableCell>
                 <TableCell className="space-x-1 text-right whitespace-nowrap">
+                  {a.role === "TATA_ADBLUE" && (
+                    <Button size="sm" variant="ghost" onClick={() => open({ kind: "access", account: a })}>
+                      Customer access ({customerAccess[a.id]?.length ?? 0})
+                    </Button>
+                  )}
                   <Button size="sm" variant="ghost" onClick={() => open({ kind: "role", account: a })}>
                     Change role
                   </Button>
@@ -274,6 +286,36 @@ function AccountManager({ accounts, meId, onChanged }: { accounts: Account[]; me
             )
           }
         >
+          {reasonField}
+        </FormModal>
+      )}
+
+      {dialog?.kind === "access" && (
+        <FormModal
+          open
+          onOpenChange={() => setDialog(null)}
+          title={`Customer access · ${dialog.account.email}`}
+          description="Tata Adblue works only with the ticked customers: their AdBlue entries (add, edit, delete) and a read-only view of their Diesel. Bulk AdBlue purchases go into the one shared stock whatever is ticked. Removing a customer never changes its records."
+          submitLabel="Save access"
+          pending={pending}
+          submitDisabled={!reasonOk}
+          onSubmit={() => run(() => setCustomerAccess(dialog.account.id, [...picked], reason), "Customer access saved")}
+        >
+          <Field label="Customers">
+            <div className="max-h-64 space-y-2 overflow-y-auto rounded-md border p-2">
+              {(customers.data ?? []).length === 0 && <p className="text-sm text-muted-foreground">No customers yet.</p>}
+              {[...(customers.data ?? [])].sort((x, y) => (x.shortName || x.name).localeCompare(y.shortName || y.name)).map((c) => (
+                <label key={c.id} className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={picked.has(c.id)}
+                    onCheckedChange={(v) => setPicked((s) => { const n = new Set(s); if (v === true) n.add(c.id); else n.delete(c.id); return n })}
+                  />
+                  {c.shortName || c.name}
+                  {c.status === "ARCHIVED" && <span className="text-xs text-muted-foreground">(archived)</span>}
+                </label>
+              ))}
+            </div>
+          </Field>
           {reasonField}
         </FormModal>
       )}

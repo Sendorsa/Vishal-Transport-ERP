@@ -31,7 +31,7 @@ select jsonb_build_object(
         'core.customers', 'core.customer_status_periods', 'core.customer_pricing', 'core.customer_route_rates', 'core.drivers', 'core.vehicles', 'core.vehicle_status_periods',
         'core.vehicle_assignments', 'core.month_locks', 'fuel.fuel_stations', 'fuel.tankers', 'fuel.diesel_entries', 'fuel.tanker_loads', 'fuel.tanker_transfers',
         'fuel.tanker_adjustments', 'fuel.adblue_purchases', 'fuel.adblue_entries', 'finance.payments', 'finance.payment_allocations', 'ops.trips', 'billing.invoices',
-        'billing.invoice_lines', 'billing.invoice_line_trips')
+        'billing.invoice_lines', 'billing.invoice_line_trips', 'core.profile_customer_access')
   ),
   'account_fks', (
     select coalesce(jsonb_agg(jsonb_build_object('from', (select n.nspname || '.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = conrelid), 'to', (select n.nspname || '.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = confrelid), 'on_delete', confdeltype::text) order by conrelid::regclass::text), '[]'::jsonb)

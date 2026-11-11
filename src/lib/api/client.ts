@@ -7,6 +7,8 @@
 import { api as localApi, PossibleDuplicateError } from "./index"
 import { ConflictError, pendingVersions } from "@/lib/versions"
 import { previewRole } from "@/lib/identity"
+import { isAdBlueProfile } from "@/lib/permissions"
+import { profileCall } from "@/lib/server/erp/profiles"
 import { isReadMethod } from "./reads"
 
 export const DATA_BACKEND: "local" | "supabase" = process.env.NEXT_PUBLIC_DATA_BACKEND === "supabase" ? "supabase" : "local"
@@ -54,12 +56,32 @@ export class PreviewWriteBlockedError extends Error {
   }
 }
 
+/** Thrown instead of a read a previewed AdBlue profile couldn't make (the server refuses it for a real account). */
+export class PreviewReadBlockedError extends Error {
+  constructor(role: string) {
+    super(`UI Preview Mode: ${role === "TATA_ADBLUE" ? "Tata Adblue" : "Adblue"} can't load this — the server refuses it for that role.`)
+  }
+}
+
+/**
+ * A read while a DEV previews an AdBlue profile: the profile's own method list and shapes (profiles.ts), so the screens
+ * show what that profile would see — not DEV's data. Tata Adblue gets an empty customer scope: no customer's data is
+ * shown, because a preview has no grants (it says so in the banner). Interface only: the request still runs as DEV.
+ */
+function previewRead(ns: string, method: string, read: () => Promise<unknown>): Promise<unknown> {
+  const role = previewRole()
+  if (!role || !isAdBlueProfile(role)) return read()
+  const shaped = profileCall(role, `${ns}.${method}`, read, role === "TATA_ADBLUE" ? new Set<string>() : null)
+  return shaped ? shaped() : Promise.reject(new PreviewReadBlockedError(role))
+}
+
 /**
  * UI Preview Mode (identity.ts): while it's on, every `api` method the UI calls that isn't a read is refused here,
  * before it reaches the browser store or the server — whatever the previewed role's screens offer. Reads pass through
- * unchanged. This blocks accidental writes through the normal application UI only: it is not server-side enforcement.
- * The API and the server still authorise as the verified DEV account, with DEV's actual permissions, so direct API or
- * database requests may still modify data.
+ * unchanged for the Owner / Employee previews; for an AdBlue profile they get that profile's method list and shapes
+ * (previewRead). This blocks accidental writes through the normal application UI only: it is not server-side
+ * enforcement. The API and the server still authorise as the verified DEV account, with DEV's actual permissions, so
+ * direct API or database requests may still modify data.
  */
 function blockWritesWhilePreviewing(target: typeof localApi): typeof localApi {
   return new Proxy(target, {
@@ -69,7 +91,8 @@ function blockWritesWhilePreviewing(target: typeof localApi): typeof localApi {
       return new Proxy(group, {
         get: (g, method: string) => {
           const fn = Reflect.get(g, method)
-          if (typeof fn !== "function" || isReadMethod(ns, method)) return fn
+          if (typeof fn !== "function") return fn
+          if (isReadMethod(ns, method)) return (...args: unknown[]) => (previewRole() ? previewRead(ns, method, () => Reflect.apply(fn, g, args)) : Reflect.apply(fn, g, args))
           return (...args: unknown[]) => {
             if (previewRole()) throw new PreviewWriteBlockedError()
             return Reflect.apply(fn, g, args)

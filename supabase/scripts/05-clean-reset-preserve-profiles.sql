@@ -29,7 +29,7 @@ do $$
 declare
   why constant text := 'Production clean reset, accounts preserved (owner-approved, 4 Nov 2026)';
   -- Children before parents (foreign keys). Every one is emptied (fuel stations: all but dv_tanker).
-  cleared constant text[] := array['finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices',
+  cleared constant text[] := array['core.profile_customer_access', 'finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices',
     'ops.trips', 'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.diesel_entries', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
     'fuel.tankers', 'core.vehicle_assignments', 'core.vehicle_status_periods', 'core.customer_route_rates', 'core.customer_pricing', 'core.customer_status_periods',
     'core.month_locks', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'];
@@ -69,6 +69,11 @@ begin
        from %s x %s',
       t, case when t = 'core.month_locks' then 'month' else 'id' end, why, t, case when t = 'fuel.fuel_stations' then 'where not x.is_tanker_source' else '' end);
   end loop;
+
+  -- Tata Adblue customer grants point at customers (20261111000200): removed with them, each with its Accounts event.
+  insert into audit.events (actor_kind, action, module, record_type, record_id, label, before, reason, note)
+  select 'SYSTEM', 'UPDATED', 'Accounts', 'Customer access', a.profile_id::text, 'Clean reset', to_jsonb(a), why, 'Customer access removed with the business data'
+  from core.profile_customer_access a;
 
   -- Invoiced trips are locked to their invoice: release them first (an invoice_id-only change, as cancelling does).
   update ops.trips set invoice_id = null where invoice_id is not null;

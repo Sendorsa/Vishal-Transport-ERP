@@ -27,6 +27,8 @@ export interface RequestScope {
   /** Audit events and reviews appended by this request (inserted with the changes, in the same transaction). */
   newEvents: AuditEvent[]
   newReviews: AuditReview[]
+  /** Tata Adblue only: the customers Dev granted (core.profile_customer_access), loaded once per request. */
+  customerIds?: ReadonlySet<string>
 }
 
 /**

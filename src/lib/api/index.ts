@@ -14,8 +14,8 @@ import { canEditMonth } from "@/domain/month-lock"
 import { insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from "@/domain/adblue-inventory"
 import { availabilityMessage, fillAmount, fitsTanker, isStockPool, isTankerFill, normReg, shortfallMessage, tankerAvailability, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/station-ledger"
-import { currentActor, currentRole } from "@/lib/identity"
-import { can, canSetMonthLock, hasOwnerAuthority, type Resource } from "@/lib/permissions"
+import { currentActor, currentRole, customerScope } from "@/lib/identity"
+import { can, canChangeAdBluePurchases, canSetMonthLock, hasOwnerAuthority, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
 import { addMonths, format, parseISO } from "date-fns"
 import { assignmentIndex, assignmentOn, correctedPeriods, handedOverBy, inferAssignments, isCalendarDate, movedRecords, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type AttributedRecords, type MovedRecord, type StartDateProblem } from "@/domain/assignments"
@@ -29,6 +29,9 @@ import { NeedData, requestScope } from "@/lib/request-scope"
 import { cleanWorkspace } from "@/lib/storage/seed"
 
 export { NotFoundError, ConflictError }
+
+/** A refusal because of the caller's role or customer scope (the server logs these: `[erp-denied]`). */
+export class PermissionError extends Error {}
 
 /** A payment to a fuel station (stored as a payment voucher — see api.fuelStationPayments). */
 export interface FuelStationPayment {
@@ -196,6 +199,18 @@ function assignedCustomer(vehicleId: string, date: string, customerId: string | 
   return a.customerId
 }
 
+/**
+ * A date change never moves a Diesel or AdBlue entry into another customer's assignment period (history never moves
+ * silently; for Tata Adblue it would also leave its customer scope). Compares the customer the reports resolve on the old and the new
+ * date. Names no customer: the caller may not be allowed to see the other one.
+ */
+function assertSameCustomerOnDate(vehicleId: string, customerId: string | null, from: string, to: string) {
+  if (from === to) return
+  const idx = assignmentIndex(periodsOf(vehicleId))
+  const on = (date: string) => assignmentOn(idx, vehicleId, date)?.customerId ?? customerId
+  if (on(to) !== on(from)) throw new Error(`${regNo(vehicleId)} worked for a different customer on ${formatDate(to)}. Changing the date can't move this entry to another customer — delete it and add it again under the right customer.`)
+}
+
 const resolved = <E extends { vehicleId: string; customerId: string | null; date: string }>(list: E[]) => resolveCustomers(list, readCollection("vehicle_assignments"))
 
 const who = (id: string | null) => (id ? customerName(id) : "no customer")
@@ -245,8 +260,23 @@ function assertMonthsEditable(from: string, to: string) {
 
 /** Creates, edits and deletes are checked here, not only hidden in the UI (src/lib/permissions.ts). */
 function assertCan(resource: Resource, action: "create" | "edit" | "delete") {
-  const what: Partial<Record<Resource, string>> = { diesel: "fuel", payments: "payment", trips: "trip", vehicles: "tanker or vehicle", customers: "customer", invoices: "invoice" }
-  if (!can(currentRole(), resource, action)) throw new Error(`Your role can't ${action} ${what[resource] ?? resource} records.`)
+  const what: Partial<Record<Resource, string>> = { diesel: "fuel", adblue: "AdBlue", payments: "payment", trips: "trip", vehicles: "tanker or vehicle", customers: "customer", invoices: "invoice" }
+  if (!can(currentRole(), resource, action)) throw new PermissionError(`Your role can't ${action} ${what[resource] ?? resource} records.`)
+}
+
+/**
+ * Tata Adblue works only with the customers Dev granted it (customerScope); every other role with every customer.
+ * Checked after the entry's customer is stamped from the vehicle's assignment, so it can't be chosen around. RLS
+ * (private.customer_in_scope) checks the same on the shared database.
+ */
+function assertCustomerScope(customerId: string | null) {
+  const scope = customerScope()
+  if (scope && !(customerId && scope.has(customerId))) throw new PermissionError("Your account can't add or change AdBlue entries for this customer. Ask Dev for access.")
+}
+
+/** Editing / deleting a bulk AdBlue purchase: the Owner, Dev and Employee (canChangeAdBluePurchases). */
+function assertChangeAdBluePurchase(action: "edit" | "delete") {
+  if (!canChangeAdBluePurchases(currentRole(), action)) throw new PermissionError(`Your role can't ${action} AdBlue purchases.`)
 }
 
 /** Drivers are added from Settings → Drivers (settings:edit) and inline from the vehicle forms (vehicles:edit). */
@@ -560,7 +590,7 @@ const RECORD_COLLECTION: Record<string, Parameters<typeof readCollection>[0]> = 
 /** The permission needed to see a module's record history (the central log itself is `audit`: Owner and Dev). */
 const MODULE_RESOURCE: Record<string, Resource> = {
   Diesel: "diesel",
-  AdBlue: "diesel",
+  AdBlue: "adblue",
   "Diesel Tanker": "diesel",
   "Fuel Stations": "diesel",
   Payments: "payments",
@@ -1365,6 +1395,7 @@ export const api = {
         if (!before) throw new NotFoundError("Diesel entry", id)
         assertMonthEditable(before.date) // can't move an entry out of a locked month either
         assertMonthEditable(input.date)
+        assertSameCustomerOnDate(before.vehicleId, before.customerId, before.date, input.date)
         if (isTankerFill(input)) {
           // Only a fill newly switched to tanker cargo; one already recorded that way (source history) stays editable.
           if (!isTankerFill(before)) {
@@ -1403,9 +1434,10 @@ export const api = {
     /** POST /api/adblue-entries — draws from inventory; closing km must sit between the vehicle's previous and next entries. */
     create: (input: AdBlueInput) =>
       tx(async () => {
-        assertCan("diesel", "create")
+        assertCan("adblue", "create")
         assertMonthEditable(input.date)
         input = { ...input, customerId: assignedCustomer(input.vehicleId, input.date, input.customerId) }
+        assertCustomerScope(input.customerId)
         assertOpen(input.vehicleId, input.customerId, input.date)
         const entry = checkAdBlue(input)
         assertStock(readCollection("adblue_purchases"), [...readCollection("adblue_entries"), { ...entry, id: "new", createdAt: new Date().toISOString() }]) // direct purchases are left out of the stock check
@@ -1415,12 +1447,14 @@ export const api = {
       }),
     update: (id: string, input: AdBlueInput, reason?: string) =>
       tx(async () => {
-        assertCan("diesel", "edit")
+        assertCan("adblue", "edit")
         const before = await adblue.get(id)
         if (!before) throw new NotFoundError("AdBlue entry", id)
+        assertCustomerScope(before.customerId)
         input = { ...input, vehicleId: before.vehicleId, customerId: before.customerId } // an edit never moves the entry to another vehicle or customer
         assertMonthEditable(before.date)
         assertMonthEditable(input.date)
+        assertSameCustomerOnDate(before.vehicleId, before.customerId, before.date, input.date)
         const entry = checkAdBlue(input, id)
         assertStock(readCollection("adblue_purchases"), readCollection("adblue_entries").map((e) => (e.id === id ? { ...e, ...entry } : e)))
         const beforeView = adblueView(before)
@@ -1431,15 +1465,25 @@ export const api = {
     /** DELETE — the litres go back into stock. Removing a draw can never make stock negative. */
     remove: (id: string, reason: string) =>
       tx(async () => {
-        assertCan("diesel", "delete")
+        assertCan("adblue", "delete")
         assertReason(reason)
         const e = await adblue.get(id)
         if (!e) return
+        assertCustomerScope(e.customerId)
         assertMonthEditable(e.date)
         const before = adblueView(e)
         await adblue.remove(id)
         audit({ action: "DELETED", ...meta.adblue(e), before, reason })
       }),
+  },
+
+  /**
+   * GET /api/adblue-stock — every bulk-stock draw as the shared stock sees it: date, litres and order only (no vehicle,
+   * customer or amount), so stock, carry-forward and the dialog's stock check are company-wide for every role, also
+   * for Tata Adblue, whose entry lists are limited to its customers.
+   */
+  adblueStock: {
+    list: async () => stockDraws(await adblue.list()).map((e) => ({ id: e.id, date: e.date, createdAt: e.createdAt, quantityLitres: e.quantityLitres, source: "STOCK" as const })),
   },
 
   /** Diesel loaded into the tanker's cargo. Amount = litres × rate; month lock; stock never below zero. */
@@ -1673,7 +1717,7 @@ export const api = {
       }),
     create: (input: AdBluePurchaseInput) =>
       tx(async () => {
-        assertCan("diesel", "create")
+        assertCan("adblue", "create")
         ensureSeeded()
         assertMonthEditable(input.date)
         const after = await adbluePurchases.create(purchaseTotals(input))
@@ -1682,7 +1726,8 @@ export const api = {
       }),
     update: (id: string, input: AdBluePurchaseInput, reason?: string) =>
       tx(async () => {
-        assertCan("diesel", "edit")
+        assertCan("adblue", "edit")
+        assertChangeAdBluePurchase("edit")
         const before = await adbluePurchases.get(id)
         if (!before) throw new NotFoundError("AdBlue purchase", id)
         if (before.opening) throw new Error("Opening stock can't be edited.")
@@ -1696,7 +1741,8 @@ export const api = {
       }),
     remove: (id: string, reason: string) =>
       tx(async () => {
-        assertCan("diesel", "delete")
+        assertCan("adblue", "delete")
+        assertChangeAdBluePurchase("delete")
         assertReason(reason)
         const before = await adbluePurchases.get(id)
         if (!before) return
@@ -1983,11 +2029,13 @@ export const api = {
     async history(recordId: string) {
       await latency()
       const role = currentRole()
+      if (!can(role, "audit")) return [] // the AdBlue profiles see no audit history (owner, 11 Nov 2026)
       return recordHistory(readAuditEvents(), recordId).filter((e) => can(role, MODULE_RESOURCE[e.module] ?? "audit"))
     },
     /** Ids of records with at least one edit — drives the "Edited" badge. */
     async editedIds() {
       await latency()
+      if (!can(currentRole(), "audit")) return []
       return [...editedIds(readAuditEvents())] // an array: a Set doesn't survive JSON (shared backend)
     },
   },

@@ -36,8 +36,9 @@ export async function proxy(request: NextRequest) {
   })
   const { data, error } = await supabase.auth.getClaims() // verifies the JWT; refreshes an expiring session
   const claims = error ? null : (data?.claims ?? null)
-  const status: AccountStatus | null = claims ? ((await readAccount(supabase, claims.sub))?.status ?? null) : null
-  return apply(request, response, gate(path, { configured: true, signedIn: !!claims, status }))
+  const account = claims ? await readAccount(supabase, claims.sub) : null
+  const status: AccountStatus | null = account?.status ?? null
+  return apply(request, response, gate(path, { configured: true, signedIn: !!claims, status, role: account?.role ?? null }))
 }
 
 /**

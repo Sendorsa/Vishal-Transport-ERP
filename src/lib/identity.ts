@@ -10,7 +10,7 @@ import { requestScope } from "./request-scope"
 import type { AuditActor, LegacyRole, Role } from "./types"
 
 const ROLE_KEY = "vt:ui:role"
-const ROLES: readonly Role[] = ["OWNER", "DEV", "EMPLOYEE"]
+const ROLES: readonly Role[] = ["OWNER", "DEV", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"]
 const LEGACY: readonly LegacyRole[] = ["ACCOUNTANT", "OPS_MANAGER"]
 
 // The verified account for code outside React in the browser. Browser only: on the server, module state would be
@@ -87,4 +87,13 @@ export function currentActor(): AuditActor {
     return { kind: "SESSION", userId: profileId, name: name ?? email, role }
   }
   return { kind: "SESSION", userId: null, name: verified?.email ?? null, role: currentRole() }
+}
+
+/**
+ * The customers the caller may work with: null = every customer. Tata Adblue: the customers Dev granted, loaded by the
+ * server for each request (engine.ts) — without a request scope (the browser backend) none, so it fails closed.
+ */
+export function customerScope(): ReadonlySet<string> | null {
+  if (currentRole() !== "TATA_ADBLUE") return null
+  return requestScope()?.customerIds ?? new Set()
 }

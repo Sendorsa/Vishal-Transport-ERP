@@ -390,6 +390,7 @@ const MATRIX: { resource: Resource; label: string; actions: ("view" | "create" |
   { resource: "vehicles", label: "Vehicles", actions: ["view", "create", "edit"] },
   { resource: "trips", label: "Trips", actions: ["view", "create", "edit", "delete"] },
   { resource: "diesel", label: "Diesel", actions: ["view", "create"] },
+  { resource: "adblue", label: "AdBlue", actions: ["view", "create", "edit", "delete"] },
   { resource: "invoices", label: "Invoices", actions: ["view", "create", "edit"] },
   { resource: "payments", label: "Payments", actions: ["view", "create", "delete"] },
   { resource: "reports", label: "Reports", actions: ["view"] },

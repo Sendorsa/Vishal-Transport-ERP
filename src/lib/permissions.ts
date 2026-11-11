@@ -11,6 +11,7 @@ export const RESOURCES = [
   "vehicles",
   "trips",
   "diesel",
+  "adblue", // AdBlue inventory and vehicle AdBlue entries (owner, 11 Nov 2026: its own resource, out of "diesel")
   "invoices",
   "payments",
   "reports",
@@ -37,6 +38,8 @@ export const ROLES: { value: Role; label: string; description: string }[] = [
   { value: "OWNER", label: "Owner", description: "Every business module and Owner-level control (month locks, restore, deletion review); no account or system administration" },
   { value: "DEV", label: "Dev", description: "Everything the Owner can do, plus exclusive account and system administration" },
   { value: "EMPLOYEE", label: "Employee", description: "Everything the Owner can do except Settings" },
+  { value: "TATA_ADBLUE", label: "Tata Adblue", description: "AdBlue entries for the customers Dev assigns, bulk purchases into the shared stock; Diesel read-only for those customers" },
+  { value: "ADBLUE", label: "Adblue", description: "AdBlue entries for every customer, bulk purchases into the shared stock; Diesel read-only for every customer" },
 ]
 
 /**
@@ -48,6 +51,10 @@ const MAP: Record<Role, Permission[]> = {
   OWNER: BUSINESS_ACCESS,
   // Owner's instruction, 5 Nov 2026: the Owner's access and Owner-level controls, except Settings.
   EMPLOYEE: BUSINESS_ACCESS.filter((p) => p !== "settings:*"),
+  // Owner's instruction, 11 Nov 2026: AdBlue (entries create / edit / delete, bulk purchases) and Diesel read-only.
+  // Tata Adblue is further limited to the customers Dev assigns (customerScope in src/lib/identity.ts, RLS).
+  TATA_ADBLUE: ["diesel:view", "adblue:*"],
+  ADBLUE: ["diesel:view", "adblue:*"],
 }
 
 export function can(role: Role, resource: Resource, action: Action = "view") {
@@ -68,6 +75,15 @@ export const canSetMonthLock = (role: Role) => role === "OWNER" || role === "DEV
 
 /** Changing data in a locked month (Monthly Sheet Lock): the Owner and Dev only — never the Employee (owner, 5 Nov 2026). */
 export const canBypassMonthLock = (role: Role) => role === "OWNER" || role === "DEV"
+
+/** The AdBlue profiles (owner, 11 Nov 2026): only AdBlue and Diesel, never another module (src/lib/server/erp/profiles.ts). */
+export const isAdBlueProfile = (role: Role) => role === "TATA_ADBLUE" || role === "ADBLUE"
+
+/**
+ * Editing or deleting a bulk AdBlue purchase re-costs every customer's draws: the Owner, Dev and Employee only (by name,
+ * with the `adblue` permission). The AdBlue profiles add purchases but never change them (owner, 11 Nov 2026).
+ */
+export const canChangeAdBluePurchases = (role: Role, action: "edit" | "delete") => can(role, "adblue", action) && hasOwnerAuthority(role)
 
 /** Removed roles (31 Oct 2026), named only where history shows them: audit events and the audit log's role filter. */
 export const LEGACY_ROLES: { value: LegacyRole; label: string }[] = [

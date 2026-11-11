@@ -62,13 +62,15 @@ async function load(sql: Sql, key: string, ctx: LoadCtx): Promise<unknown> {
 export async function runInDatabase<T>(transact: Transact, identity: RequestIdentity, write: boolean, expected: Record<string, string>, call: () => Promise<T>): Promise<T> {
   return transact(async (sql) => {
     await begin(sql, identity, write)
+    // Tata Adblue: the customers Dev granted, read under RLS (own rows only). Every other role: no customer limit.
+    const customerIds = identity.role === "TATA_ADBLUE" ? new Set((await sql<{ c: string }>(`select customer_id as c from core.profile_customer_access where profile_id = (select private.current_profile_id())`)).map((r) => r.c)) : undefined
     const ctx: LoadCtx = { extras: new Map() }
     const loaded = new Map<string, unknown>()
     for (let attempt = 0; ; attempt++) {
       // A fresh in-memory copy for every run (a re-run never sees the previous run's half-done changes).
       const cache = new Map<string, unknown>([...loaded].map(([k, v]) => [k, structuredClone(v)]))
       // The versions too: a run that advanced them (advanceVersion) and then needed data must not leak into the re-run.
-      const scope: RequestScope = { identity, cache, written: new Set(), expected: { ...expected }, newEvents: [], newReviews: [] }
+      const scope: RequestScope = { identity, cache, written: new Set(), expected: { ...expected }, newEvents: [], newReviews: [], customerIds }
       try {
         const result = await als.run(scope, call)
         if (write) await persist(sql, scope, loaded, ctx)
@@ -96,15 +98,16 @@ async function persist(sql: Sql, scope: RequestScope, loaded: Map<string, unknow
 
 /**
  * Modules changed since `since` (20-second polling, OD-5): the audit trail records every write, so its newest events
- * say what to refresh. RLS shows each role only the modules it may view. The 2-minute overlap covers transactions
- * that committed out of `at` order; refreshing twice is harmless.
+ * say what to refresh. `private.changed_modules` returns module names only — never events — for the modules the role
+ * may view (the AdBlue profiles can't read the audit trail itself). The 2-minute overlap covers transactions that
+ * committed out of `at` order; refreshing twice is harmless.
  */
 export async function changesSince(transact: Transact, identity: RequestIdentity, since: string | null) {
   return transact(async (sql) => {
     await begin(sql, identity, false)
     const [now] = await sql<{ now: string }>(`select to_jsonb(clock_timestamp()) #>> '{}' as now`)
     if (!since) return { cursor: now.now, modules: [] as string[] }
-    const rows = await sql<{ module: string }>(`select distinct module from audit.events where at > $1::timestamptz - interval '2 minutes'`, [since])
+    const rows = await sql<{ module: string }>(`select private.changed_modules($1::timestamptz) as module`, [since])
     return { cursor: now.now, modules: rows.map((r) => r.module) }
   })
 }

@@ -44,7 +44,7 @@ async function main() {
 
   /* ---------------------------------------------------------------- roles and permissions mirror the app */
   const roles = (await q<{ r: string }>(`select unnest(enum_range(null::public.erp_role))::text as r`)).map((x) => x.r)
-  assert.deepEqual(roles, ["OWNER", "DEV", "EMPLOYEE"] satisfies Role[], "erp_role = Owner / Dev / Employee only")
+  assert.deepEqual(roles, ["OWNER", "DEV", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"] satisfies Role[], "erp_role = Owner / Dev / Employee + the two AdBlue profiles (11 Nov 2026)")
   const perms = await q<{ role: Role; permission: string }>(`select role::text as role, permission from core.role_permissions`)
   const dbCan = (role: Role, r: string, a: string) => perms.some((p) => p.role === role && ["*", `${r}:*`, `${r}:${a}`].includes(p.permission))
   for (const role of roles as Role[]) for (const r of RESOURCES) for (const a of ["view", "create", "edit", "delete", "finance"] as Action[])

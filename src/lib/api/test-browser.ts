@@ -50,7 +50,7 @@ loadCheckDemoData()
 
 /** The mock-session role the API reads (vt:ui:role). */
 /** Removed roles can still be stored by an old browser — they must read as Employee. */
-export const setRole = (r: "OWNER" | "DEV" | "EMPLOYEE" | "ACCOUNTANT" | "OPS_MANAGER") => storage.setItem("vt:ui:role", r)
+export const setRole = (r: "OWNER" | "DEV" | "EMPLOYEE" | "TATA_ADBLUE" | "ADBLUE" | "ACCOUNTANT" | "OPS_MANAGER") => storage.setItem("vt:ui:role", r)
 
 /**
  * A tanker for checks that load / dispense diesel (demo data has none): written straight to storage like

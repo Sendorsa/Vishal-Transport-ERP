@@ -9,7 +9,8 @@ export type CompanyCode = "VT" | "VTHPL"
 export type CompanyScope = CompanyCode | "GROUP"
 
 /** DEV = every module like the Owner, without the Owner-only actions (see lib/permissions.ts). */
-export type Role = "OWNER" | "DEV" | "EMPLOYEE"
+/** TATA_ADBLUE / ADBLUE (owner, 11 Nov 2026): the AdBlue profiles — AdBlue writes, Diesel read-only (src/lib/permissions.ts). */
+export type Role = "OWNER" | "DEV" | "EMPLOYEE" | "TATA_ADBLUE" | "ADBLUE"
 /**
  * Roles removed on 31 Oct 2026 (owner's instruction: only Owner, Dev and Employee). Kept only so audit events
  * recorded under them read as they were, and because the Supabase `erp_role` enum still lists them (its migration
@@ -202,6 +203,11 @@ export interface DieselEntry extends BaseEntity {
    * `amount` shown are the tanker's weighted-average cost. Restoring such a fill stores it rate-less again.
    */
   averageCost?: boolean
+  /**
+   * Read-only view field (never stored): the odometer of the vehicle's previous fill, any customer — set by the server
+   * when it sends a customer-scoped list (Tata Adblue), so KM Run never depends on fills the screen isn't shown.
+   */
+  prevOdometerKm?: number | null
 }
 
 /* ----------------------------------------------------------------------------- Invoices */
@@ -400,6 +406,9 @@ export interface AdBlueEntry extends BaseEntity {
   amount: number
   invoiceNo: string
   notes: string
+  /** Read-only view fields (never stored): the previous AdBlue entry's reading and date, set for customer-scoped lists (see DieselEntry.prevOdometerKm). */
+  prevKm?: number | null
+  prevDate?: string | null
 }
 
 /**

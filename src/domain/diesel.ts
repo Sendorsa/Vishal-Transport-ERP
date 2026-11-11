@@ -79,6 +79,24 @@ export function customerSlug(c: Pick<Customer, "code">) {
   return c.code.toLowerCase()
 }
 
+/** fill id → the odometer of the same vehicle's previous fill (any customer), or its go-live opening odometer; null for its first. */
+export function previousOdometers(diesel: DieselEntry[], vehicles: Vehicle[]): Map<string, number | null> {
+  const prevOdometer = new Map<string, number | null>()
+  const byVehicle = new Map<string, DieselEntry[]>()
+  const opening = new Map(vehicles.filter((v) => v.openingOdometerKm != null && v.openingOdometerDate).map((v) => [v.id, v]))
+  for (const e of diesel) byVehicle.set(e.vehicleId, [...(byVehicle.get(e.vehicleId) ?? []), e])
+  for (const [vehicleId, list] of byVehicle) {
+    list.sort(fillOrder)
+    const o = opening.get(vehicleId)
+    let last: number | null = o && !list.some((e) => e.date < o.openingOdometerDate!) ? o.openingOdometerKm! : null
+    for (const e of list) {
+      prevOdometer.set(e.id, last)
+      if (e.odometerKm !== null) last = e.odometerKm
+    }
+  }
+  return prevOdometer
+}
+
 export function buildDieselIndex(ds: Dataset): DieselIndex {
   const fills = new Map<string, DieselEntry[]>()
   const trips = new Map<string, Trip[]>()
@@ -107,19 +125,9 @@ export function buildDieselIndex(ds: Dataset): DieselIndex {
   // odometer (imported history) has no KM of its own and is skipped as anyone's "previous".
   // A vehicle's go-live opening odometer (its last fill before records began) is the previous reading of its first
   // fill on or after that date — never a fill itself: no litres, no spend, no entry.
-  const prevOdometer = new Map<string, number | null>()
-  const byVehicle = new Map<string, DieselEntry[]>()
-  const opening = new Map(ds.vehicles.filter((v) => v.openingOdometerKm != null && v.openingOdometerDate).map((v) => [v.id, v]))
-  for (const e of ds.diesel) push(byVehicle, e.vehicleId, e)
-  for (const [vehicleId, list] of byVehicle) {
-    list.sort(fillOrder)
-    const o = opening.get(vehicleId)
-    let last: number | null = o && !list.some((e) => e.date < o.openingOdometerDate!) ? o.openingOdometerKm! : null
-    for (const e of list) {
-      prevOdometer.set(e.id, last)
-      if (e.odometerKm !== null) last = e.odometerKm
-    }
-  }
+  // A customer-scoped list (Tata Adblue) carries each fill's previous reading, worked out by the server on every fill.
+  const prevOdometer = previousOdometers(ds.diesel, ds.vehicles)
+  for (const e of ds.diesel) if (e.prevOdometerKm !== undefined) prevOdometer.set(e.id, e.prevOdometerKm)
   const lastUpdated = new Map<string, string>()
   for (const e of ds.diesel) {
     const k = groupKey(e.customerId)

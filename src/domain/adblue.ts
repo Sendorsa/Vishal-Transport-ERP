@@ -38,6 +38,8 @@ export function withRuns(all: AdBlueEntry[]): AdBlueRun[] {
     last.set(e.vehicleId, e)
   }
   return all.map((e) => {
+    // A customer-scoped list (Tata Adblue) carries the previous reading the server found among every entry.
+    if (e.prevKm !== undefined) return { ...e, prevKm: e.prevKm, prevDate: e.prevDate ?? null, kmRun: e.prevKm === null ? null : Math.max(0, e.closingKm - e.prevKm) }
     const p = prev.get(e.id)
     return { ...e, prevKm: p?.closingKm ?? null, prevDate: p?.date ?? null, kmRun: p ? Math.max(0, e.closingKm - p.closingKm) : null }
   })

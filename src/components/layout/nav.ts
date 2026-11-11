@@ -14,7 +14,7 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react"
-import { can, type Resource } from "@/lib/permissions"
+import { can, isAdBlueProfile, type Resource } from "@/lib/permissions"
 import type { Role } from "@/lib/types"
 
 /**
@@ -44,7 +44,7 @@ export const NAV_ITEMS: NavItem[] = [
   { title: "Fuel Stations", short: "Stations", href: "/fuel-stations", icon: Store, resource: "diesel", group: "Fuel" },
   { title: "Diesel", href: "/diesel", icon: Fuel, resource: "diesel", group: "Fuel", mobile: true },
   { title: "Diesel Tankers", short: "Tankers", href: "/tanker", icon: Container, resource: "diesel", group: "Fuel" },
-  { title: "AdBlue", href: "/adblue", icon: Droplets, resource: "diesel", group: "Fuel" },
+  { title: "AdBlue", href: "/adblue", icon: Droplets, resource: "adblue", group: "Fuel" },
   { title: "Invoices", href: "/invoices", icon: FileText, resource: "invoices", group: "Finance", mobile: true },
   { title: "Payments", href: "/payments", icon: ArrowLeftRight, resource: "payments", group: "Finance" },
   { title: "Reports", href: "/reports", icon: BarChart3, resource: "reports", group: "Finance" },
@@ -59,14 +59,21 @@ export const NAV_ITEMS: NavItem[] = [
  * the Audit Log needs the `audit` permission (`navFor`); Settings needs `settings`, which the Employee doesn't have. Hidden modules keep
  * their routes, permissions and API access (src/lib/permissions.ts).
  */
-export const showInNav = (role: Role, item: NavItem) => role === "DEV" || item.group === "Fuel" || item.href === "/audit"
+export const showInNav = (role: Role, item: NavItem) =>
+  isAdBlueProfile(role) ? PROFILE_NAV.includes(item.href) : role === "DEV" || item.group === "Fuel" || item.href === "/audit"
+
+/** Tata Adblue and Adblue (owner, 11 Nov 2026): AdBlue, then Diesel — nothing else, in the sidebar or on the phone. */
+const PROFILE_NAV = ["/adblue", "/diesel"]
 
 export function isActive(pathname: string, href: string) {
   return href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`)
 }
 
 /** The sidebar items a role sees (permission + sidebar visibility) — also everything in the phone drawer ("More"). */
-export const navFor = (role: Role) => NAV_ITEMS.filter((i) => can(role, i.resource) && showInNav(role, i))
+export function navFor(role: Role) {
+  const items = NAV_ITEMS.filter((i) => can(role, i.resource) && showInNav(role, i))
+  return isAdBlueProfile(role) ? items.sort((a, b) => PROFILE_NAV.indexOf(a.href) - PROFILE_NAV.indexOf(b.href)) : items
+}
 
 /**
  * The phone tab bar: four of the role's own sidebar items (those marked `mobile` first), in sidebar order. Dev:

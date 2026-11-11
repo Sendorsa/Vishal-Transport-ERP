@@ -70,6 +70,8 @@ export const useVehicles = () => useQuery({ queryKey: queryKeys.vehicles, queryF
 export const useDrivers = () => useQuery({ queryKey: queryKeys.drivers, queryFn: () => api.drivers.list() })
 export const useTrips = () => useQuery({ queryKey: queryKeys.trips, queryFn: () => api.trips.list() })
 export const useAdBlueEntries = () => useQuery({ queryKey: queryKeys.adblue_entries, queryFn: () => api.adblue.list(), select: withRuns })
+/** Every bulk-stock draw (date, litres, order only) — the shared stock, for every role; refreshed with the AdBlue entries. */
+export const useAdBlueStockDraws = () => useQuery({ queryKey: [...queryKeys.adblue_entries, "stock"], queryFn: () => api.adblueStock.list() })
 export const useVehicleAssignments = () => useQuery({ queryKey: queryKeys.vehicle_assignments, queryFn: () => api.assignments.list() })
 export const useFuelStations = () => useQuery({ queryKey: queryKeys.fuel_stations, queryFn: () => api.fuelStations.list() })
 // Own key under "payments", so recording any payment refreshes it too.
