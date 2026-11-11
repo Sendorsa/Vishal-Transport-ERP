@@ -199,10 +199,21 @@ async function main() {
   await refused(tx(EMP, `insert into fuel.diesel_entries (company_code, date, vehicle_id, station_id, litres, rate, odometer_km) values ('VT', '${today}', 'veh_car', 'dv_raghuveer', 10, 95, 700); ${ev("CREATED", "Diesel", "Diesel entry", "x")}`), /row-level security/, "…for new entries")
   await tx(EMP, `update fuel.diesel_entries set litres = 40 where id = 'dsl_p1'`) // RLS: the row isn't editable, so nothing changes
   assert.equal((await one<{ l: string }>(`select litres::text as l from fuel.diesel_entries where id = 'dsl_p1'`)).l, "37.640", "…and edits")
-  await tx(EMP, `update core.month_locks set state = 'OPEN', changed_by_role = 'EMPLOYEE', changed_by = private.current_profile_id() where month = '${thisMonth}'; ${ev("MONTH_UNLOCKED", "Month Lock", "Month lock", thisMonth)}`) // the Employee unlocks, recorded as EMPLOYEE
-  await tx(EMP, `update core.month_locks set state = 'LOCKED', changed_by_role = 'EMPLOYEE', changed_by = private.current_profile_id() where month = '${thisMonth}'; ${ev("MONTH_LOCKED", "Month Lock", "Month lock", thisMonth)}`)
-  assert.equal((await one<{ s: string }>(`select state::text as s from core.month_locks where month = '${thisMonth}'`)).s, "LOCKED", "…and locks it again (owner, 5 Nov 2026)")
-  await tx(EMP, `update core.month_locks set state = 'OPEN', changed_by_role = 'EMPLOYEE', changed_by = private.current_profile_id() where month = '${thisMonth}'; ${ev("MONTH_UNLOCKED", "Month Lock", "Month lock", thisMonth)}`)
+  // Lock / unlock: the Owner and Dev only (owner, 11 Nov 2026). RLS refuses the Employee's rows and events alike.
+  const lockState = async () => (await one<{ s: string }>(`select state::text as s from core.month_locks where month = '${thisMonth}'`)).s
+  const setLockSql = (state: string, role: string) => `update core.month_locks set state = '${state}', changed_by_role = '${role}', changed_by = private.current_profile_id() where month = '${thisMonth}';`
+  await refused(tx(EMP, `${setLockSql("OPEN", "EMPLOYEE")} ${ev("MONTH_UNLOCKED", "Month Lock", "Month lock", thisMonth)}`), /row-level security/, "the Employee can't unlock a month")
+  await tx(EMP, setLockSql("OPEN", "EMPLOYEE")) // without the event: RLS hides the row from the update, so nothing changes
+  assert.equal(await lockState(), "LOCKED", "…and the month stays locked")
+  await refused(tx(EMP, `insert into core.month_locks (month, state, changed_by_role, changed_by) values ('2020-01', 'LOCKED', 'EMPLOYEE', private.current_profile_id()); ${ev("MONTH_LOCKED", "Month Lock", "Month lock", "2020-01")}`), /row-level security/, "the Employee can't lock a month")
+  await refused(tx(EMP, ev("MONTH_LOCKED", "Month Lock", "Month lock", "2020-01")), /row-level security/, "…nor write a month-lock event")
+  assert.equal((await asUser<{ s: string }>(EMP, `select state::text as s from core.month_locks where month = '${thisMonth}'`))[0]?.s, "LOCKED", "the Employee still sees the lock state")
+  await tx(OWNER, `${setLockSql("OPEN", "OWNER")} ${ev("MONTH_UNLOCKED", "Month Lock", "Month lock", thisMonth)}`)
+  assert.equal(await lockState(), "OPEN", "the Owner unlocks")
+  await tx(OWNER, `${setLockSql("LOCKED", "OWNER")} ${ev("MONTH_LOCKED", "Month Lock", "Month lock", thisMonth)}`)
+  assert.equal(await lockState(), "LOCKED", "…and locks")
+  await tx(DEV, `${setLockSql("OPEN", "DEV")} ${ev("MONTH_UNLOCKED", "Month Lock", "Month lock", thisMonth)}`)
+  assert.equal(await lockState(), "OPEN", "Dev unlocks")
 
   /* ---------------------------------------------------------------- fuel station payments and TDS */
   await tx(OWNER, `insert into finance.payments (id, company_code, direction, date, party_type, station_id, party_name, category_code, amount, mode, for_month) values ('pay_1', 'VT', 'OUT', '${today}', 'VENDOR', 'dv_raghuveer', 'Raghuveer Fuel Station', 'DIESEL_SETTLEMENT', 70000, 'NEFT', '${lastMonthDay.slice(0, 7)}'); ${ev("PAYMENT_RECORDED", "Fuel Stations", "Fuel station payment", "pay_1")}`)

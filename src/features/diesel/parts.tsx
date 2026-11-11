@@ -212,8 +212,8 @@ export function MonthSelect({ months, value, onChange, prominent }: { months: st
 /* ------------------------------------------------------------------ Month lock */
 
 /**
- * Lock badge for the selected month. Employees see whether they can still enter data; the
- * Owner also gets Lock / Unlock-for-users.
+ * Lock badge for the selected month. Everyone sees the state and whether they can still enter data; the
+ * Owner and Dev also get Lock / Unlock-for-users (canSetMonthLock).
  */
 export function MonthLockControl({ month }: { month: string }) {
   const { info, isOwner, canEdit } = useMonthLock(month)

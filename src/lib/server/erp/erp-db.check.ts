@@ -236,7 +236,7 @@ async function main() {
   await assert.rejects(as(OWNER, () => api.vehicles.update(spare.id, { ...spareData, assignedCustomerId: tepl.id, notes: "Stale" }), true, { [spare.id]: spareSeen.updatedAt }), (e: unknown) => e instanceof ConflictError, "a stale screen is still refused")
   assert.equal((await read(EMP, () => api.vehicles.list())).find((x) => x.id === spare.id)!.assignedCustomerId, tepl.id, "…and changed nothing")
 
-  /* ---------------------------------------------------------------- 9. month lock: locked data — Employee refused, Dev and Owner allowed; lock / unlock — all three */
+  /* ---------------------------------------------------------------- 9. month lock: locked data — Employee refused, Dev and Owner allowed; lock / unlock — Owner and Dev only */
   const octFill = await as(OWNER, () => api.diesel.create({ ...fill(10, 119000), date: "2026-10-30" }))
   await assert.rejects(as(EMP, () => api.diesel.update(octFill.id, { ...fill(11, 119000), date: "2026-10-30", vendorId: station.id })), /October 2026 is locked/)
   await assert.rejects(as(EMP, () => api.diesel.remove(octFill.id, "Employee attempt")), /October 2026 is locked/)
@@ -244,7 +244,14 @@ async function main() {
   const lock = await as(DEV, () => api.monthLocks.set(today.slice(0, 7), "LOCKED"))
   assert.equal(lock.changedBy, "DEV")
   await assert.rejects(as(EMP, () => api.diesel.create(fill(5, 121000))), /is locked/) // a month locked early: closed to the Employee
-  assert.equal((await as(EMP, () => api.monthLocks.set(today.slice(0, 7), "OPEN"))).changedBy, "EMPLOYEE", "…who may still unlock it, recorded as itself")
+  // Lock / unlock: the Owner and Dev only (owner, 11 Nov 2026) — the Employee is refused, but still sees the state.
+  await assert.rejects(as(EMP, () => api.monthLocks.set(today.slice(0, 7), "OPEN")), /Only the Owner or Dev can lock or unlock a month/, "the Employee can't unlock it")
+  await assert.rejects(as(EMP, () => api.monthLocks.set("2026-12", "LOCKED")), /Only the Owner or Dev can lock or unlock a month/, "…or lock a month")
+  assert.equal((await read(EMP, () => api.monthLocks.list())).find((l) => l.month === today.slice(0, 7))?.state, "LOCKED", "…and it stays locked, visible to the Employee")
+  assert.ok(!(await read(EMP, () => api.monthLocks.list())).some((l) => l.month === "2026-12"), "nothing was saved")
+  assert.equal((await as(OWNER, () => api.monthLocks.set(today.slice(0, 7), "OPEN"))).changedBy, "OWNER", "the Owner unlocks it, recorded as itself")
+  assert.equal((await as(OWNER, () => api.monthLocks.set(today.slice(0, 7), "LOCKED"))).changedBy, "OWNER", "…and locks it")
+  assert.equal((await as(DEV, () => api.monthLocks.set(today.slice(0, 7), "OPEN"))).changedBy, "DEV", "Dev unlocks it again")
 
   /* ---------------------------------------------------------------- 10. delete with reason; Dev restores; audit identity */
   await assert.rejects(as(EMP, () => api.diesel.remove(f2.id, "")), /reason/i) // permission passes; the reason is still required

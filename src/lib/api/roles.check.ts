@@ -9,7 +9,7 @@ import { checkTanker, setRole, storage } from "./test-browser"
 
 async function main() {
   const { api } = await import("./index")
-  const { can, RESOURCES, DEV_ONLY, ROLES, roleLabel, hasOwnerAuthority, canBypassMonthLock } = await import("@/lib/permissions")
+  const { can, RESOURCES, DEV_ONLY, ROLES, roleLabel, hasOwnerAuthority, canBypassMonthLock, canSetMonthLock } = await import("@/lib/permissions")
   const { currentRole } = await import("@/lib/app-state")
   const { canEditMonth } = await import("@/domain/month-lock")
   const { actorLabel } = await import("@/domain/audit")
@@ -72,6 +72,8 @@ async function main() {
   assert.equal(canEditMonth("DEV", "2020-01", todayISO(), []), true)
   assert.equal(canEditMonth("EMPLOYEE", "2020-01", todayISO(), []), false)
   assert.ok(hasOwnerAuthority("EMPLOYEE") && !canBypassMonthLock("EMPLOYEE") && canBypassMonthLock("OWNER") && canBypassMonthLock("DEV"))
+  // Locking / unlocking a month: the Owner and Dev only (owner, 11 Nov 2026); the Employee keeps every other Owner-level control.
+  assert.ok(canSetMonthLock("OWNER") && canSetMonthLock("DEV") && !canSetMonthLock("EMPLOYEE"))
 
   /* ---------------------------------------------------------------- 6. Role persistence (mock session) */
   setRole("DEV")
@@ -147,6 +149,8 @@ async function main() {
   assert.deepEqual([...new Set(devEvents.map((e) => e.action))].sort(), ["ARCHIVED", "CREATED", "DELETED", "PAYMENT_RECORDED", "RESTORED", "UPDATED"])
   // The Owner keeps every Owner-level control too.
   assert.ok(typeof (await api.audit.unreviewedDeletions()) === "number")
+  assert.equal((await api.monthLocks.set(month, "LOCKED")).changedBy, "OWNER", "the Owner locks a month")
+  assert.equal((await api.monthLocks.set(month, "OPEN")).changedBy, "OWNER", "…and unlocks it")
   const delEntry = log.filter((e) => e.recordId === entry.id && e.action === "DELETED").at(0)!
   assert.equal(delEntry.actor.role, "DEV")
   await api.audit.restoreDeleted(delEntry.id, "Owner restoring the Dev deletion")
@@ -158,7 +162,7 @@ async function main() {
   /* ---------------------------------------------------------------- 9. Every write is permission-checked in the API, not only hidden */
   {
     const refused = /can't|Only the Owner or Dev/
-    // Employee (owner, 5 Nov 2026): the Owner's business access and Owner-level controls; only Settings is refused.
+    // Employee (owner, 5 Nov 2026): the Owner's business access and Owner-level controls; refused Settings and (11 Nov 2026) month lock / unlock.
     const driver = await api.drivers.create({ name: "Roles Check Driver", phone: "", licenseNo: "", licenseValidTill: "", companyCode: "VT", status: "ACTIVE" })
     setRole("EMPLOYEE")
     await api.vehicles.update(vehicle.id, { notes: "Employee note" })
@@ -172,9 +176,12 @@ async function main() {
     const empPay = await api.fuelStationPayments.create({ stationId: pump.id, paymentDate: today, amount: 250, paymentMode: "CASH", notes: "", companyCode: "VT" })
     await api.fuelStationPayments.update(empPay.id, { paymentDate: today, amount: 300, paymentMode: "CASH", notes: "" })
     await api.fuelStationPayments.remove(empPay.id, "Employee correction")
-    await api.monthLocks.set(month, "LOCKED")
-    await api.monthLocks.set(month, "OPEN")
-    // Settings — the one exception: refused in the API.
+    // Month lock / unlock — refused in the API (owner, 11 Nov 2026); the lock state stays readable.
+    const locksBefore = await api.monthLocks.list()
+    await assert.rejects(api.monthLocks.set(month, "LOCKED"), /Only the Owner or Dev can lock or unlock a month/)
+    await assert.rejects(api.monthLocks.set(month, "OPEN"), /Only the Owner or Dev can lock or unlock a month/)
+    assert.deepEqual(await api.monthLocks.list(), locksBefore, "an Employee lock / unlock saves nothing")
+    // Settings — refused in the API.
     await assert.rejects(api.settings.update({ companies: [] }), refused)
     await assert.rejects(api.settings.update({ tdsRate: 3 }), refused)
     await assert.rejects(api.admin.resetDemoData(), refused)

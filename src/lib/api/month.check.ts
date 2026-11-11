@@ -163,10 +163,21 @@ async function main() {
   assert.deepEqual([lock("2026-12"), lock("2027-01")], ["LOCKED", "OPEN"])
   setRole("EMPLOYEE")
   await assert.rejects(api.diesel.update(decEntry.id, edit(decEntry)), /December 2026 is locked/)
-  // …but the Employee may lock and unlock months (owner, 5 Nov 2026): unlocking December opens it for the Employee too.
-  assert.equal((await api.monthLocks.set("2026-12", "OPEN")).changedBy, "EMPLOYEE")
+  // …and may not lock or unlock months (owner, 11 Nov 2026): refused in the API, nothing saved.
+  const locksBefore = await api.monthLocks.list() // the Employee still reads the lock state
+  await assert.rejects(api.monthLocks.set("2026-12", "OPEN"), /Only the Owner or Dev can lock or unlock a month/)
+  await assert.rejects(api.monthLocks.set("2027-01", "LOCKED"), /Only the Owner or Dev can lock or unlock a month/)
+  assert.deepEqual(await api.monthLocks.list(), locksBefore, "nothing was saved")
+  assert.ok(!canEditMonth("EMPLOYEE", "2026-12", todayISO(), locksBefore), "December stays locked for the Employee")
+  // The Owner unlocks December: it opens for the Employee, who edits there; locked again, it is closed again.
+  setRole("OWNER")
+  assert.equal((await api.monthLocks.set("2026-12", "OPEN")).changedBy, "OWNER")
+  setRole("EMPLOYEE")
   assert.ok(canEditMonth("EMPLOYEE", "2026-12", todayISO(), await api.monthLocks.list()))
+  await api.diesel.update(decEntry.id, edit(decEntry), "Employee correction in an unlocked month")
+  setRole("OWNER")
   await api.monthLocks.set("2026-12", "LOCKED")
+  setRole("EMPLOYEE")
   await assert.rejects(api.diesel.update(decEntry.id, edit(decEntry)), /December 2026 is locked/)
   const janFill = await api.diesel.create(fill("2027-01-01"))
   setRole("OWNER")

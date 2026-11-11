@@ -57,11 +57,14 @@ export function can(role: Role, resource: Resource, action: Action = "view") {
 }
 
 /**
- * Owner-level business controls — month lock / unlock, deletion review and its badge, Restore / Push Back, opening
- * balances and opening stock: the Owner, Dev and (owner, 5 Nov 2026) the Employee, tested by name (never through
- * can()). Settings → Data (backup, restore, reset, clear) also needs `settings`.
+ * Owner-level business controls — deletion review and its badge, Restore / Push Back, opening balances and opening
+ * stock: the Owner, Dev and (owner, 5 Nov 2026) the Employee, tested by name (never through can()). Settings → Data
+ * (backup, restore, reset, clear) also needs `settings`. Month lock / unlock is not one of them: see canSetMonthLock.
  */
 export const hasOwnerAuthority = (role: Role) => role === "OWNER" || role === "DEV" || role === "EMPLOYEE"
+
+/** Locking or unlocking a month: the Owner and Dev only — never the Employee (owner, 11 Nov 2026). */
+export const canSetMonthLock = (role: Role) => role === "OWNER" || role === "DEV"
 
 /** Changing data in a locked month (Monthly Sheet Lock): the Owner and Dev only — never the Employee (owner, 5 Nov 2026). */
 export const canBypassMonthLock = (role: Role) => role === "OWNER" || role === "DEV"

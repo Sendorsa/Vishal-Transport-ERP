@@ -15,7 +15,7 @@ import { insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from 
 import { availabilityMessage, fillAmount, fitsTanker, isStockPool, isTankerFill, normReg, shortfallMessage, tankerAvailability, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/station-ledger"
 import { currentActor, currentRole } from "@/lib/identity"
-import { can, hasOwnerAuthority, type Resource } from "@/lib/permissions"
+import { can, canSetMonthLock, hasOwnerAuthority, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
 import { addMonths, format, parseISO } from "date-fns"
 import { assignmentIndex, assignmentOn, correctedPeriods, handedOverBy, inferAssignments, isCalendarDate, movedRecords, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type AttributedRecords, type MovedRecord, type StartDateProblem } from "@/domain/assignments"
@@ -1154,10 +1154,10 @@ export const api = {
   },
   monthLocks: {
     list: monthLocks.list,
-    /** PUT /api/month-locks/:month — Owner only: lock a month early or unlock a closed one for users. */
+    /** PUT /api/month-locks/:month — Owner and Dev only (canSetMonthLock): lock a month early or unlock a closed one. */
     set: (month: string, state: "OPEN" | "LOCKED") =>
       tx(async () => {
-        if (!hasOwnerAuthority(currentRole())) throw new Error("Only the Owner or Dev can lock or unlock a month.")
+        if (!canSetMonthLock(currentRole())) throw new Error("Only the Owner or Dev can lock or unlock a month.")
         const existing = readCollection("month_locks").find((l) => l.month === month)
         const changedBy = currentRole() // recorded as who actually did it — a Dev lock is never labelled Owner
         const after = existing ? await monthLocks.update(existing.id, { state, changedBy }) : await monthLocks.create({ month, state, changedBy })
