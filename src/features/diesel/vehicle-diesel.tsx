@@ -178,11 +178,14 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
       <Card size="sm">
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="text-sm font-semibold">Vehicle information</CardTitle>
-          <Button variant="ghost" size="sm" asChild>
-            <Link href={`/vehicles/${vehicle.id}`}>
-              Full vehicle record <ExternalLink />
-            </Link>
-          </Button>
+          {/* The vehicle-management page: not for the AdBlue profiles (no vehicles permission; the gate redirects them). */}
+          {can("vehicles") && (
+            <Button variant="ghost" size="sm" asChild>
+              <Link href={`/vehicles/${vehicle.id}`}>
+                Full vehicle record <ExternalLink />
+              </Link>
+            </Button>
+          )}
         </CardHeader>
         <CardContent>
           <DetailList

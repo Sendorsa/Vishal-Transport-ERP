@@ -249,7 +249,7 @@ export function CompanyDiesel({ slug }: { slug: string }) {
                 <Archive /> {showArchived ? "Hide archived vehicles" : `Show archived vehicles (${archivedCount})`}
               </Button>
             )}
-            {archived && <span className="text-xs text-muted-foreground">Archived customer — history only. Restore it from the Diesel page to add vehicles.</span>}
+            {archived && <span className="text-xs text-muted-foreground">Archived customer — history only.{can("customers", "edit") && " Restore it from the Diesel page to add vehicles."}</span>}
             {group.customer && !archived && can("vehicles", "edit") && (
               <Button variant="outline" size="sm" onClick={() => setAdding(true)}>
                 <Plus /> Add vehicle

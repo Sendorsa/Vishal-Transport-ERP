@@ -25,7 +25,8 @@ const METHODS: Record<string, Shape> = {
   "monthLocks.list": "as-is",
   "tankers.list": "as-is",
   "adbluePurchases.list": "as-is",
-  "adblueStock.list": "as-is",
+  "adblueStock.list": "as-is", // every draw (date, litres) — Adblue only, refused to Tata Adblue (TATA_REFUSED)
+  "adblueTotals.get": "as-is", // company-wide totals by month, no single entry: the AdBlue page for every profile
   "fuelStations.list": "stations",
   // Tata Adblue: its granted customers only. Adblue: every customer.
   "customers.list": "customers",
@@ -51,8 +52,14 @@ const METHODS: Record<string, Shape> = {
   "adbluePurchases.create": "as-is",
 }
 
+/**
+ * Tata Adblue sees the whole company's AdBlue only as totals (adblueTotals.get): never one record of a customer it
+ * wasn't granted — not even a draw's date and litres (owner, 11 Nov 2026).
+ */
+const TATA_REFUSED = new Set(["adblueStock.list"])
+
 /** The methods an AdBlue profile may call (pinned in check:erp-db). */
-export const PROFILE_METHODS = Object.keys(METHODS)
+export const profileMethods = (role: "TATA_ADBLUE" | "ADBLUE") => Object.keys(METHODS).filter((m) => role === "ADBLUE" || !TATA_REFUSED.has(m))
 
 /**
  * `call` as this role may make it: unchanged for the Owner, Dev and Employee; for an AdBlue profile, only a listed
@@ -62,7 +69,7 @@ export const PROFILE_METHODS = Object.keys(METHODS)
  */
 export function profileCall<T>(role: Role, method: string, call: () => Promise<T>, scope?: ReadonlySet<string> | null): (() => Promise<unknown>) | null {
   if (!isAdBlueProfile(role)) return call
-  const shape = Object.hasOwn(METHODS, method) ? METHODS[method] : undefined
+  const shape = Object.hasOwn(METHODS, method) && !(role === "TATA_ADBLUE" && TATA_REFUSED.has(method)) ? METHODS[method] : undefined
   if (!shape) return null
   if (shape === "empty") return async () => []
   if (shape === "zero") return async () => 0

@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { failure, setRole, tankerRecordsOf } from "./test-browser"
+import { failure, loadCheckDemoData, setRole, tankerRecordsOf } from "./test-browser"
 
 const FIXED = new Date("2026-11-10T04:30:00.000Z").getTime()
 const RealDate = Date
@@ -37,6 +37,7 @@ async function main() {
   const { writeCollection, AUDIT_KEY } = await import("@/lib/storage/local-store")
   const { hasOwnerAuthority } = await import("@/lib/permissions")
   assert.equal(todayISO(), "2026-11-10")
+  loadCheckDemoData() // the demo data up to the fixed clock — the import ran before it was set (real date)
   const OCT = "2026-10-31"
   const NOV = "2026-11"
 

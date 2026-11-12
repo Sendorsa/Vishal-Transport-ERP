@@ -11,11 +11,11 @@ import { adBlueNeighbours } from "@/domain/adblue"
 import { odometerConflict } from "@/domain/diesel"
 import { dayBefore, statusOn, withStatus } from "@/domain/status-history"
 import { canEditMonth } from "@/domain/month-lock"
-import { insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from "@/domain/adblue-inventory"
+import { adBlueTotals, insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from "@/domain/adblue-inventory"
 import { availabilityMessage, fillAmount, fitsTanker, isStockPool, isTankerFill, normReg, shortfallMessage, tankerAvailability, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/station-ledger"
 import { currentActor, currentRole, customerScope } from "@/lib/identity"
-import { can, canChangeAdBluePurchases, canSetMonthLock, hasOwnerAuthority, type Resource } from "@/lib/permissions"
+import { can, canChangeAdBluePurchases, canSetMonthLock, hasOwnerAuthority, isAdBlueProfile, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
 import { addMonths, format, parseISO } from "date-fns"
 import { assignmentIndex, assignmentOn, correctedPeriods, handedOverBy, inferAssignments, isCalendarDate, movedRecords, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type AttributedRecords, type MovedRecord, type StartDateProblem } from "@/domain/assignments"
@@ -269,6 +269,21 @@ function assertCan(resource: Resource, action: "create" | "edit" | "delete") {
  * Checked after the entry's customer is stamped from the vehicle's assignment, so it can't be chosen around. RLS
  * (private.customer_in_scope) checks the same on the shared database.
  */
+/**
+ * The AdBlue profiles record AdBlue only for a vehicle assigned to a customer on the entry's date (owner, 11 Nov 2026):
+ * never a spare vehicle, nor a date before its first or after its last assignment — otherwise the caller's customer
+ * would be stamped on it (assignedCustomer), outside any real assignment. Owner, Dev and Employee are unchanged.
+ * Names no customer. Checked on add and on every edit (against the new date).
+ */
+function assertProfileAssignment(vehicleId: string, date: string) {
+  if (!isAdBlueProfile(currentRole())) return
+  const v = readCollection("vehicles").find((x) => x.id === vehicleId)
+  if (!v) throw new NotFoundError("Vehicle", vehicleId)
+  if (assignmentOn(assignmentIndex(periodsOf(vehicleId)), vehicleId, date)?.customerId) return // an unassigned period has none
+  const reg = v.regNo
+  throw new PermissionError(`${reg} has no customer assignment on ${formatDate(date)}. Your account can add AdBlue only for a vehicle assigned to a customer on the entry date.`)
+}
+
 function assertCustomerScope(customerId: string | null) {
   const scope = customerScope()
   if (scope && !(customerId && scope.has(customerId))) throw new PermissionError("Your account can't add or change AdBlue entries for this customer. Ask Dev for access.")
@@ -336,9 +351,15 @@ function assertCustomerOpen(customerId: string | null | undefined, date: string)
   const c = readCollection("customers").find((x) => x.id === customerId)
   if (c && statusOn(c, date) === "ARCHIVED") throw new Error(`${c.shortName || c.name} is archived on ${date}. Restore the customer to add new records.`)
 }
+/**
+ * New Diesel, AdBlue and trip records (and restores) only for an existing vehicle and customer — never one created on
+ * the way (owner, 11 Nov 2026). The shared database's foreign keys refuse it too; the browser store has none.
+ */
 function assertOpen(vehicleId: string, customerId: string | null, date: string) {
   const v = readCollection("vehicles").find((x) => x.id === vehicleId)
-  if (v && statusOn(v, date) === "ARCHIVED") throw new Error(`${v.regNo} is archived on ${date}. Restore the vehicle to add new entries.`)
+  if (!v) throw new NotFoundError("Vehicle", vehicleId)
+  if (customerId && !readCollection("customers").some((c) => c.id === customerId)) throw new NotFoundError("Customer", customerId)
+  if (statusOn(v, date) === "ARCHIVED") throw new Error(`${v.regNo} is archived on ${date}. Restore the vehicle to add new entries.`)
   assertCustomerOpen(customerId, date)
 }
 
@@ -1055,6 +1076,7 @@ export const api = {
       }),
     update: (id: string, patch: { name: string; location: string; creditDays: number }) =>
       tx(async () => {
+        assertCan("diesel", "edit") // the permission first, before any validation (it names other stations)
         const name = patch.name.trim()
         if (!name) throw new Error("Enter the fuel station name")
         if (readCollection("fuel_stations").some((v) => v.id !== id && v.name.trim().toLowerCase() === name.toLowerCase())) throw new Error(`${name} already exists`)
@@ -1436,6 +1458,7 @@ export const api = {
       tx(async () => {
         assertCan("adblue", "create")
         assertMonthEditable(input.date)
+        assertProfileAssignment(input.vehicleId, input.date)
         input = { ...input, customerId: assignedCustomer(input.vehicleId, input.date, input.customerId) }
         assertCustomerScope(input.customerId)
         assertOpen(input.vehicleId, input.customerId, input.date)
@@ -1455,6 +1478,7 @@ export const api = {
         assertMonthEditable(before.date)
         assertMonthEditable(input.date)
         assertSameCustomerOnDate(before.vehicleId, before.customerId, before.date, input.date)
+        assertProfileAssignment(before.vehicleId, input.date)
         const entry = checkAdBlue(input, id)
         assertStock(readCollection("adblue_purchases"), readCollection("adblue_entries").map((e) => (e.id === id ? { ...e, ...entry } : e)))
         const beforeView = adblueView(before)
@@ -1484,6 +1508,15 @@ export const api = {
    */
   adblueStock: {
     list: async () => stockDraws(await adblue.list()).map((e) => ({ id: e.id, date: e.date, createdAt: e.createdAt, quantityLitres: e.quantityLitres, source: "STOCK" as const })),
+  },
+
+  /**
+   * GET /api/adblue-totals — the AdBlue page's company-wide figures, totals by month only (adBlueTotals): stock, value,
+   * the monthly ledger, consumption at cost and direct vendor purchases. No single entry of any customer is in it, so
+   * Tata Adblue gets the whole company's AdBlue without any other customer's records (owner, 11 Nov 2026).
+   */
+  adblueTotals: {
+    get: async () => adBlueTotals(await adbluePurchases.list(), valued(await adblue.list()), todayISO().slice(0, 7)),
   },
 
   /** Diesel loaded into the tanker's cargo. Amount = litres × rate; month lock; stock never below zero. */

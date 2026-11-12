@@ -170,3 +170,47 @@ export const isDirectAdBlue = (e: { source?: "STOCK" | "DIRECT" }) => e.source =
 
 /** Vehicle AdBlue entries that draw from bulk inventory (direct vendor purchases left out). */
 export const stockDraws = <E extends { source?: "STOCK" | "DIRECT" }>(entries: E[]) => entries.filter((e) => !isDirectAdBlue(e))
+
+type Stock = { stockLitres: number; stockValue: number; avgRate: number | null }
+
+/**
+ * Company-wide AdBlue figures by month — totals only (owner, 11 Nov 2026): the AdBlue page's stock, ledger and
+ * consumption figures, computed on the server from every record, so Tata Adblue sees the whole company's AdBlue without
+ * any single entry (no id, vehicle, customer or entry date) of a customer it wasn't granted.
+ */
+export interface AdBlueTotals {
+  /** The monthly stock ledger, first activity → `throughMonth`. */
+  ledger: StockRow[]
+  current: Stock
+  /** Stock and value at each ledger month's end. */
+  monthEnd: ({ month: string } & Stock)[]
+  /** Direct vendor purchases per month (never bulk stock). */
+  direct: { month: string; litres: number; cost: number; count: number }[]
+}
+
+export function adBlueTotals(purchases: Purchase[], entries: (Consumption & { amount: number; source?: "STOCK" | "DIRECT" })[], throughMonth: string): AdBlueTotals {
+  const draws = stockDraws(entries).map(({ id, date, createdAt, quantityLitres }) => ({ id, date, createdAt, quantityLitres }))
+  const stock = (v: Valuation): Stock => ({ stockLitres: v.stockLitres, stockValue: v.stockValue, avgRate: v.avgRate })
+  const ledger = inventoryLedger(purchases, draws, throughMonth)
+  const upTo = (m: string) => (e: { date: string }) => e.date.slice(0, 7) <= m
+  const direct = new Map<string, { litres: number; cost: number; count: number }>()
+  for (const e of entries.filter(isDirectAdBlue)) {
+    const r = direct.get(e.date.slice(0, 7)) ?? { litres: 0, cost: 0, count: 0 }
+    direct.set(e.date.slice(0, 7), { litres: r.litres + e.quantityLitres, cost: r.cost + e.amount, count: r.count + 1 })
+  }
+  return {
+    ledger,
+    current: stock(valueInventory(purchases, draws)),
+    monthEnd: ledger.map((r) => ({ month: r.month, ...stock(valueInventory(purchases.filter(upTo(r.month)), draws.filter(upTo(r.month)))) })),
+    direct: [...direct].sort().map(([month, r]) => ({ month, litres: round2(r.litres), cost: round2(r.cost), count: r.count })),
+  }
+}
+
+/** A period's figures from the totals (months: the period's yyyy-MM list; undefined = all time). */
+export function totalsFor(t: AdBlueTotals, months: string[] | undefined, endedMonth: string | null) {
+  const inPeriod = (m: string) => !months || months.includes(m)
+  const d = t.direct.filter((r) => inPeriod(r.month))
+  const sum = (f: (r: (typeof d)[number]) => number) => round2(d.reduce((s, r) => s + f(r), 0))
+  const end = endedMonth ? ([...t.monthEnd].reverse().find((r) => r.month <= endedMonth) ?? { stockLitres: 0, stockValue: 0, avgRate: null }) : t.current
+  return { stock: end, directCost: sum((r) => r.cost), directLitres: sum((r) => r.litres), directCount: d.reduce((s, r) => s + r.count, 0) }
+}

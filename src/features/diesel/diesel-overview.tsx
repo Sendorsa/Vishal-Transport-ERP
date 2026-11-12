@@ -258,11 +258,13 @@ export function DieselOverview() {
         <EmptyState
           icon={Users}
           title="No customers yet"
-          description="Add your first transport customer to start tracking diesel by vehicle."
+          description={can("customers", "create") ? "Add your first transport customer to start tracking diesel by vehicle." : "There are no customers' Diesel records to show."}
           action={
-            <Button onClick={() => setAdding(true)}>
-              <Plus /> Add Customer
-            </Button>
+            can("customers", "create") && (
+              <Button onClick={() => setAdding(true)}>
+                <Plus /> Add Customer
+              </Button>
+            )
           }
         />
       ) : sorted.length === 0 ? (

@@ -6,7 +6,7 @@
  */
 import { api as localApi, PossibleDuplicateError } from "./index"
 import { ConflictError, pendingVersions } from "@/lib/versions"
-import { previewRole } from "@/lib/identity"
+import { currentRole, previewRole } from "@/lib/identity"
 import { isAdBlueProfile } from "@/lib/permissions"
 import { profileCall } from "@/lib/server/erp/profiles"
 import { isReadMethod } from "./reads"
@@ -76,6 +76,21 @@ function previewRead(ns: string, method: string, read: () => Promise<unknown>): 
 }
 
 /**
+ * A signed-in AdBlue profile on the browser backend (`local`): the same method list and result shapes as the server
+ * applies on the shared database (profiles.ts), so the browser's own store never shows it another customer's records.
+ * Tata Adblue has no grants here (they live in the shared database: customerScope() is empty in the browser), so it
+ * sees no customer at all — fail closed. On the shared database the server does this; applying it again in the
+ * browser would wipe the already-limited results, so it isn't.
+ */
+function profileLocal(ns: string, method: string, run: () => unknown): unknown {
+  const role = currentRole()
+  if (isSharedBackend || previewRole() || !isAdBlueProfile(role)) return run()
+  const shaped = profileCall(role, `${ns}.${method}`, async () => run())
+  if (!shaped) return Promise.reject(new Error("Your account can't open this."))
+  return shaped()
+}
+
+/**
  * UI Preview Mode (identity.ts): while it's on, every `api` method the UI calls that isn't a read is refused here,
  * before it reaches the browser store or the server — whatever the previewed role's screens offer. Reads pass through
  * unchanged for the Owner / Employee previews; for an AdBlue profile they get that profile's method list and shapes
@@ -92,10 +107,10 @@ function blockWritesWhilePreviewing(target: typeof localApi): typeof localApi {
         get: (g, method: string) => {
           const fn = Reflect.get(g, method)
           if (typeof fn !== "function") return fn
-          if (isReadMethod(ns, method)) return (...args: unknown[]) => (previewRole() ? previewRead(ns, method, () => Reflect.apply(fn, g, args)) : Reflect.apply(fn, g, args))
+          if (isReadMethod(ns, method)) return (...args: unknown[]) => (previewRole() ? previewRead(ns, method, () => Reflect.apply(fn, g, args)) : profileLocal(ns, method, () => Reflect.apply(fn, g, args)))
           return (...args: unknown[]) => {
             if (previewRole()) throw new PreviewWriteBlockedError()
-            return Reflect.apply(fn, g, args)
+            return profileLocal(ns, method, () => Reflect.apply(fn, g, args))
           }
         },
       })

@@ -278,6 +278,52 @@ async function main() {
     }
   }
 
+  /* ---------------------------------------------------------------- The AdBlue profiles use existing master data, never manage it */
+  // Owner, 11 Nov 2026: Tata Adblue and Adblue are AdBlue-entry users. A straight API call (the UI bypassed) to any write
+  // but the AdBlue entries and adding a bulk purchase is refused by the API itself — customers, vehicles, drivers, fuel
+  // stations, assignments, Diesel, payments, settings, openings, month locks, restore — and nothing is stored.
+  // (On the shared database the method list refuses them first, and RLS again: check:erp-db 12d.)
+  {
+    const { isReadMethod } = await import("./reads")
+    const allowed = ["adblue.create", "adblue.update", "adblue.remove", "adbluePurchases.create"]
+    // Writes whose permission depends on the input: the inputs the UI's combined flows use.
+    const args: Record<string, unknown[]> = {
+      "payments.create": [{ direction: "OUT", vehicleId: (await api.vehicles.list())[0].id, allocations: [] }],
+      "settings.update": [{ vehicleTypes: [] }],
+      "fuelStations.update": [(await api.fuelStations.list())[0]?.id ?? "x", { name: "Renamed", location: "", creditDays: 30 }],
+    }
+    const stored = () => JSON.stringify(Object.keys(window.localStorage).filter((k) => !k.startsWith("vt:ui:")).sort().map((k) => [k, window.localStorage.getItem(k)]))
+    const before = stored()
+    for (const role of ["ADBLUE", "TATA_ADBLUE"] as const) {
+      setRole(role)
+      let refused = 0
+      for (const [ns, group] of Object.entries(api))
+        for (const [m, fn] of Object.entries(group as Record<string, unknown>)) {
+          const name = `${ns}.${m}`
+          if (typeof fn !== "function" || isReadMethod(ns, m) || allowed.includes(name)) continue
+          await assert.rejects(
+            async () => (fn as (...a: unknown[]) => Promise<unknown>)(...(args[name] ?? [])),
+            (e: Error) => /can't|^Only (the Owner or Dev|Dev)/.test(e.message),
+            `${role}: ${name} refused by the API`,
+          )
+          refused++
+        }
+      assert.ok(refused > 50, `${role}: every other write checked (${refused})`)
+      for (const r of ["customers", "vehicles", "trips", "invoices", "payments", "settings"] as const) for (const a of ["create", "edit", "delete"] as const) assert.equal(can(role, r, a), false, `${role}: no ${r}:${a}`)
+      for (const a of ["create", "edit", "delete"] as const) assert.equal(can(role, "diesel", a), false, `${role}: Diesel is view-only`)
+      assert.ok(can(role, "diesel", "view") && can(role, "adblue", "create") && !canChangeAdBluePurchases(role, "edit") && !canChangeAdBluePurchases(role, "delete") && !hasOwnerAuthority(role), `${role}: AdBlue entries and adding purchases only`)
+    }
+    // AdBlue entries only for an existing vehicle and customer — the browser store has no foreign keys, so the API checks.
+    const v0 = (await api.vehicles.list()).find((v) => v.status === "ACTIVE")!
+    const entry = { vehicleId: "veh_nope", customerId: null, date: todayISO(), closingKm: 1, quantityLitres: 1, invoiceNo: "", notes: "", source: "STOCK" as const }
+    setRole("ADBLUE")
+    await assert.rejects(api.adblue.create(entry), /Vehicle veh_nope not found/, "Adblue: no AdBlue entry for a vehicle that doesn't exist")
+    await assert.rejects(api.adblue.create({ ...entry, vehicleId: v0.id, customerId: "cus_nope" }), /Customer cus_nope not found|is assigned to/, "…nor for a customer that doesn't exist")
+    setRole("OWNER")
+    await assert.rejects(api.diesel.create({ date: todayISO(), vehicleId: "veh_nope", customerId: null, vendorId: "x", litres: 1, rate: 1, odometerKm: 1, billNo: "", paymentMode: "CREDIT" } as never), /Vehicle veh_nope not found/, "the same for every role and module")
+    assert.equal(stored(), before, "nothing stored by any refused call")
+  }
+
   /* ---------------------------------------------------------------- Regression: a data reset never changes who you are */
   // clearAll used to wipe vt:ui:role, which then fell back to Owner — a reset promoted whoever ran it.
   setRole("DEV")
@@ -295,9 +341,16 @@ async function main() {
     const { setVerifiedSession, setPreviewRole, previewRole, currentActor, customerScope } = await import("@/lib/identity")
     const { api: uiApi, PreviewWriteBlockedError, PreviewReadBlockedError } = await import("./client")
     const { isReadMethod } = await import("./reads")
-    const { PROFILE_METHODS } = await import("@/lib/server/erp/profiles")
+    const { profileMethods, profileCall } = await import("@/lib/server/erp/profiles")
+    const { stockFor } = await import("@/domain/adblue-inventory")
     const dev = { role: "DEV" as const, email: "dev@example.com" }
     setVerifiedSession(dev)
+    // AdBlue for the totals (the demo data has none): a bulk purchase, a stock draw and a direct vendor purchase.
+    const abVehicle = (await api.vehicles.list()).find((v) => v.status === "ACTIVE" && v.assignedCustomerId)!
+    const abEntry = { vehicleId: abVehicle.id, customerId: abVehicle.assignedCustomerId, date: todayISO(), invoiceNo: "", notes: "" }
+    await api.adbluePurchases.create({ date: todayISO(), vendorName: "Preview Check Chemicals", product: "AdBlue", buckets: 2, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" })
+    await api.adblue.create({ ...abEntry, closingKm: 9_999_990, quantityLitres: 3, source: "STOCK" })
+    await api.adblue.create({ ...abEntry, closingKm: 9_999_995, quantityLitres: 2, source: "DIRECT", vendorName: "Preview Check Vendor", rate: 100, paymentMode: "CASH" })
     for (const r of ["OWNER", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"] as const) {
       setPreviewRole(r)
       assert.equal(previewRole(), r, `DEV previews ${r}`)
@@ -322,7 +375,7 @@ async function main() {
     // The AdBlue profiles: reads take that profile's method list and shapes (profiles.ts) — what a real account would
     // see — never DEV's data; the identity, the API's role and the customer scope stay DEV's throughout.
     setPreviewRole(null)
-    const devView = { customers: await uiApi.customers.list(), vehicles: await uiApi.vehicles.list(), diesel: await uiApi.diesel.list(), adblue: await uiApi.adblue.list(), purchases: await uiApi.adbluePurchases.list(), stock: await uiApi.adblueStock.list(), trips: await uiApi.trips.list(), payments: await uiApi.payments.list(), stations: await uiApi.fuelStations.list(), settings: await uiApi.settings.get() }
+    const devView = { customers: await uiApi.customers.list(), vehicles: await uiApi.vehicles.list(), diesel: await uiApi.diesel.list(), adblue: await uiApi.adblue.list(), purchases: await uiApi.adbluePurchases.list(), stock: await uiApi.adblueStock.list(), totals: await uiApi.adblueTotals.get(), trips: await uiApi.trips.list(), payments: await uiApi.payments.list(), stations: await uiApi.fuelStations.list(), settings: await uiApi.settings.get() }
     assert.ok(devView.customers.length > 0 && devView.vehicles.length > 0 && devView.diesel.length > 0 && devView.trips.length > 0 && devView.payments.length > 0, "Dev's own view has data to hide")
     for (const r of ["TATA_ADBLUE", "ADBLUE"] as const) {
       setPreviewRole(r)
@@ -336,7 +389,16 @@ async function main() {
       assert.deepEqual(await uiApi.assignments.list(), tata ? [] : await api.assignments.list(), `${r}: assignments`)
       // Shared, not customer data: the one stock pool, its purchases, settings — exactly as the profiles get them.
       assert.deepEqual(await uiApi.adbluePurchases.list(), devView.purchases, `${r}: shared purchases`)
-      assert.deepEqual(await uiApi.adblueStock.list(), devView.stock, `${r}: shared stock`)
+      // AdBlue page: the whole company's figures as totals only — computed by the API (on the server for the shared
+      // database), never from records in the browser. Tata Adblue gets no individual draw, as for a real account.
+      const totals = await uiApi.adblueTotals.get()
+      assert.deepEqual(totals, devView.totals, `${r}: company-wide AdBlue totals`)
+      if (tata) {
+        await assert.rejects(uiApi.adblueStock.list(), PreviewReadBlockedError, "Tata Adblue preview: no individual draws")
+        const json = JSON.stringify(totals)
+        for (const id of [...devView.adblue.map((e) => e.id), ...devView.customers.map((c) => c.id), ...devView.vehicles.map((v) => v.id), ...devView.vehicles.map((v) => v.regNo), "Preview Check Vendor"])
+          assert.ok(!json.includes(`"${id}"`), `Tata Adblue preview: the totals hold no record (${id})`)
+      } else assert.deepEqual(await uiApi.adblueStock.list(), devView.stock, `${r}: shared stock`)
       assert.deepEqual(await uiApi.settings.get(), devView.settings)
       assert.ok((await uiApi.fuelStations.list()).every((x) => x.openingBalance === undefined && x.openingBalanceDate === undefined), `${r}: no station money`)
       for (const m of ["trips", "payments", "invoices", "tankerLoads", "tankerDispenses", "tankerTransfers", "tankerAdjustments"] as const)
@@ -347,7 +409,7 @@ async function main() {
       for (const read of [() => uiApi.audit.list(), () => uiApi.audit.history("x"), () => uiApi.diesel.get("x"), () => uiApi.admin.exportBackup(), () => uiApi.audit.checkRestore("x")])
         await assert.rejects(read(), PreviewReadBlockedError, `${r}: off-list read refused`)
       // Every read on the profile's list works in preview (no screen of the profile fails to load).
-      for (const m of PROFILE_METHODS.filter((m) => isReadMethod(m.split(".")[0], m.split(".")[1]))) {
+      for (const m of profileMethods(r).filter((m) => isReadMethod(m.split(".")[0], m.split(".")[1]))) {
         const [ns, fn] = m.split(".")
         await (uiApi as unknown as Record<string, Record<string, (...a: unknown[]) => Promise<unknown>>>)[ns][fn]()
       }
@@ -355,6 +417,11 @@ async function main() {
       assert.throws(() => uiApi.adblue.create({} as never), PreviewWriteBlockedError)
       assert.throws(() => uiApi.adbluePurchases.create({} as never), PreviewWriteBlockedError)
     }
+    assert.deepEqual([stockFor(devView.totals.ledger).consumed, devView.totals.direct.at(-1)], [3, { month: todayISO().slice(0, 7), litres: 2, cost: 200, count: 1 }], "the totals: the draw and the direct purchase")
+    // The Diesel preview's scope rule (profileCall, the server's own): Tata Adblue sees its granted customers' fills only.
+    const someone = devView.diesel[0].customerId!
+    const scoped = (await profileCall("TATA_ADBLUE", "diesel.list", () => api.diesel.list(), new Set([someone]))!()) as typeof devView.diesel
+    assert.ok(scoped.length > 0 && scoped.length < devView.diesel.length && scoped.every((e) => e.customerId === someone), "Diesel: only the granted customer's fills")
     // Switching straight from one profile to another, and to the Owner / Employee: each view is its own.
     setPreviewRole("TATA_ADBLUE")
     setPreviewRole("ADBLUE")
@@ -403,6 +470,32 @@ async function main() {
     setPreviewRole("OWNER")
     setVerifiedSession({ role: "DEV", email: "other-dev@example.com" })
     assert.equal(previewRole(), null, "another DEV account doesn't inherit a preview")
+    setVerifiedSession(null)
+    setRole("OWNER")
+  }
+
+  /* ---------------------------------------------------------------- A signed-in AdBlue profile on the browser backend */
+  // The profile's own read rules apply to its real session too, not only to a DEV preview: the browser store holds every
+  // customer, and Tata Adblue's grants live in the shared database, so here it sees no customer at all (fail closed);
+  // Adblue sees every customer. The company-wide AdBlue totals stay whole for both. Owner / Dev / Employee unchanged.
+  {
+    const { setVerifiedSession } = await import("@/lib/identity")
+    const { api: uiApi } = await import("./client")
+    const all = { customers: await api.customers.list(), vehicles: await api.vehicles.list(), diesel: await api.diesel.list(), adblue: await api.adblue.list(), assignments: await api.assignments.list(), drivers: await api.drivers.list(), totals: await api.adblueTotals.get() }
+    assert.ok(all.customers.length > 1 && all.vehicles.length > 0 && all.diesel.length > 0, "the store has customers to hide")
+    setVerifiedSession({ role: "TATA_ADBLUE", email: "tata@example.com" })
+    for (const m of ["customers", "vehicles", "diesel", "adblue", "assignments", "drivers"] as const)
+      assert.deepEqual(await (uiApi[m] as { list: () => Promise<unknown> }).list(), [], `Tata Adblue (browser backend, no grants): no ${m}`)
+    assert.deepEqual(await uiApi.adblueTotals.get(), all.totals, "Tata Adblue: the company-wide AdBlue totals, unchanged")
+    for (const read of [() => uiApi.adblueStock.list(), () => uiApi.audit.list(), () => uiApi.diesel.get(all.diesel[0].id)]) await assert.rejects(read(), /can't open this/, "Tata Adblue: off-list reads refused")
+    await assert.rejects(uiApi.customers.create({ name: "Sneaky Co" } as never), /can't open this/, "…and off-list writes")
+    setVerifiedSession({ role: "ADBLUE", email: "adblue@example.com" })
+    assert.deepEqual([await uiApi.customers.list(), await uiApi.diesel.list(), await uiApi.adblueTotals.get()], [all.customers, all.diesel, all.totals], "Adblue: every customer, as before")
+    await assert.rejects(uiApi.adblueStock.list().then(() => uiApi.audit.list()), /can't open this/, "Adblue: its method list applies too")
+    for (const role of ["OWNER", "DEV", "EMPLOYEE"] as const) {
+      setVerifiedSession({ role, email: `${role.toLowerCase()}@example.com` })
+      assert.deepEqual([await uiApi.customers.list(), await uiApi.vehicles.list(), await uiApi.diesel.list()], [all.customers, all.vehicles, all.diesel], `${role}: unchanged`)
+    }
     setVerifiedSession(null)
     setRole("OWNER")
   }
