@@ -10,6 +10,7 @@ import { ALL, FilterBar, FilterSelect, SearchBar } from "@/components/shared/fil
 import { Money, NoAccess } from "@/components/shared/misc"
 import { PageHeader } from "@/components/shared/page-header"
 import { CompanyBadge, StatusBadge } from "@/components/shared/status-badge"
+import { FuelBadge } from "@/components/shared/fuel-badge"
 import { vehicleProfitability, type VehicleProfit } from "@/domain/analytics"
 import { rangeForPreset } from "@/domain/periods"
 import { useDataset } from "@/lib/api/hooks"
@@ -84,6 +85,7 @@ export function VehicleList() {
             <span className={r.vehicle.status === "ARCHIVED" ? "font-medium text-muted-foreground" : "font-medium"}>{r.vehicle.regNo}</span>
             {r.vehicle.status === "ARCHIVED" && <span className="text-xs text-muted-foreground">(Archived)</span>}
             {ds?.tankers?.some((t) => t.vehicleId === r.vehicle.id) && <span className="text-xs text-muted-foreground">Tanker · {ds.tankers.find((t) => t.vehicleId === r.vehicle.id)!.name}</span>}
+            <FuelBadge fuel={r.vehicle.fuelType} />
             {scope === "GROUP" && <CompanyBadge code={r.vehicle.companyCode} />}
           </div>
           <div className="truncate text-xs text-muted-foreground">

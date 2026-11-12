@@ -17,10 +17,18 @@ import { vendorAnalytics } from "@/domain/adblue-inventory"
 import { QUARTER_MONTHS, QUARTERS, inQuarter, quarterLabel, quarterMonths, quarterOf, type Quarter } from "@/domain/quarters"
 import { QuarterComparison } from "@/components/shared/quarter-comparison"
 import { useCan } from "@/lib/app-state"
-import { fuelLabel } from "@/lib/constants"
+import { FuelBadge } from "@/components/shared/fuel-badge"
 import { formatINR, formatNumber, monthKey, todayISO } from "@/lib/format"
 import { MonthSelect, kpiExplain, useDieselIndex, useDieselMonth, useDieselMonthOptions } from "./parts"
 import { IndustrialReport } from "./industrial-report"
+import { FuelTypeTable } from "./fuel-type-summary"
+import { fuelWise, type FuelTotals } from "@/domain/expenditure"
+import type { DieselEntry } from "@/lib/types"
+
+/** The period's fills by fuel type (each fuel from its own fills), for "By fuel type" and the cards' wording. */
+const fuelsIn = (input: MasterInput, inScope: (e: DieselEntry) => boolean) => fuelWise(input.idx, input.diesel.filter(inScope))
+/** "Diesel" while every fill in the period is Diesel; otherwise "Vehicle Fuel" — never call petrol or EV charging Diesel. */
+const wordOf = (fuels: FuelTotals[]) => (fuels.some((f) => f.fuelType !== "DIESEL") ? "Vehicle Fuel" : "Diesel")
 
 type Master = ReturnType<typeof buildMaster>
 type ExtraMeta = Master["extras"]
@@ -113,7 +121,7 @@ function vehicleColumns(m: Master, monthly: boolean): Column<VehicleRow>[] {
   return [
     { id: "veh", header: "Vehicle", sortValue: (r) => r.vehicle.regNo, cell: (r) => <span className="font-medium">{r.vehicle.regNo}</span>, footer: "Total" },
     { id: "cust", header: "Customer", sortValue: (r) => r.customers, cell: (r) => <span className="text-muted-foreground">{r.customers}</span> },
-    ...(monthly ? ([{ id: "fuel", header: "Fuel Type", sortValue: (r) => r.vehicle.fuelType, cell: (r) => fuelLabel(r.vehicle.fuelType) }] satisfies Column<VehicleRow>[]) : []),
+    ...(monthly ? ([{ id: "fuel", header: "Fuel Type", sortValue: (r) => r.vehicle.fuelType, cell: (r) => <FuelBadge fuel={r.vehicle.fuelType} /> }] satisfies Column<VehicleRow>[]) : []),
     { id: "litres", header: "Diesel (L)", align: "right", sortValue: (r) => r.litres, cell: (r) => qty(r.litres), footer: qty(t.litres) },
     { id: "spend", header: "Diesel Spend", align: "right", sortValue: (r) => r.spend, cell: (r) => inr(r.spend), footer: inr(t.spend) },
     { id: "km", header: "KM Run", align: "right", sortValue: (r) => r.km, cell: (r) => formatNumber(r.km), footer: formatNumber(t.km) },
@@ -138,31 +146,34 @@ function CardGroup({ title, children }: { title: string; children: React.ReactNo
   )
 }
 
-function SummaryCards({ m, period, yearly }: { m: Master; period: string; yearly?: boolean }) {
+function SummaryCards({ m, period, yearly, fuels }: { m: Master; period: string; yearly?: boolean; fuels: FuelTotals[] }) {
   const t = m.totals
+  const word = wordOf(fuels)
+  // More than one fuel: litres and KM/L of different fuels are never combined — see "By fuel type".
+  const mixed = word !== "Diesel"
   const why = kpiExplain(t)
   const extraSpend = m.extras.map((x) => `${x.label} ${formatINR(x.total.spend)}`).join(" + ")
   const extraQty = m.extras.map((x) => `${x.label} ${formatNumber(x.total.qty, 2)} ${x.unit}`).join(" + ")
   return (
     <div className="space-y-4">
       <div>
-        <div className="mb-1.5 text-xs font-semibold tracking-wide text-muted-foreground uppercase">Running Fluid Summary · Diesel + {m.extras.map((x) => x.label).join(" + ")}</div>
+        <div className="mb-1.5 text-xs font-semibold tracking-wide text-muted-foreground uppercase">Running Fluid Summary · {word} + {m.extras.map((x) => x.label).join(" + ")}</div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <StatsCard label={`${yearly ? "Yearly " : ""}Diesel Spend`} icon={IndianRupee} value={formatINR(t.spend)} hint={period} info={why.spend} />
+          <StatsCard label={`${yearly ? "Yearly " : ""}${word} Spend`} icon={IndianRupee} value={formatINR(t.spend)} hint={period} info={why.spend} />
           {m.extras.map((x) => (
             <StatsCard key={x.key} label={`${yearly ? "Yearly " : ""}${x.label} Spend`} icon={IndianRupee} value={formatINR(x.total.spend)} hint={period} info={`Σ amount of ${x.label} entries in the period.`} />
           ))}
-          <StatsCard label={`${yearly ? "Yearly" : "Total"} Running Fluid Cost`} icon={Sigma} value={formatINR(m.fluid.spend)} hint={`${period} · Diesel + ${m.extras.map((x) => x.label).join(" + ")}`} info={`Diesel ${formatINR(t.spend)} + ${extraSpend} = ${formatINR(m.fluid.spend)}.`} />
-          <StatsCard label={`${yearly ? "Yearly " : ""}Diesel Litres`} icon={Droplet} value={`${formatNumber(t.litres)} L`} hint={`${period} · ${t.fills} fills`} info={why.litres} />
+          <StatsCard label={`${yearly ? "Yearly" : "Total"} Running Fluid Cost`} icon={Sigma} value={formatINR(m.fluid.spend)} hint={`${period} · ${word} + ${m.extras.map((x) => x.label).join(" + ")}`} info={`${word} ${formatINR(t.spend)} + ${extraSpend} = ${formatINR(m.fluid.spend)}.`} />
+          <StatsCard label={`${yearly ? "Yearly " : ""}${word} Litres`} icon={Droplet} value={`${formatNumber(t.litres)} L`} hint={`${period} · ${t.fills} fills`} info={why.litres} />
           {m.extras.map((x) => (
             <StatsCard key={x.key} label={`${yearly ? "Yearly " : ""}${x.label} Litres`} icon={Droplets} value={`${formatNumber(x.total.qty, 2)} ${x.unit}`} hint={`${period} · ${x.total.entries} entries`} info={`Σ ${x.label} quantity of entries in the period.`} />
           ))}
-          <StatsCard label={`${yearly ? "Yearly" : "Total"} Running Fluid Volume`} icon={Sigma} value={`${formatNumber(m.fluid.qty)} L`} hint={`${period} · Diesel + ${m.extras.map((x) => x.label).join(" + ")}`} info={`Diesel ${formatNumber(t.litres)} L + ${extraQty} = ${formatNumber(m.fluid.qty, 2)} L.`} />
+          <StatsCard label={`${yearly ? "Yearly" : "Total"} Running Fluid Volume`} icon={Sigma} value={`${formatNumber(m.fluid.qty)} L`} hint={`${period} · ${word} + ${m.extras.map((x) => x.label).join(" + ")}`} info={`${word} ${formatNumber(t.litres)} L + ${extraQty} = ${formatNumber(m.fluid.qty, 2)} L.`} />
         </div>
       </div>
 
-      <CardGroup title="Diesel">
-        {!yearly && (
+      <CardGroup title={mixed ? "Vehicle fuel — per fuel type in By fuel type" : "Diesel"}>
+        {!yearly && !mixed && (
           <StatsCard
             label="Average Diesel Cost per Litre"
             icon={Fuel}
@@ -171,9 +182,9 @@ function SummaryCards({ m, period, yearly }: { m: Master; period: string; yearly
             info={t.avgRate ? `Diesel/Petrol spend ÷ ${formatNumber(t.litres)} litres = ${formatINR(t.avgRate)} per litre.` : "Needs litres > 0."}
           />
         )}
-        <StatsCard label="Total KM Run" icon={Route} value={formatNumber(t.km)} hint={`${period} · diesel odometer readings`} info={why.km} />
-        <StatsCard label="Average Diesel KM/L" icon={Gauge} value={t.kmpl ?? "—"} hint={period} info={why.kmpl} />
-        {yearly && <StatsCard label="Average Diesel Cost per KM" icon={Flame} value={cpk(t)} hint={period} info={why.costPerKm} />}
+        <StatsCard label="Total KM Run" icon={Route} value={formatNumber(t.km)} hint={`${period} · fill odometer readings`} info={why.km} />
+        {!mixed && <StatsCard label="Average Diesel KM/L" icon={Gauge} value={t.kmpl ?? "—"} hint={period} info={why.kmpl} />}
+        {yearly && !mixed && <StatsCard label="Average Diesel Cost per KM" icon={Flame} value={cpk(t)} hint={period} info={why.costPerKm} />}
       </CardGroup>
 
       {m.extras.map((x) => (
@@ -260,7 +271,7 @@ export function MonthlyMaster() {
     if (!input || !month) return null
     const m = buildMaster(input, inPeriod(month))
     const trend = last12Months(month).map((mk) => ({ month: mk, label: shortMonthLabel(mk), m: buildMaster(input, inPeriod(mk)) }))
-    return { m, trend }
+    return { m, trend, fuels: fuelsIn(input, inPeriod(month)) }
   }, [input, month])
 
   if (!can("diesel")) return <NoAccess what="diesel" />
@@ -278,7 +289,11 @@ export function MonthlyMaster() {
         description="Fuel & consumables for the month — Diesel and AdBlue shown separately, with their combined Running Fluid total."
         actions={<MonthSelect months={months} value={month} onChange={setMonth} prominent />}
       />
-      <SummaryCards m={d.m} period={period} />
+      <SummaryCards m={d.m} period={period} fuels={d.fuels} />
+
+      <Section title="By fuel type">
+        <FuelTypeTable fuels={d.fuels} />
+      </Section>
 
       <Section title="Customer summary">
         <DataTable data={d.m.byCustomer} getRowId={(r) => r.id} columns={customerColumns(d.m, true)} initialSort={{ id: "spend", desc: true }} showFooter pageSize={100} emptyMessage="No entries this month." />
@@ -333,9 +348,10 @@ export function YearlyMaster() {
   const d = useMemo(() => {
     if (!input || !year) return null
     const monthsOf = basis === "fy" ? fyMonths(Number(year)) : Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, "0")}`)
-    const m = buildMaster(input, basis === "fy" ? inFY(Number(year)) : inPeriod(year))
+    const scope = basis === "fy" ? inFY(Number(year)) : inPeriod(year)
+    const m = buildMaster(input, scope)
     const byMonth = monthsOf.map((mk) => ({ month: mk, m: buildMaster(input, inPeriod(mk)) }))
-    return { m, byMonth }
+    return { m, byMonth, fuels: fuelsIn(input, scope) }
   }, [input, year, basis])
 
   if (!can("diesel")) return <NoAccess what="diesel" />
@@ -365,7 +381,11 @@ export function YearlyMaster() {
           </div>
         }
       />
-      <SummaryCards m={d.m} period={period} yearly />
+      <SummaryCards m={d.m} period={period} yearly fuels={d.fuels} />
+
+      <Section title="By fuel type">
+        <FuelTypeTable fuels={d.fuels} />
+      </Section>
 
       <Section title="Month breakdown">
         <DataTable<MonthRow>
@@ -424,7 +444,7 @@ export function QuarterlyMaster() {
       const qm = buildMaster(input, inQuarter(year, x))
       return { q: x, spend: qm.fluid.spend, volume: qm.totals.litres }
     })
-    return { m, split, byMonth, quarters }
+    return { m, split, byMonth, quarters, fuels: fuelsIn(input, inQuarter(year, q)) }
   }, [input, year, q])
 
   if (!can("diesel")) return <NoAccess what="diesel" />
@@ -453,10 +473,14 @@ export function QuarterlyMaster() {
         <StatsCard label="Total Diesel Litres" icon={Droplet} value={`${formatNumber(split.DIESEL)} L`} hint={`${period} · ${m.totals.fills} fills`} info="Σ litres of fills by Diesel vehicles dated in the quarter." />
         <StatsCard label="Total Petrol Litres" icon={Fuel} value={split.PETROL ? `${formatNumber(split.PETROL)} L` : "—"} hint={period} info="Σ litres of fills by Petrol vehicles dated in the quarter." />
         <StatsCard label="Total AdBlue Litres" icon={Droplets} value={`${formatNumber(ab?.qty ?? 0, 2)} L`} hint={`${period} · ${ab?.entries ?? 0} entries`} info="Σ AdBlue quantity of entries dated in the quarter — kept separate from fuel." />
-        <StatsCard label="Diesel Spend" icon={IndianRupee} value={formatINR(m.totals.spend)} hint={period} info="Σ amount of fuel fills dated in the quarter (same figure as the Monthly / Yearly Master's Diesel Spend)." />
+        <StatsCard label={`${wordOf(d.fuels)} Spend`} icon={IndianRupee} value={formatINR(m.totals.spend)} hint={period} info="Σ amount of fuel fills dated in the quarter (same figure as the Monthly / Yearly Master's spend); per fuel type in By fuel type." />
         <StatsCard label="AdBlue Spend" icon={IndianRupee} value={formatINR(ab?.spend ?? 0)} hint={period} info="Σ amount of AdBlue entries dated in the quarter." />
-        <StatsCard label="Combined Spend" icon={Sigma} value={formatINR(m.fluid.spend)} hint={`${period} · Diesel + AdBlue`} info={`Diesel ${formatINR(m.totals.spend)} + AdBlue ${formatINR(ab?.spend ?? 0)} = ${formatINR(m.fluid.spend)}.`} />
+        <StatsCard label="Combined Spend" icon={Sigma} value={formatINR(m.fluid.spend)} hint={`${period} · ${wordOf(d.fuels)} + AdBlue`} info={`${wordOf(d.fuels)} ${formatINR(m.totals.spend)} + AdBlue ${formatINR(ab?.spend ?? 0)} = ${formatINR(m.fluid.spend)}.`} />
       </div>
+
+      <Section title="By fuel type">
+        <FuelTypeTable fuels={d.fuels} />
+      </Section>
 
       <Section title={`Months in ${quarterLabel(year, q)} — the quarter is their sum`}>
         <DataTable

@@ -37,8 +37,11 @@ import {
   unbilledTrips,
   vehicleProfitability,
 } from "@/domain/analytics"
-import { monthKeysInRange, rangeForPreset, type DateRange, type PeriodPreset } from "@/domain/periods"
+import { monthKeysInRange, PERIOD_OPTIONS, rangeForPreset, type DateRange, type PeriodPreset } from "@/domain/periods"
 import { useDataset } from "@/lib/api/hooks"
+import { buildDieselIndex } from "@/domain/diesel"
+import { fuelWise, vehiclesByFuel } from "@/domain/expenditure"
+import { FuelTypeRows } from "@/features/diesel/fuel-type-summary"
 import { useCan, useCompanyScope } from "@/lib/app-state"
 import { formatINR, formatDate, formatDateLong, formatNumber, formatPercent, toISODate, todayDate, todayISO } from "@/lib/format"
 import {
@@ -77,6 +80,14 @@ export function DashboardView() {
     const expenses = expensesInRange(ds, range)
     const diesel = dieselInRange(ds, range)
     const litres = dieselLitresInRange(ds, range)
+    // Fuel by type (owner, 12 Nov 2026): the period's fills split by their vehicle's fuel, each fuel's figures from its
+    // own fills (fuelWise); the fuel types shown = the active fleet's and the fills'. The same fills as "Fuel cost".
+    const fleet = vehiclesByFuel(ds.vehicles.filter((v) => v.status === "ACTIVE" || v.status === "MAINTENANCE"))
+    const fuels = fuelWise(
+      buildDieselIndex(ds),
+      ds.diesel.filter((e) => e.date >= range.from && e.date <= range.to),
+      (["DIESEL", "PETROL", "EV"] as const).filter((f) => fleet[f] > 0)
+    )
     const prevRevenue = prev ? revenueInRange(ds, prev) : 0
     const prevExpenses = prev ? expensesInRange(ds, prev) : 0
     const prevDiesel = prev ? dieselInRange(ds, prev) : 0
@@ -92,6 +103,8 @@ export function DashboardView() {
       prevProfit: prevRevenue - prevExpenses,
       diesel,
       litres,
+      fuels,
+      fleet,
       deltas: {
         revenue: prev ? pct(revenue, prevRevenue) : null,
         expenses: prev ? pct(expenses, prevExpenses) : null,
@@ -147,7 +160,7 @@ export function DashboardView() {
             />
           </>
         )}
-        <StatsCard label="Diesel cost" value={formatINR(m.diesel)} icon={Fuel} delta={m.deltas.diesel} invertDelta hint={`${formatNumber(m.litres)} L`} href="/diesel" />
+        <StatsCard label="Fuel cost" value={formatINR(m.diesel)} icon={Fuel} delta={m.deltas.diesel} invertDelta hint={m.fuels.length > 1 ? "All vehicles · by fuel type below" : `${formatNumber(m.litres)} L`} href="/diesel" info="Σ amount of every vehicle fill in the period (Diesel, Petrol and EV charging) — split by fuel type in Fuel by type." />
         <StatsCard label="Active vehicles" value={`${m.activeVehicles} / ${m.totalVehicles}`} icon={Bus} hint={`${m.workshop} in workshop`} href="/vehicles" />
         <StatsCard label="Active customers" value={m.activeCustomers} icon={Users} hint={`${m.recentCustomers} with trips in 30 days`} href="/customers" />
         {!finance && <StatsCard label="Trips / km" value={formatNumber(m.tripsInRange.length)} icon={Bus} hint={`${formatNumber(km)} km run`} href="/trips" />}
@@ -156,6 +169,13 @@ export function DashboardView() {
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
         <AdBlueDashboardCards />
       </div>
+
+      {m.fuels.length > 0 && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold">Fuel by type · {periodLabel}</h2>
+          <FuelTypeRows fuels={m.fuels} period={PERIOD_OPTIONS.find((p) => p.value === period)?.label ?? ""} vehicles={m.fleet} />
+        </section>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-2">
         {finance ? (

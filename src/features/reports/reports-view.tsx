@@ -39,6 +39,11 @@ import { businessUnitLabel } from "@/lib/constants"
 import { downloadCsv } from "@/lib/csv"
 import { formatINR, formatDateLong, formatMonthKey, formatNumber, formatPercent, todayISO } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import { buildDieselIndex } from "@/domain/diesel"
+import { fuelWise } from "@/domain/expenditure"
+import { fuelTheme } from "@/lib/fuel-theme"
+import { FuelBadge } from "@/components/shared/fuel-badge"
+import { FuelTypeTable } from "@/features/diesel/fuel-type-summary"
 
 const TABS = [
   { value: "customers", label: "Customer profitability", finance: true },
@@ -46,6 +51,7 @@ const TABS = [
   { value: "pnl", label: "Profit & loss", finance: true },
   { value: "cashflow", label: "Cash flow", finance: true },
   { value: "aging", label: "Receivables aging", finance: true },
+  { value: "fuel", label: "Fuel by type", finance: false }, // owner, 12 Nov 2026 — Diesel, Petrol and EV apart
   { value: "industrial", label: "Industrial Diesel", finance: false }, // owner, 12 Nov 2026 — separate from vehicle Diesel
 ] as const
 
@@ -77,6 +83,8 @@ export function ReportsView({ initialTab }: { initialTab?: string }) {
       cash: cashFlow(ds, range),
       aging: receivablesAging(ds, views, today),
       types: new Map(ds.settings.vehicleTypes.map((t) => [t.code, t.name])),
+      // Fuel by type: the period's fills split by their vehicle's fuel (fuelWise — the same figures as the Diesel pages).
+      fuels: fuelWise(buildDieselIndex(ds), ds.diesel.filter((e) => e.date >= range.from && e.date <= range.to)),
     }
   }, [ds, period, today])
 
@@ -164,7 +172,7 @@ export function ReportsView({ initialTab }: { initialTab?: string }) {
             {exportBtn(() =>
               downloadCsv(
                 "vehicle-profitability",
-                r.vehicles.map((v) => ({ Vehicle: v.vehicle.regNo, Type: r.types.get(v.vehicle.typeCode), Trips: v.trips, Km: v.km, Revenue: v.revenue, Diesel: v.diesel, Driver: v.driver, Maintenance: v.maintenance, Fixed: v.fixed, Contribution: v.contribution, "Cost/km": v.costPerKm, Kmpl: v.kmpl }))
+                r.vehicles.map((v) => ({ Vehicle: v.vehicle.regNo, Type: r.types.get(v.vehicle.typeCode), "Fuel type": fuelTheme(v.vehicle.fuelType).label, Trips: v.trips, Km: v.km, Revenue: v.revenue, "Fuel cost": v.diesel, Driver: v.driver, Maintenance: v.maintenance, Fixed: v.fixed, Contribution: v.contribution, "Cost/km": v.costPerKm, Kmpl: v.kmpl }))
               )
             )}
           </div>
@@ -179,9 +187,10 @@ export function ReportsView({ initialTab }: { initialTab?: string }) {
             columns={[
               { id: "v", header: "Vehicle", sortValue: (v) => v.vehicle.regNo, cell: (v) => <span className="font-medium">{v.vehicle.regNo}</span>, footer: `${r.vehicles.length} vehicles` },
               { id: "type", header: "Type", hideOnMobile: true, cell: (v) => <span className="text-muted-foreground">{r.types.get(v.vehicle.typeCode)}</span> },
+              { id: "fuel", header: "Fuel", hideOnMobile: true, sortValue: (v) => v.vehicle.fuelType, cell: (v) => <FuelBadge fuel={v.vehicle.fuelType} /> },
               { id: "km", header: "Km", align: "right", hideOnMobile: true, sortValue: (v) => v.km, cell: (v) => formatNumber(v.km) },
               { id: "rev", header: "Revenue", align: "right", sortValue: (v) => v.revenue, cell: (v) => <Money value={v.revenue} />, footer: <Money value={r.vehicles.reduce((s, v) => s + v.revenue, 0)} /> },
-              { id: "d", header: "Diesel", align: "right", hideOnMobile: true, sortValue: (v) => v.diesel, cell: (v) => <Money value={v.diesel} />, footer: <Money value={r.vehicles.reduce((s, v) => s + v.diesel, 0)} /> },
+              { id: "d", header: "Fuel cost", align: "right", hideOnMobile: true, sortValue: (v) => v.diesel, cell: (v) => <Money value={v.diesel} />, footer: <Money value={r.vehicles.reduce((s, v) => s + v.diesel, 0)} /> },
               { id: "dr", header: "Driver", align: "right", hideOnMobile: true, sortValue: (v) => v.driver, cell: (v) => <Money value={v.driver} /> },
               { id: "mt", header: "Maint.", align: "right", hideOnMobile: true, sortValue: (v) => v.maintenance, cell: (v) => <Money value={v.maintenance} /> },
               { id: "fx", header: "EMI/ins/tax", align: "right", hideOnMobile: true, sortValue: (v) => v.fixed, cell: (v) => <Money value={v.fixed} /> },
@@ -238,7 +247,7 @@ export function ReportsView({ initialTab }: { initialTab?: string }) {
             columns={[
               { id: "m", header: "Month", cell: (m) => formatMonthKey(m.month) },
               { id: "r", header: "Revenue", align: "right", cell: (m) => <Money value={m.revenue} /> },
-              { id: "d", header: "Diesel", align: "right", hideOnMobile: true, cell: (m) => <Money value={m.diesel} /> },
+              { id: "d", header: "Fuel", align: "right", hideOnMobile: true, cell: (m) => <Money value={m.diesel} /> },
               { id: "o", header: "Other expenses", align: "right", hideOnMobile: true, cell: (m) => <Money value={m.otherExpenses} /> },
               { id: "p", header: "Profit", align: "right", cell: (m) => <Money value={m.profit} signed /> },
               { id: "mg", header: "Margin", align: "right", cell: (m) => (m.revenue ? <MarginCell value={(m.profit / m.revenue) * 100} /> : "—") },
@@ -323,6 +332,33 @@ export function ReportsView({ initialTab }: { initialTab?: string }) {
             </Link>
             .
           </Note>
+        </TabsContent>
+
+        {/* ------------------------------------------------ Fuel by type (owner, 12 Nov 2026) */}
+        {/* The period's vehicle fills by fuel type — each fuel from its own fills (never a combined litre or KM/L figure);
+            the CSV is the same rows. Industrial Diesel and AdBlue have their own reports. */}
+        <TabsContent value="fuel" className="mt-4 space-y-4">
+          <div className="flex justify-end">
+            {exportBtn(() =>
+              downloadCsv(
+                "fuel-by-type",
+                r.fuels.map((f) => ({
+                  "Fuel type": fuelTheme(f.fuelType).label,
+                  Vehicles: f.vehicles,
+                  Fills: f.fills,
+                  Quantity: f.qty,
+                  Unit: fuelTheme(f.fuelType).unit,
+                  Expenditure: f.spend,
+                  "Average price per unit": f.avgRate ?? "",
+                  "KM Run": f.km,
+                  "KM per litre": f.fuelType === "EV" ? "" : (f.kmpl ?? ""),
+                  "Cost per KM": f.costPerKm ?? "",
+                }))
+              )
+            )}
+          </div>
+          <FuelTypeTable fuels={r.fuels} />
+          <Note>Each fuel from its own fills: a vehicle runs on one fuel and its KM Run uses its own previous fill, so Petrol mileage never reads a Diesel fill. EV charging is in kWh, never added to litres. Only the expenditure is combined.</Note>
         </TabsContent>
 
         {/* ------------------------------------------------ Industrial Diesel (owner, 12 Nov 2026) */}

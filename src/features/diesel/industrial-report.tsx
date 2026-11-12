@@ -4,19 +4,17 @@ import { Factory, Fuel, Hash, IndianRupee, Scale } from "lucide-react"
 import { DataTable } from "@/components/shared/data-table"
 import { EmptyState } from "@/components/shared/misc"
 import { StatsCard } from "@/components/shared/stats-card"
-import type { buildDieselIndex } from "@/domain/diesel"
 import { industrialReport } from "@/domain/industrial"
 import { tankerLabel } from "@/domain/tanker"
 import { useCustomers, useIndustrialSupplies, useTankers } from "@/lib/api/hooks"
 import { formatINR, formatNumber } from "@/lib/format"
-import { usePeriod } from "./period"
 
 const L = (n: number) => `${formatNumber(n, 3)} L`
 
 /**
  * Industrial Diesel · company-wide (owner, 12 Nov 2026): diesel supplied to customers for industrial use, out of the
  * tankers — its own section, never mixed into vehicle Diesel (no KM, mileage, efficiency or vehicle figure). Totals,
- * customer-wise and tanker-wise for the supplies dated in the period (`match`). Used by the Masters and the Diesel page.
+ * customer-wise and tanker-wise for the supplies dated in the period (`match`). Used by the Masters and the Reports module.
  */
 export function IndustrialReport({ match, period, control, actions }: { match: (e: { date: string; customerId: string }) => boolean; period: string; control?: React.ReactNode; actions?: React.ReactNode }) {
   const supplies = useIndustrialSupplies()
@@ -108,8 +106,3 @@ export function IndustrialReport({ match, period, control, actions }: { match: (
   )
 }
 
-/** The Diesel page's Industrial Diesel report: Monthly / Quarterly / Yearly / Financial Year / All Time (the shared period filter). */
-export function IndustrialDieselSummary({ idx }: { idx: ReturnType<typeof buildDieselIndex> | null }) {
-  const period = usePeriod(idx)
-  return <IndustrialReport match={period.match} period={period.label} control={period.control} />
-}

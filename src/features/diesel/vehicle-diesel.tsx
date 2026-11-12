@@ -5,7 +5,11 @@ import { DeleteDialog, RowActions, monthLockedReason } from "@/components/shared
 import { useMemo, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { Bus, Droplets, ExternalLink, Fuel, Gauge, IndianRupee, Plus, Route } from "lucide-react"
+import { Bus, Droplets, ExternalLink, Fuel, Gauge, IndianRupee, Plus, Route, Zap } from "lucide-react"
+import { fuelName } from "@/domain/expenditure"
+import { fuelTheme } from "@/lib/fuel-theme"
+import { cn } from "@/lib/utils"
+import { FuelBadge } from "@/components/shared/fuel-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { DataTable } from "@/components/shared/data-table"
@@ -95,6 +99,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
 
   const { cur, prev } = d
   const unit = vehicle.fuelType === "EV" ? "kWh" : "L" // an EV's "litres" are units charged
+  const theme = fuelTheme(vehicle.fuelType) // the vehicle's fuel: labels, badges and card tint (lib/fuel-theme.ts)
   const why = kpiExplain(cur)
   // AdBlue for this vehicle with this customer, selected month — its own entries and formulas.
   const ab = adBlueStats((adblue.data ?? []).filter((e) => e.vehicleId === vehicle.id && e.customerId === (group.customer?.id ?? null) && e.date.startsWith(month)))
@@ -123,7 +128,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
   const rowLock = (mayEdit || mayDelete) && !monthLock.canEdit ? monthLockedReason(monthLabel(month)) : null
   const addButton = can("diesel", "create") && !locked && (
     <Button onClick={() => setAddOpen(true)}>
-      <Plus /> Add Diesel Entry
+      <Plus /> {vehicle.fuelType === "EV" ? "Add Charging Entry" : `Add ${fuelName(vehicle.fuelType)} Entry`}
     </Button>
   )
   const addAdBlueButton = can("adblue", "create") && !locked && (
@@ -149,6 +154,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight md:text-2xl">
                 {vehicle.regNo}
+                <FuelBadge fuel={vehicle.fuelType} />
                 {vehicleThen === "ARCHIVED" && <StatusBadge status="ARCHIVED" />}
                 {newOwner && <StatusBadge status="TRANSFERRED" tone="gray" label={`Transferred to ${newOwner}`} />}
               </h1>
@@ -204,32 +210,46 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
         </CardContent>
       </Card>
 
-      {/* Vehicle summary — Diesel and AdBlue metrics side by side, calculated separately */}
+      {/* Vehicle summary — its own fuel's metrics (owner, 12 Nov 2026: Diesel, Petrol or EV charging, from the vehicle's
+          fuel type), AdBlue apart (shown for a diesel vehicle, or any vehicle that has AdBlue). No combined total row
+          (removed at the owner's instruction, 12 Nov 2026). */}
       <div className="space-y-3">
-        <SummaryRow title="Diesel">
-          <StatsCard label="Total Diesel Used" icon={Fuel} value={`${formatNumber(cur.litres, 2)} L`} hint={`${period} · ${cur.fills} fills${cur.kwh ? ` · ${cur.kwh} kWh` : ""}`} info={why.litres} />
-          <StatsCard label="Total Diesel Spend" icon={IndianRupee} value={formatINR(cur.spend)} delta={pct(cur.spend, prev?.spend)} invertDelta hint={`${period} · ${vsLabel}`} info={why.spend} />
-          <StatsCard label="Diesel KM/L" icon={Gauge} value={cur.kmpl ?? "—"} hint={`${period} · ${formatNumber(cur.km)} km · rated ${vehicle.mileageKmpl}`} info={`${why.km} ${why.kmpl}`} />
-          <StatsCard label="Diesel Cost per KM" icon={Route} value={cur.costPerKm ? formatINR(cur.costPerKm) : "—"} delta={pct(cur.costPerKm, prev?.costPerKm)} invertDelta hint={`${period} · ${vsLabel}`} info={why.costPerKm} />
+        <SummaryRow title={fuelName(vehicle.fuelType)} titleClass={theme.heading}>
+          {vehicle.fuelType === "EV" ? (
+            <>
+              <StatsCard className={theme.card} label="Total Charging Expenditure" icon={IndianRupee} value={formatINR(cur.spend)} delta={pct(cur.spend, prev?.spend)} invertDelta hint={`${period} · ${vsLabel}`} info={why.spend} />
+              <StatsCard className={theme.card} label="Total Energy Consumed" icon={Zap} value={`${formatNumber(cur.kwh, 2)} kWh`} hint={`${period} · ${cur.fills} charges`} info={`Σ kWh of ${cur.fills} charging entries = ${formatNumber(cur.kwh, 2)} kWh (units, not litres).`} />
+              <StatsCard className={theme.card} label="Average Charging Cost per KM" icon={Route} value={cur.costPerKm ? formatINR(cur.costPerKm) : "—"} delta={pct(cur.costPerKm, prev?.costPerKm)} invertDelta hint={`${period} · ${formatNumber(cur.km)} km`} info={why.costPerKm} />
+            </>
+          ) : (
+            <>
+              <StatsCard className={theme.card} label={`Total ${fuelName(vehicle.fuelType)} Spending`} icon={IndianRupee} value={formatINR(cur.spend)} delta={pct(cur.spend, prev?.spend)} invertDelta hint={`${period} · ${vsLabel}`} info={why.spend} />
+              <StatsCard className={theme.card} label={`Total ${fuelName(vehicle.fuelType)} Litres`} icon={Fuel} value={`${formatNumber(cur.litres, 2)} L`} hint={`${period} · ${cur.fills} fills`} info={why.litres} />
+              <StatsCard className={theme.card} label={`Average ${fuelName(vehicle.fuelType)} Cost per KM`} icon={Route} value={cur.costPerKm ? formatINR(cur.costPerKm) : "—"} delta={pct(cur.costPerKm, prev?.costPerKm)} invertDelta hint={`${period} · ${vsLabel}`} info={why.costPerKm} />
+              <StatsCard className={theme.card} label={`${fuelName(vehicle.fuelType)} KM/L`} icon={Gauge} value={cur.kmpl ?? "—"} hint={`${period} · ${formatNumber(cur.km)} km · rated ${vehicle.mileageKmpl}`} info={`${why.km} ${why.kmpl}`} />
+            </>
+          )}
         </SummaryRow>
-        <SummaryRow title="AdBlue">
-          <StatsCard label="Total AdBlue Used" icon={Droplets} value={`${formatNumber(ab.litres, 2)} L`} hint={`${period} · ${ab.entries} entries`} info={`Σ litres of this vehicle's AdBlue entries in the month = ${formatNumber(ab.litres, 2)} L.`} />
-          <StatsCard label="Total AdBlue Spend" icon={IndianRupee} value={formatINR(ab.spend)} hint={period} info={`Σ amount of AdBlue entries = ${formatINR(ab.spend)} — not part of diesel spend.`} />
-          <StatsCard
-            label="AdBlue KM/L"
-            icon={Gauge}
-            value={ab.kmPerLitre ?? "—"}
-            hint={`${period} · ${formatNumber(ab.km)} km`}
-            info={ab.kmPerLitre ? `${formatNumber(ab.km)} km (closing − opening on AdBlue entries) ÷ ${formatNumber(ab.litres, 2)} L = ${ab.kmPerLitre}.` : "Needs AdBlue entries this month."}
-          />
-          <StatsCard
-            label="AdBlue Cost per KM"
-            icon={Route}
-            value={ab.costPerKm !== null ? formatINR(ab.costPerKm) : "—"}
-            hint={period}
-            info={ab.costPerKm !== null ? `${formatINR(ab.spend)} ÷ ${formatNumber(ab.km)} km = ${formatINR(ab.costPerKm)} per km.` : "Needs AdBlue entries this month."}
-          />
-        </SummaryRow>
+        {(vehicle.fuelType === "DIESEL" || ab.entries > 0) && (
+          <SummaryRow title="AdBlue">
+            <StatsCard label="Total AdBlue Spending" icon={IndianRupee} value={adblue.data ? formatINR(ab.spend) : "—"} hint={adblue.data ? period : "Not available — couldn't be loaded"} info={`Σ amount of AdBlue entries = ${formatINR(ab.spend)} — stock draws at the weighted-average cost, direct purchases at their own amount; not part of ${fuelName(vehicle.fuelType)}.`} />
+            <StatsCard label="Total AdBlue Litres" icon={Droplets} value={adblue.data ? `${formatNumber(ab.litres, 2)} L` : "—"} hint={`${period} · ${ab.entries} entries`} info={`Σ litres of this vehicle's AdBlue entries in the month = ${formatNumber(ab.litres, 2)} L.`} />
+            <StatsCard
+              label="AdBlue KM/L"
+              icon={Gauge}
+              value={ab.kmPerLitre ?? "—"}
+              hint={`${period} · ${formatNumber(ab.km)} km`}
+              info={ab.kmPerLitre ? `${formatNumber(ab.km)} km (closing − opening on AdBlue entries) ÷ ${formatNumber(ab.litres, 2)} L = ${ab.kmPerLitre}.` : "Needs AdBlue entries this month."}
+            />
+            <StatsCard
+              label="AdBlue Cost per KM"
+              icon={Route}
+              value={ab.costPerKm !== null ? formatINR(ab.costPerKm) : "—"}
+              hint={period}
+              info={ab.costPerKm !== null ? `${formatINR(ab.spend)} ÷ ${formatNumber(ab.km)} km = ${formatINR(ab.costPerKm)} per km.` : "Needs AdBlue entries this month."}
+            />
+          </SummaryRow>
+        )}
       </div>
 
       {/* Fuel & Consumables — Diesel and AdBlue are tracked and shown separately */}
@@ -238,7 +258,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
           <div className="flex items-center gap-3">
             <h2 className="text-sm font-semibold">Fuel & Consumables</h2>
             <TabsList>
-              <TabsTrigger value="diesel">Diesel</TabsTrigger>
+              <TabsTrigger value="diesel">{fuelName(vehicle.fuelType)}</TabsTrigger>
               <TabsTrigger value="adblue">AdBlue</TabsTrigger>
             </TabsList>
           </div>
@@ -249,13 +269,13 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
           {/* 2. Diesel entries — selected month */}
           <section>
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold">Diesel entries · {monthLabel(month)}</h2>
+              <h2 className={cn("text-sm font-semibold", vehicle.fuelType !== "DIESEL" && theme.heading)}>{fuelName(vehicle.fuelType)} entries · {monthLabel(month)}</h2>
 
             </div>
             {d.fills.length === 0 ? (
               <EmptyState
                 icon={Fuel}
-                title={`No diesel entries for ${vehicle.regNo} in ${monthLabel(month)}`}
+                title={`No ${theme.entry === "charging entry" ? "charging" : theme.label.toLowerCase()} entries for ${vehicle.regNo} in ${monthLabel(month)}`}
                 description={`Fills recorded here are costed to ${group.shortName}.`}
                 action={addButton || undefined}
               />
@@ -344,11 +364,11 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
                   ),
                 },
                 { id: "fills", header: "Fills", align: "right", hideOnMobile: true, cell: (h) => h.fills },
-                { id: "litres", header: "Litres", align: "right", cell: (h) => formatNumber(h.litres) },
-                { id: "spend", header: "Diesel Spend", align: "right", cell: (h) => (h.spend ? formatINR(h.spend) : "—") },
+                { id: "litres", header: vehicle.fuelType === "EV" ? "kWh" : "Litres", align: "right", cell: (h) => formatNumber(vehicle.fuelType === "EV" ? h.kwh : h.litres) },
+                { id: "spend", header: `${fuelName(vehicle.fuelType)} Spend`, align: "right", cell: (h) => (h.spend ? formatINR(h.spend) : "—") },
                 { id: "km", header: "KM Run", align: "right", hideOnMobile: true, cell: (h) => formatNumber(h.km) },
-                { id: "cpk", header: "Diesel ₹ / KM", align: "right", cell: (h) => (h.costPerKm ? formatINR(h.costPerKm) : "—") },
-                { id: "kmpl", header: "KM / Litre", align: "right", hideOnMobile: true, cell: (h) => h.kmpl ?? "—" },
+                { id: "cpk", header: `${vehicle.fuelType === "EV" ? "Charging" : fuelName(vehicle.fuelType)} ₹ / KM`, align: "right", cell: (h) => (h.costPerKm ? formatINR(h.costPerKm) : "—") },
+                ...(vehicle.fuelType === "EV" ? [] : [{ id: "kmpl", header: "KM / Litre", align: "right" as const, hideOnMobile: true, cell: (h: (typeof d.history)[number]) => h.kmpl ?? "—" }]),
               ]}
             />
           </section>
@@ -388,10 +408,10 @@ function sourceName(e: DieselEntry, ds: Pick<Dataset, "fuelStations" | "tankers"
   return `from tanker ${t ? tankerLabel(t) : ""}`.trim()
 }
 
-function SummaryRow({ title, children }: { title: string; children: React.ReactNode }) {
+function SummaryRow({ title, titleClass, children }: { title: string; titleClass?: string; children: React.ReactNode }) {
   return (
-    <div className="grid gap-2 lg:grid-cols-[72px_minmax(0,1fr)] lg:items-center">
-      <div className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{title}</div>
+    <div className="grid gap-2 lg:grid-cols-[96px_minmax(0,1fr)] lg:items-center">
+      <div className={cn("text-xs font-semibold tracking-wide uppercase", titleClass ?? "text-muted-foreground")}>{title}</div>
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">{children}</div>
     </div>
   )

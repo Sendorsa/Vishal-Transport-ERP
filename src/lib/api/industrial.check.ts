@@ -266,6 +266,95 @@ async function main() {
   const supplied = (await api.industrialSupplies.list()).reduce((t, x) => t + x.litres, 0)
   assert.equal(tankerPeriod(tankerLedger(moves, null, "2026-11")).industrial, supplied, "every supply's litres counted exactly once in the tankers")
 
+  /* ---------------------------------------------------------------- 10. Combined Fuel Outflow (customer page Overview) */
+  const { buildDieselIndex, groupMonth, vehicleDiesel } = await import("@/domain/diesel")
+  const { combinedDieselOutflow } = await import("@/domain/industrial")
+  const indexNow = async () => buildDieselIndex({ customers: await api.customers.list(), vehicles: await api.vehicles.list(), drivers: await api.drivers.list(), diesel: await api.diesel.list(), trips: await api.trips.list(), assignments: await api.assignments.list() } as never)
+  const supplyList = await api.industrialSupplies.list()
+  const outflowOf = (ix: Awaited<ReturnType<typeof indexNow>>, customerId: string, month: string) =>
+    combinedDieselOutflow(vehicleDiesel(ix, groupMonth(ix, customerId, month).entries), supplyList.filter((x) => x.customerId === customerId && x.date.startsWith(month)))
+  const ix = await indexNow()
+  const months = [...new Set([...ix.months, "2026-11", "2026-10", "2026-07", "2025-12"])].sort()
+  let allVehicleLitres = 0, allVehicleValue = 0
+  for (const m of months) {
+    const g = groupMonth(ix, c1.id, m)
+    const o = outflowOf(ix, c1.id, m)
+    const liquid = g.entries.filter((e) => ix.vehicles.get(e.vehicleId)?.fuelType !== "EV")
+    assert.equal(o.vehicle.litres, g.litres, `${m}: Vehicle Fuel (Diesel / Petrol) litres = the summary's Total Diesel Litres`)
+    assert.equal(o.vehicle.value, Math.round(liquid.reduce((t, e) => t + e.amount, 0) * 100) / 100, `${m}: Vehicle Fuel Value = those fills' ₹ (petrol included, EV charging left out)`)
+    const own = supplyList.filter((x) => x.customerId === c1.id && x.date.startsWith(m))
+    assert.equal(o.industrial.litres, Number(own.reduce((t, x) => t + x.litres, 0).toFixed(3)), `${m}: Industrial Diesel Litres`)
+    assert.equal(o.combined.litres, Number((o.vehicle.litres + o.industrial.litres).toFixed(3)), `${m}: Combined (L) = vehicle + industrial`)
+    assert.equal(o.combined.value, Math.round((o.vehicle.value + o.industrial.value) * 100) / 100, `${m}: Combined (₹) = vehicle + industrial`)
+    allVehicleLitres += o.vehicle.litres
+    allVehicleValue += o.vehicle.value
+  }
+  assert.deepEqual([outflowOf(ix, c1.id, "2026-11").industrial.litres, outflowOf(ix, c1.id, "2026-10").industrial.litres, outflowOf(ix, c1.id, "2026-07").industrial.litres], [2500, 100, 40], "each month: only its own supplies (Nov s1 + s2, Oct s3, Jul s4)")
+  assert.equal(outflowOf(ix, c1.id, "2026-11").industrial.entries, 2, "…and never another customer's (s5 is c2's)")
+  const everyFill = vehicleDiesel(ix, [...ix.fills.entries()].filter(([k]) => k.startsWith(`${c1.id}|`)).flatMap(([, v]) => v))
+  assert.ok(everyFill.entries > 0 && everyFill.litres > 0, "the customer has vehicle fills to combine")
+  assert.equal(Math.round(allVehicleLitres * 100) / 100, everyFill.litres, "Σ months = every vehicle fill once (no double counting)")
+  assert.equal(Math.round(allVehicleValue * 100) / 100, everyFill.value)
+  // AdBlue is never part of it: a new AdBlue entry for one of this customer's vehicles changes nothing.
+  const before = JSON.stringify(outflowOf(ix, c1.id, "2026-11"))
+  const abVehicle = (await api.vehicles.list()).find((v) => v.status === "ACTIVE" && v.assignedCustomerId === c1.id)
+  assert.ok(abVehicle, "a vehicle of this customer for the AdBlue step")
+  if (abVehicle) {
+    await api.adbluePurchases.create({ date: todayISO(), vendorName: "Outflow Check", product: "AdBlue", buckets: 1, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" })
+    await api.adblue.create({ vehicleId: abVehicle.id, customerId: c1.id, date: todayISO(), closingKm: 9_999_000, quantityLitres: 5, invoiceNo: "", notes: "", source: "STOCK" })
+    assert.equal(JSON.stringify(outflowOf(await indexNow(), c1.id, "2026-11")), before, "an AdBlue entry: Combined Fuel Outflow unchanged")
+  }
+  assert.deepEqual(combinedDieselOutflow({ litres: 0, value: 0, entries: 0 }, []).combined, { litres: 0, value: 0, avgRate: null }, "no data: zeros, no rate")
+
+  /* ---------------------------------------------------------------- 11. Diesel landing customer cards: vehicle fuel + industrial */
+  const { customerCards } = await import("@/domain/diesel")
+  const { withCustomerExpenditure } = await import("@/domain/expenditure")
+  // Industrial supplies only here (no AdBlue): check:fuel-wise covers the cards with AdBlue too.
+  const withIndustrialSpend = <C extends Parameters<typeof withCustomerExpenditure>[0][number]>(cards: C[], supplies: Parameters<typeof withCustomerExpenditure>[1]["supplies"], period: Parameters<typeof withCustomerExpenditure>[2]) => withCustomerExpenditure(cards, { supplies, adblue: [] }, period)
+  const r2 = (n: number) => Math.round(n * 100) / 100
+  const own = (id: string | null, pred: (d: string) => boolean) => r2(supplyList.filter((x) => x.customerId === id && pred(x.date)).reduce((t, x) => t + x.amount, 0))
+  for (const [month, today] of [["2026-11", "2026-11-10"], ["2026-10", "2026-11-10"], ["2026-07", "2026-11-10"]] as const) {
+    const base = customerCards(ix, month, today)
+    const cards = withIndustrialSpend(base.cards, supplyList, base)
+    for (const [i, c] of cards.entries()) {
+      const v = base.cards[i]
+      assert.equal(c.vehicleSpend, v.spend, `${month} ${c.group.shortName}: the vehicle part is the card's existing figure, unchanged`)
+      assert.equal(c.spend, r2(v.spend + own(c.group.id, (d) => d.startsWith(month))), `${month} ${c.group.shortName}: vehicle + its own supplies of the month`)
+      // The comparison uses the same days for both sources: previous month, capped at today's day while in progress.
+      assert.equal(c.compareSpend, r2(v.compareSpend + own(c.group.id, (d) => d.startsWith(base.prev) && (base.day === undefined || Number(d.slice(8, 10)) <= base.day))), `${month} ${c.group.shortName}: comparison, both sources`)
+      assert.equal(c.prevMonthSpend, r2(v.prevMonthSpend + own(c.group.id, (d) => d.startsWith(base.prev))), `${month} ${c.group.shortName}: previous full month, both sources`)
+      assert.equal(c.changePct, c.compareSpend > 0 ? ((c.spend - c.compareSpend) / c.compareSpend) * 100 : null)
+    }
+    // Reconciliation: Σ cards = Σ vehicle fills of the month (the Diesel Spend KPI) + Σ that month's supplies, each once.
+    assert.equal(r2(cards.reduce((t, c) => t + c.spend, 0)), r2(base.total + supplyList.filter((x) => x.date.startsWith(month)).reduce((t, x) => t + x.amount, 0)), `${month}: Σ cards = Diesel Spend + industrial supplies`)
+  }
+  const nov11 = withIndustrialSpend(customerCards(ix, "2026-11", "2026-11-10").cards, supplyList, { month: "2026-11", prev: "2026-10", day: 10 })
+  const card = (id: string) => nov11.find((c) => c.group.id === id)!
+  assert.equal(card(c1.id).industrialSpend, r2(s1.amount + s2.amount), "c1 November: s1 + s2 (s2 split across two tankers, counted once by its amount)")
+  assert.equal(card(c2.id).industrialSpend, s5.amount, "c2: only its own supply")
+  assert.equal(r2(card(c1.id).compareSpend - customerCards(ix, "2026-11", "2026-11-10").cards.find((c) => c.group.id === c1.id)!.compareSpend), 0, "s3 (20 Oct) is after day 10: not in the 1–10 Oct comparison…")
+  assert.equal(r2(card(c1.id).prevMonthSpend - customerCards(ix, "2026-11", "2026-11-10").cards.find((c) => c.group.id === c1.id)!.prevMonthSpend), s3.amount, "…but in October's full figure")
+  // The four kinds of customer, the Unallocated card, other months and other customers.
+  const g = (id: string | null, spend: number, compareSpend = 0, prevMonthSpend = compareSpend) => ({ group: { id }, spend, compareSpend, prevMonthSpend, changePct: null })
+  const x = (customerId: string, date: string, amount: number) => ({ customerId, date, amount, allocations: [{ tankerId: "t1", litres: 1 }, { tankerId: "t2", litres: 1 }] })
+  const out = withIndustrialSpend(
+    [g("veh", 1000, 500), g("ind", 0), g("both", 300.1, 100), g("zero", 0), g(null, 50)],
+    [x("ind", "2026-11-03", 250.55), x("both", "2026-11-04", 0.2), x("both", "2026-10-05", 100), x("both", "2026-10-25", 7), x("veh", "2026-09-01", 9999), x("nobody", "2026-11-01", 1)],
+    { month: "2026-11", prev: "2026-10", day: 10 }
+  )
+  assert.deepEqual(out.map((c) => [c.group.id, c.spend, c.industrialSpend, c.compareSpend, c.prevMonthSpend, c.changePct]), [
+    ["veh", 1000, 0, 500, 500, 100],
+    ["ind", 250.55, 250.55, 0, 0, null],
+    ["both", 300.3, 0.2, 200, 207, ((300.3 - 200) / 200) * 100],
+    ["zero", 0, 0, 0, 0, null],
+    [null, 50, 0, 0, 0, null],
+  ], "vehicle only, industrial only, both (exact paise; 25 Oct outside the 1–10 comparison), zero, Unallocated; other months and customers ignored")
+  // Restricted access: Tata Adblue's list holds only its granted customers' supplies (server shape, pinned in check:erp-db 12d).
+  const scoped = (await profileCall("TATA_ADBLUE", "industrialSupplies.list", async () => supplyList, new Set([c2.id]))!()) as typeof supplyList
+  assert.deepEqual(scoped.map((s) => s.id), [s5.id], "Tata Adblue granted c2 only: c2's supply only")
+  const tata = withIndustrialSpend(customerCards(ix, "2026-11", "2026-11-10").cards, scoped, { month: "2026-11", prev: "2026-10", day: 10 })
+  assert.equal(tata.find((c) => c.group.id === c1.id)!.industrialSpend, 0, "…so no other customer's supply reaches any card total")
+
   console.log("industrial diesel supply: tanker allocations (one and split), exact matching, stock never negative, atomic rollback, edit / delete / restore returning litres once, concurrency, reconciliation, reports, audit, month lock, read-only profiles, vehicle Diesel untouched: all checks passed")
 }
 

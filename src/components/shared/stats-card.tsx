@@ -20,12 +20,16 @@ export interface StatsCardProps {
   isLoading?: boolean
   /** How the figure is calculated — shown as an ⓘ tooltip next to the label. */
   info?: string
+  /** A total (e.g. Total Vehicle Expenditure): tinted and slightly larger, as the Diesel Overview's totals. */
+  prominent?: boolean
+  /** Extra card classes, e.g. a fuel type's tint (lib/fuel-theme.ts). */
+  className?: string
 }
 
-export function StatsCard({ label, value, hint, icon: Icon, delta, invertDelta, tone = "default", href, isLoading, info }: StatsCardProps) {
+export function StatsCard({ label, value, hint, icon: Icon, delta, invertDelta, tone = "default", href, isLoading, info, prominent, className }: StatsCardProps) {
   const good = delta == null ? null : invertDelta ? delta <= 0 : delta >= 0
   const body = (
-    <Card size="sm" className={cn("h-full gap-1.5 px-4 transition-colors", href && "hover:bg-muted/40")}>
+    <Card size="sm" className={cn("h-full gap-1.5 px-4 transition-colors", href && "hover:bg-muted/40", prominent && "border-primary/40 bg-primary/5", className)}>
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1 text-xs font-medium text-muted-foreground">
           <span className="line-clamp-2">{label}</span>
@@ -54,6 +58,7 @@ export function StatsCard({ label, value, hint, icon: Icon, delta, invertDelta, 
           className={cn(
             // Exact money (₹4,79,937.62) is long — wrap rather than cut a figure off.
             "num text-lg leading-tight font-semibold tracking-tight [overflow-wrap:anywhere] md:text-xl",
+            prominent && "md:text-2xl",
             tone === "positive" && "text-success",
             tone === "negative" && "text-destructive",
             tone === "warning" && "text-warning"

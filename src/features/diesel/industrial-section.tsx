@@ -65,7 +65,7 @@ export function IndustrialSection({ customer, idx }: { customer: Customer; idx: 
   const filtered = !!(needle || from || to)
 
   return (
-    <section className="space-y-4 border-t pt-6">
+    <section className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-2 text-base font-semibold">

@@ -12,7 +12,8 @@ import { useCreateDiesel, useCreateFuelStation, useDieselEntries, useFuelStation
 import { fillMileage, fillOrder, odometerConflict } from "@/domain/diesel"
 import { TANKER_SOURCE_ID, availabilityMessage, fitsTanker, isStockPool, tankerAvailability, tankerLabel, tankerOf } from "@/domain/tanker"
 import { CreatableSelect } from "@/components/shared/creatable-select"
-import { fuelLabel } from "@/lib/constants"
+import { fuelTheme } from "@/lib/fuel-theme"
+import { FuelBadge } from "@/components/shared/fuel-badge"
 import { formatDate, formatINR, formatNumber, round2, toISODate, todayISO } from "@/lib/format"
 import type { Customer, DieselEntry, Vehicle } from "@/lib/types"
 
@@ -174,7 +175,7 @@ export function AddDieselEntryDialog({
     <FormModal
       open={open}
       onOpenChange={(o) => (o ? onOpenChange(o) : close())}
-      title={entry ? "Edit diesel entry" : "Add diesel entry"}
+      title={`${entry ? "Edit" : "Add"} ${fuelTheme(vehicle.fuelType).entry}`}
       description={`${vehicle.regNo} · costed to ${customer?.shortName ?? "Unallocated"}`}
       submitLabel={entry ? "Save changes" : "Save entry"}
       pending={create.isPending || update.isPending}
@@ -218,7 +219,7 @@ export function AddDieselEntryDialog({
         )}
         <Field label="Fuel type">
           <div className={READ_ONLY_BOX} title="Set on the vehicle record">
-            <span className="truncate">{fuelLabel(vehicle.fuelType)}</span>
+            <FuelBadge fuel={vehicle.fuelType} />
             <span className="ml-auto shrink-0 text-xs text-muted-foreground">from vehicle</span>
           </div>
         </Field>

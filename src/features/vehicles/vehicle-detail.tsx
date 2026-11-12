@@ -33,6 +33,8 @@ import { worstCompliance } from "./vehicle-list"
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart"
 import { inrTick } from "@/components/shared/misc"
+import { FuelBadge } from "@/components/shared/fuel-badge"
+import { fuelName } from "@/domain/expenditure"
 
 const MAINT = new Set(["MAINTENANCE", "TYRE"])
 
@@ -131,7 +133,7 @@ export function VehicleDetail({ id }: { id: string }) {
             {can("diesel") && d.customer && (
               <Button variant="outline" asChild>
                 <Link href={`/diesel/${d.customer.code.toLowerCase()}/${todayISO().slice(0, 7)}/${v.regNo}`}>
-                  <Fuel /> Diesel
+                  <Fuel /> {fuelName(v.fuelType)}
                 </Link>
               </Button>
             )}
@@ -168,7 +170,7 @@ export function VehicleDetail({ id }: { id: string }) {
         <TabsList className="max-w-full overflow-x-auto">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="maintenance">Maintenance ({d.maintenance!.length})</TabsTrigger>
-          <TabsTrigger value="diesel">Diesel ({d.diesel!.length})</TabsTrigger>
+          <TabsTrigger value="diesel">{fuelName(v.fuelType)} ({d.diesel!.length})</TabsTrigger>
           {finance && <TabsTrigger value="profitability">Profitability</TabsTrigger>}
           <TabsTrigger value="trips">Trips</TabsTrigger>
         </TabsList>
@@ -185,7 +187,7 @@ export function VehicleDetail({ id }: { id: string }) {
                   ["Make / model", `${v.make} ${v.model}`],
                   ["Year", v.year],
                   ["Seats", v.seats ?? "—"],
-                  ["Fuel", v.fuelType],
+                  ["Fuel", <FuelBadge key="fuel" fuel={v.fuelType} />],
                   ["Ownership", v.ownership === "ATTACHED" ? `Attached — ${v.ownerName}` : "Owned"],
                   ["Monthly EMI", v.emiAmount ? formatINR(v.emiAmount) : "—"],
                   ["Deployed at", d.customer ? <Link className="hover:underline" href={`/customers/${d.customer.id}`}>{d.customer.name}</Link> : "Spare"],
@@ -327,7 +329,7 @@ export function VehicleDetail({ id }: { id: string }) {
           <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
             {(
               [
-                ["Diesel", p.diesel],
+                [fuelName(v.fuelType), p.diesel],
                 ["Driver", p.driver],
                 ["Maintenance & tyres", p.maintenance],
                 ["EMI / insurance / tax / hire", p.fixed],

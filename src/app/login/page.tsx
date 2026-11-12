@@ -1,6 +1,7 @@
 import type { Metadata } from "next"
 import Link from "next/link"
-import { AlertCircle, CheckCircle2, Container, Fuel, Info, ShieldCheck, Store, Truck } from "lucide-react"
+import { AlertCircle, CheckCircle2, Container, Fuel, Info, ShieldCheck, Store } from "lucide-react"
+import { BrandLogo } from "@/components/shared/brand-logo"
 import { GoogleSignInButton, ReloadIfStaleShell, SignOutButton } from "@/features/auth/sign-in-buttons"
 import { getServerAuth } from "@/lib/auth/session"
 import { LANDING, safeNext } from "@/lib/auth/gate"
@@ -55,9 +56,7 @@ export default async function LoginPage(props: PageProps<"/login">) {
         <div aria-hidden className="pointer-events-none absolute inset-0 opacity-[0.08] [background-image:repeating-linear-gradient(135deg,currentColor_0_2px,transparent_2px_28px)]" />
         <div aria-hidden className="pointer-events-none absolute -right-24 -bottom-24 size-96 rounded-full bg-primary-foreground/10 blur-3xl" />
         <div className="relative flex items-center gap-3">
-          <div className="flex size-11 items-center justify-center rounded-xl bg-primary-foreground/15 ring-1 ring-primary-foreground/25">
-            <Truck className="size-6" />
-          </div>
+          <BrandLogo className="size-11 rounded-xl p-1.5" />
           <div className="leading-tight">
             <p className="text-lg font-semibold tracking-tight">Vishal Transport</p>
             <p className="text-xs uppercase tracking-[0.2em] text-primary-foreground/70">ERP</p>
@@ -82,9 +81,7 @@ export default async function LoginPage(props: PageProps<"/login">) {
       {/* Sign-in panel */}
       <main className="flex flex-col items-center justify-center px-4 py-10 sm:px-8">
         <div className="mb-8 flex items-center gap-3 lg:hidden">
-          <div className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-            <Truck className="size-5" />
-          </div>
+          <BrandLogo className="size-10 rounded-xl p-1.5" />
           <div className="leading-tight">
             <p className="font-semibold tracking-tight">Vishal Transport</p>
             <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">ERP</p>

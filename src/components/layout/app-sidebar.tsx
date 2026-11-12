@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Truck } from "lucide-react"
+import { BrandLogo } from "@/components/shared/brand-logo"
 import {
   Sidebar,
   SidebarContent,
@@ -43,9 +43,7 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild tooltip="Vishal Transport">
               <Link href={landingFor(role)} onClick={() => setOpenMobile(false)}>
-                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                  <Truck className="size-4" />
-                </div>
+                <BrandLogo className="size-8" />
                 <div className="grid flex-1 text-left leading-tight">
                   <span className="truncate text-sm font-semibold">Vishal Transport</span>
                 </div>

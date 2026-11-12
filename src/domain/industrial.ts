@@ -95,3 +95,19 @@ export function industrialReport<E extends { customerId: string; litres: number;
  */
 export const industrialInView = <E extends { date: string; customerId: string }>(entries: E[], range: { from: string; to: string }, customerIds: ReadonlySet<string>) =>
   entries.filter((e) => e.date >= range.from && e.date <= range.to && customerIds.has(e.customerId))
+
+/**
+ * Combined Fuel Outflow (owner, 12 Nov 2026): the fuel that left the business for a customer in one period — into its
+ * vehicles (`vehicle`: diesel and petrol fills, EV charging excluded — vehicleDiesel in domain/diesel.ts) plus the
+ * industrial diesel supplied to it (`supplies`,
+ * already limited to the same customer and period). Each litre is counted once: a supply is never a vehicle fill, and
+ * a tanker's own movements (loads, transfers) are neither. AdBlue is never part of it.
+ */
+export function combinedDieselOutflow(vehicle: { litres: number; value: number; entries: number }, supplies: { litres: number; amount: number }[]) {
+  const t = industrialTotals(supplies)
+  const industrial = { litres: t.litres, value: t.value, entries: t.count, avgRate: t.avgRate }
+  const litres = Number((vehicle.litres + industrial.litres).toFixed(LITRES_DECIMALS))
+  const value = round2(vehicle.value + industrial.value)
+  return { vehicle: { ...vehicle, avgRate: vehicle.litres ? round2(vehicle.value / vehicle.litres) : null }, industrial, combined: { litres, value, avgRate: litres ? round2(value / litres) : null } }
+}
+

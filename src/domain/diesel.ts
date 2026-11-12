@@ -285,6 +285,16 @@ export interface VehicleMonth extends DieselStats {
 /** Optional day cap (inclusive) for like-for-like comparison of a partial month. */
 const withinDay = (iso: string, dayCap?: number) => dayCap === undefined || Number(iso.slice(8, 10)) <= dayCap
 
+/**
+ * "Vehicle Fuel (Diesel / Petrol)" as the Combined Fuel Outflow counts it (owner, 12 Nov 2026): the diesel and petrol
+ * fills of these entries — the same fills as "Total Diesel Litres" (EV charging is kWh, not litres, so it is left out
+ * of both the litres and the ₹). Read-only: no KM, mileage or cost-per-km figure uses it.
+ */
+export function vehicleDiesel(idx: DieselIndex, entries: DieselEntry[]) {
+  const liquid = entries.filter((e) => isLiquid(idx, e))
+  return { litres: round2(liquid.reduce((t, e) => t + e.litres, 0)), value: round2(liquid.reduce((t, e) => t + e.amount, 0)), entries: liquid.length }
+}
+
 export function groupMonth(idx: DieselIndex, groupId: string | null, month: string, dayCap?: number, includeAssigned = false) {
   const entries = (idx.fills.get(`${groupKey(groupId)}|${month}`) ?? []).filter((e) => withinDay(e.date, dayCap))
   const trips = groupId ? (idx.trips.get(`${groupId}|${month}`) ?? []).filter((t) => withinDay(t.date, dayCap)) : []
