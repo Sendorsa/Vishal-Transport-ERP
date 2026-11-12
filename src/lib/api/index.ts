@@ -1519,6 +1519,18 @@ export const api = {
     get: async () => adBlueTotals(await adbluePurchases.list(), valued(await adblue.list()), todayISO().slice(0, 7)),
   },
 
+  /**
+   * GET /api/adblue-vehicles — the registration of every vehicle that has an AdBlue entry (id and number only), so the
+   * AdBlue page names each record's vehicle for every role — also for Tata Adblue, whose vehicle list (Diesel) holds only
+   * its granted customers' vehicles (owner, 12 Nov 2026: AdBlue is company-wide to view).
+   */
+  adblueVehicles: {
+    list: async () => {
+      const ids = new Set((await adblue.list()).map((e) => e.vehicleId))
+      return (await vehicles.list()).filter((v) => ids.has(v.id)).map((v) => ({ id: v.id, regNo: v.regNo }))
+    },
+  },
+
   /** Diesel loaded into the tanker's cargo. Amount = litres × rate; month lock; stock never below zero. */
   tankerLoads: {
     list: tankerLoads.list,

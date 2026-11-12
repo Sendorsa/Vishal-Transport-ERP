@@ -10,11 +10,10 @@ import { ReasonField } from "@/components/shared/audit"
 import { Field } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { useAdBlueEntries, useAdBluePurchases, useAdBlueStockDraws, useAdBlueTotals, useSaveAdBlue } from "@/lib/api/hooks"
-import { useRole } from "@/lib/app-state"
+import { useAdBlueEntries, useAdBluePurchases, useAdBlueStockDraws, useSaveAdBlue } from "@/lib/api/hooks"
 import { insufficientMessage, isDirectAdBlue, valueInventory } from "@/domain/adblue-inventory"
 import { adBlueNeighbours } from "@/domain/adblue"
-import { formatDate, formatINR, formatNumber, round2, toISODate, todayISO } from "@/lib/format"
+import { formatDate, formatINR, formatNumber, toISODate, todayISO } from "@/lib/format"
 import type { AdBlueEntry, Customer, PaymentMode, Vehicle } from "@/lib/types"
 
 /**
@@ -43,12 +42,7 @@ export function AddAdBlueDialog({
 }) {
   const entries = useAdBlueEntries()
   const purchases = useAdBluePurchases()
-  // Tata Adblue never receives another customer's draws (owner, 11 Nov 2026): it gets today's company-wide stock and
-  // average rate (totals only) and an estimated cost; the server checks the stock and costs the draw at its date's rate.
-  const [role] = useRole()
-  const estimated = role === "TATA_ADBLUE"
-  const stock = useAdBlueStockDraws(!estimated) // every draw on the shared stock — also those of customers this account isn't shown
-  const totals = useAdBlueTotals()
+  const stock = useAdBlueStockDraws() // every draw on the shared stock
   const save = useSaveAdBlue()
   const today = todayISO()
   const monthEnd = toISODate(endOfMonth(parseISO(`${month}-01`)))
@@ -70,13 +64,10 @@ export function AddAdBlueDialog({
   const direct = f.source === "DIRECT"
   const others = (stock.data ?? []).filter((e) => e.id !== entry?.id)
   const draft = { id: entry?.id ?? "draft", date: f.date, createdAt: entry?.createdAt ?? new Date().toISOString(), quantityLitres: qty > 0 ? qty : 0 }
-  const exact = valueInventory(purchases.data ?? [], others)
-  const now = totals.data?.current
-  // Estimated: today's stock with this entry's own litres given back, at today's average rate.
-  const before = estimated ? { stockLitres: round2((now?.stockLitres ?? 0) + (entry && !isDirectAdBlue(entry) ? entry.quantityLitres : 0)), avgRate: now?.avgRate ?? null } : exact
+  const before = valueInventory(purchases.data ?? [], others)
   const after = valueInventory(purchases.data ?? [], direct ? others : [...others, draft])
   const rate = Number(f.rate)
-  const amount = direct ? (qty > 0 && rate > 0 ? qty * rate : 0) : estimated ? round2(qty * (before.avgRate ?? 0)) : (after.costOf.get(draft.id) ?? 0)
+  const amount = direct ? (qty > 0 && rate > 0 ? qty * rate : 0) : (after.costOf.get(draft.id) ?? 0)
   const vendors = [...new Set((entries.data ?? []).map((e) => e.vendorName?.trim()).filter((v): v is string => !!v))].sort()
   const kmRun = prev && f.closingKm !== "" ? closing - prev.closingKm : null
   const kmPerLitre = kmRun && kmRun > 0 && qty > 0 ? kmRun / qty : null
@@ -96,7 +87,7 @@ export function AddAdBlueDialog({
     else if (prev && !(closing > prev.closingKm)) errs.closingKm = "Closing odometer must be greater than the last recorded odometer."
     else if (next && !(closing < next.closingKm)) errs.closingKm = `Must be less than the next AdBlue entry (${formatNumber(next.closingKm)} km on ${formatDate(next.date)})`
     if (!(qty > 0)) errs.qty = "Enter AdBlue litres"
-    else if (!direct && !estimated && after.shortfall) errs.qty = insufficientMessage(after.shortfall.available) // estimated: the server refuses it
+    else if (!direct && after.shortfall) errs.qty = insufficientMessage(after.shortfall.available)
     if (direct && !f.vendorName.trim()) errs.vendorName = "Enter the vendor"
     if (direct && !(rate > 0)) errs.rate = "Enter the rate per litre"
     setErrors(errs)
@@ -115,7 +106,7 @@ export function AddAdBlueDialog({
       },
       reason,
     })
-    toast.success(`AdBlue entry ${entry ? "updated" : "saved"} — ${formatNumber(qty, 2)} L${estimated && !direct ? "" : `, ${formatINR(amount)}`}`)
+    toast.success(`AdBlue entry ${entry ? "updated" : "saved"} — ${formatNumber(qty, 2)} L, ${formatINR(amount)}`)
     close()
   }
 
@@ -180,10 +171,7 @@ export function AddAdBlueDialog({
             </Field>
           </>
         ) : null}
-        <Field
-          label={direct ? "Total amount" : estimated ? "Estimated cost" : "Cost (from inventory)"}
-          hint={direct ? "Litres × rate" : estimated ? "Litres × today's average rate. The final cost is calculated on the server at the actual weighted-average rate on the entry date." : "Litres × weighted-average rate — calculated, not typed"}
-        >
+        <Field label={direct ? "Total amount" : "Cost (from inventory)"} hint={direct ? "Litres × rate" : "Litres × weighted-average rate — calculated, not typed"}>
           <div className="flex h-9 items-center rounded-md border bg-muted/40 px-3 text-sm num">{qty > 0 ? formatINR(amount) : "—"}</div>
         </Field>
         <Field label={direct ? "Invoice / receipt no." : "Reference / job card"}>
@@ -205,7 +193,7 @@ export function AddAdBlueDialog({
           <div className="num font-medium">{kmPerLitre ? kmPerLitre.toFixed(1) : "—"}</div>
         </div>
         <div>
-          <div className="text-xs text-muted-foreground">{estimated && !direct ? "Estimated cost per km" : "AdBlue cost per km"}</div>
+          <div className="text-xs text-muted-foreground">AdBlue cost per km</div>
           <div className="num font-medium">{costPerKm ? formatINR(costPerKm) : "—"}</div>
         </div>
       </div>

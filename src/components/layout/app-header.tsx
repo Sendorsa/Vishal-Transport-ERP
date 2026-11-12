@@ -121,7 +121,7 @@ function PreviewBanner() {
           · Signed in as Dev{session.email ? ` (${session.email})` : ""}. Only the interface changes: DEV retains their actual DEV permissions. Writes
           through the normal application UI are blocked to prevent accidental changes; direct API or database requests may still modify data.
           {preview === "TATA_ADBLUE" &&
-            " Tata Adblue sees only the customers Dev grants each account; this preview has no grants, so no customer's data is shown — only the shared AdBlue stock and purchases. It shows the interface, not any account's real customer access."}
+            " Tata Adblue views every customer's AdBlue, but Diesel and AdBlue changes only for the customers Dev grants each account; this preview has no grants, so Diesel shows no customer. It shows the interface, not any account's real customer access."}
           {preview === "ADBLUE" && " Adblue sees every customer's AdBlue and Diesel records, read-only for Diesel."}
         </span>
       </p>

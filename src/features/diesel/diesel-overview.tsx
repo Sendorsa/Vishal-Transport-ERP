@@ -22,6 +22,7 @@ import { StatusBadge } from "@/components/shared/status-badge"
 import { asOfMonth, statusOn } from "@/domain/status-history"
 import { customerCards, customerSlug, monthLabel, shortMonthLabel, type CustomerCard } from "@/domain/diesel"
 import { useCan, useRole } from "@/lib/app-state"
+import { inDieselScope } from "@/domain/adblue"
 import { matchesSearch } from "@/lib/utils"
 import { formatINR, formatNumber, todayISO } from "@/lib/format"
 import { AddCustomerDialog } from "./add-customer-dialog"
@@ -73,14 +74,14 @@ export function DieselOverview() {
             {
               idx,
               diesel: ds.diesel,
-              adblue: adblue.data,
+              adblue: inDieselScope(adblue.data, role === "TATA_ADBLUE" ? ds.customers : null),
               customers: new Map(ds.customers.map((c) => [c.id, c])),
               vendors: new Map(),
             },
             inPeriod(month)
           )
         : null,
-    [ds, idx, adblue.data, month]
+    [ds, idx, adblue.data, month, role]
   )
 
   // A tanker's name (JIO, Office, Mini) is its vehicle's only name; vehicle records have no name field.

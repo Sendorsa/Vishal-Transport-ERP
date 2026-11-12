@@ -22,7 +22,7 @@ import { AddAdBlueDialog } from "../diesel/add-adblue-dialog"
 import { monthLabel } from "@/domain/diesel"
 import { canEditMonth } from "@/domain/month-lock"
 import { inEntryOrder } from "@/domain/payment-order"
-import { useAdBlueEntries, useAdBluePurchases, useAdBlueTotals, useDeleteAdBluePurchase, useMonthLocks, useSaveAdBluePurchase } from "@/lib/api/hooks"
+import { useAdBlueEntries, useAdBluePurchases, useAdBlueTotals, useAdBlueVehicles, useDeleteAdBluePurchase, useMonthLocks, useSaveAdBluePurchase } from "@/lib/api/hooks"
 import { useCan, useRole } from "@/lib/app-state"
 import { formatDate, formatINR, formatNumber, monthKey, todayISO, formatLitres } from "@/lib/format"
 import type { AdBluePurchase, Vehicle } from "@/lib/types"
@@ -49,6 +49,7 @@ export function AdBlueInventory() {
   const purchases = useAdBluePurchases()
   const entries = useAdBlueEntries()
   const totals = useAdBlueTotals() // company-wide figures, totals by month only (computed on the server for the shared database)
+  const regs = useAdBlueVehicles() // every AdBlue vehicle's registration — also those outside Tata Adblue's Diesel vehicles
   const locks = useMonthLocks()
   const del = useDeleteAdBluePurchase()
   const [editing, setEditing] = useState<{ purchase?: AdBluePurchase } | null>(null)
@@ -71,12 +72,11 @@ export function AdBlueInventory() {
   // A period that ended before this month shows stock and value at its month end, never today's.
   const lastMonth = period.periodMonths?.at(-1)
   const endedMonth = lastMonth && lastMonth < monthKey(todayISO()) ? lastMonth : null
-  // Every card is company-wide, from the totals (also for Tata Adblue, owner 11 Nov 2026); only the direct purchases
-  // table lists entries — the role's own (Tata Adblue: its granted customers').
+  // Every card and the direct purchases table are company-wide, for every role (Tata Adblue too: owner, 12 Nov 2026).
   const { stock, directCost, directLitres, directCount } = totalsFor(d.totals, period.periodMonths, endedMonth)
   const directInPeriod = d.directs.filter(period.match)
   const issued = { cost: m.consumedCost, litres: m.consumed }
-  const regOf = (id: string) => idx?.vehicles.get(id)?.regNo ?? "Unknown"
+  const regOf = (id: string) => idx?.vehicles.get(id)?.regNo ?? regs.data?.find((v) => v.id === id)?.regNo ?? "Unknown"
   const asOf = endedMonth ? `As of ${format(endOfMonth(parseISO(`${endedMonth}-01`)), "d MMM yyyy")}` : "As of today"
   const open = (p: AdBluePurchase) => canEditMonth(role, p.date.slice(0, 7), todayISO(), locks.data ?? [])
   const mayEdit = canChangeAdBluePurchases(role, "edit")
@@ -195,9 +195,7 @@ export function AdBlueInventory() {
                 { id: "i", header: "Invoice", hideOnMobile: true, cell: (e) => <span className="text-xs text-muted-foreground">{e.invoiceNo || "—"}</span> },
               ]}
             />
-            <p className="mt-1 text-xs text-muted-foreground">
-              {role === "TATA_ADBLUE" && "Your customers' direct purchases only — the cards above are company-wide totals. "}Edit or delete a direct purchase on the vehicle&apos;s AdBlue tab.
-            </p>
+            <p className="mt-1 text-xs text-muted-foreground">Edit or delete a direct purchase on the vehicle&apos;s AdBlue tab.</p>
           </div>
         )}
       </section>

@@ -9,15 +9,14 @@
  * No "server-only" import: the offline checks run it (check:erp-db), and UI Preview Mode applies the same list and
  * shapes in the browser (client.ts) so a DEV previewing a profile sees what that profile would — interface only.
  */
-import { withRuns } from "@/domain/adblue"
 import { previousOdometers } from "@/domain/diesel"
 import { resolveCustomers } from "@/domain/assignments"
 import { customerScope } from "@/lib/identity"
 import { isAdBlueProfile } from "@/lib/permissions"
 import { readCollection } from "@/lib/storage/local-store"
-import type { AdBlueEntry, Customer, DieselEntry, Driver, FuelStation, Role, Vehicle, VehicleAssignment } from "@/lib/types"
+import type { Customer, DieselEntry, Driver, FuelStation, Role, Vehicle, VehicleAssignment } from "@/lib/types"
 
-type Shape = "as-is" | "empty" | "zero" | "stations" | "customers" | "vehicles" | "drivers" | "assignments" | "diesel" | "adblue"
+type Shape = "as-is" | "empty" | "zero" | "stations" | "customers" | "vehicles" | "drivers" | "assignments" | "diesel"
 
 const METHODS: Record<string, Shape> = {
   // Shared, not customer data: settings, month locks, tankers, the one AdBlue stock pool and its purchase history.
@@ -25,16 +24,19 @@ const METHODS: Record<string, Shape> = {
   "monthLocks.list": "as-is",
   "tankers.list": "as-is",
   "adbluePurchases.list": "as-is",
-  "adblueStock.list": "as-is", // every draw (date, litres) — Adblue only, refused to Tata Adblue (TATA_REFUSED)
-  "adblueTotals.get": "as-is", // company-wide totals by month, no single entry: the AdBlue page for every profile
+  "adblueStock.list": "as-is", // every draw (date, litres)
+  "adblueTotals.get": "as-is", // company-wide totals by month: the AdBlue page's figures
+  // AdBlue is company-wide for both profiles (owner, 12 Nov 2026): every customer's AdBlue entries, and the registration
+  // of every vehicle that has one (the AdBlue page names them). Writes stay limited (customer scope, assignment date).
+  "adblue.list": "as-is",
+  "adblueVehicles.list": "as-is",
   "fuelStations.list": "stations",
-  // Tata Adblue: its granted customers only. Adblue: every customer.
+  // Diesel and its customers, vehicles, drivers and assignments — Tata Adblue: its granted customers only. Adblue: every customer.
   "customers.list": "customers",
   "vehicles.list": "vehicles",
   "drivers.list": "drivers",
   "assignments.list": "assignments",
   "diesel.list": "diesel",
-  "adblue.list": "adblue",
   // The shared Diesel screens also ask for these; nothing of them is shown to these roles.
   "trips.list": "empty",
   "invoices.list": "empty",
@@ -52,14 +54,8 @@ const METHODS: Record<string, Shape> = {
   "adbluePurchases.create": "as-is",
 }
 
-/**
- * Tata Adblue sees the whole company's AdBlue only as totals (adblueTotals.get): never one record of a customer it
- * wasn't granted — not even a draw's date and litres (owner, 11 Nov 2026).
- */
-const TATA_REFUSED = new Set(["adblueStock.list"])
-
-/** The methods an AdBlue profile may call (pinned in check:erp-db). */
-export const profileMethods = (role: "TATA_ADBLUE" | "ADBLUE") => Object.keys(METHODS).filter((m) => role === "ADBLUE" || !TATA_REFUSED.has(m))
+/** The methods an AdBlue profile may call — the same list for both (pinned in check:erp-db). */
+export const PROFILE_METHODS = Object.keys(METHODS)
 
 /**
  * `call` as this role may make it: unchanged for the Owner, Dev and Employee; for an AdBlue profile, only a listed
@@ -69,7 +65,7 @@ export const profileMethods = (role: "TATA_ADBLUE" | "ADBLUE") => Object.keys(ME
  */
 export function profileCall<T>(role: Role, method: string, call: () => Promise<T>, scope?: ReadonlySet<string> | null): (() => Promise<unknown>) | null {
   if (!isAdBlueProfile(role)) return call
-  const shape = Object.hasOwn(METHODS, method) && !(role === "TATA_ADBLUE" && TATA_REFUSED.has(method)) ? METHODS[method] : undefined
+  const shape = Object.hasOwn(METHODS, method) ? METHODS[method] : undefined
   if (!shape) return null
   if (shape === "empty") return async () => []
   if (shape === "zero") return async () => 0
@@ -108,11 +104,6 @@ function reshape(shape: Shape, result: unknown, scope: ReadonlySet<string> | nul
       const all = result as DieselEntry[]
       const prev = previousOdometers(all, readCollection("vehicles"))
       return all.filter((e) => mine(e.customerId)).map((e) => ({ ...e, prevOdometerKm: prev.get(e.id) ?? null }))
-    }
-    case "adblue": {
-      const all = result as AdBlueEntry[]
-      const runs = new Map(withRuns(all).map((r) => [r.id, r]))
-      return all.filter((e) => mine(e.customerId)).map((e) => ({ ...e, prevKm: runs.get(e.id)!.prevKm, prevDate: runs.get(e.id)!.prevDate }))
     }
   }
 }

@@ -341,8 +341,9 @@ async function main() {
     const { setVerifiedSession, setPreviewRole, previewRole, currentActor, customerScope } = await import("@/lib/identity")
     const { api: uiApi, PreviewWriteBlockedError, PreviewReadBlockedError } = await import("./client")
     const { isReadMethod } = await import("./reads")
-    const { profileMethods, profileCall } = await import("@/lib/server/erp/profiles")
+    const { PROFILE_METHODS, profileCall } = await import("@/lib/server/erp/profiles")
     const { stockFor } = await import("@/domain/adblue-inventory")
+    const { inDieselScope } = await import("@/domain/adblue")
     const dev = { role: "DEV" as const, email: "dev@example.com" }
     setVerifiedSession(dev)
     // AdBlue for the totals (the demo data has none): a bulk purchase, a stock draw and a direct vendor purchase.
@@ -385,20 +386,17 @@ async function main() {
       assert.deepEqual(await uiApi.customers.list(), tata ? [] : devView.customers, `${r}: customers`)
       assert.deepEqual(await uiApi.vehicles.list(), tata ? [] : devView.vehicles, `${r}: vehicles`)
       assert.deepEqual(await uiApi.diesel.list(), tata ? [] : devView.diesel, `${r}: diesel entries`)
-      assert.deepEqual(await uiApi.adblue.list(), tata ? [] : devView.adblue, `${r}: AdBlue entries`)
+      assert.deepEqual(await uiApi.adblue.list(), devView.adblue, `${r}: every AdBlue entry (company-wide to view, owner 12 Nov 2026)`)
       assert.deepEqual(await uiApi.assignments.list(), tata ? [] : await api.assignments.list(), `${r}: assignments`)
       // Shared, not customer data: the one stock pool, its purchases, settings — exactly as the profiles get them.
       assert.deepEqual(await uiApi.adbluePurchases.list(), devView.purchases, `${r}: shared purchases`)
-      // AdBlue page: the whole company's figures as totals only — computed by the API (on the server for the shared
-      // database), never from records in the browser. Tata Adblue gets no individual draw, as for a real account.
-      const totals = await uiApi.adblueTotals.get()
-      assert.deepEqual(totals, devView.totals, `${r}: company-wide AdBlue totals`)
-      if (tata) {
-        await assert.rejects(uiApi.adblueStock.list(), PreviewReadBlockedError, "Tata Adblue preview: no individual draws")
-        const json = JSON.stringify(totals)
-        for (const id of [...devView.adblue.map((e) => e.id), ...devView.customers.map((c) => c.id), ...devView.vehicles.map((v) => v.id), ...devView.vehicles.map((v) => v.regNo), "Preview Check Vendor"])
-          assert.ok(!json.includes(`"${id}"`), `Tata Adblue preview: the totals hold no record (${id})`)
-      } else assert.deepEqual(await uiApi.adblueStock.list(), devView.stock, `${r}: shared stock`)
+      // AdBlue page: the company-wide totals (computed by the API — on the server for the shared database), every draw
+      // and the registration of every AdBlue vehicle, for both profiles.
+      assert.deepEqual(await uiApi.adblueTotals.get(), devView.totals, `${r}: company-wide AdBlue totals`)
+      assert.deepEqual(await uiApi.adblueStock.list(), devView.stock, `${r}: shared stock`)
+      assert.deepEqual(await uiApi.adblueVehicles.list(), await api.adblueVehicles.list(), `${r}: every AdBlue vehicle's registration`)
+      // …while the Diesel landing's AdBlue figures stay Diesel's scope: none for a Tata Adblue preview (no customers).
+      assert.deepEqual(inDieselScope(devView.adblue, tata ? await uiApi.customers.list() : null), tata ? [] : devView.adblue, `${r}: Diesel landing AdBlue`)
       assert.deepEqual(await uiApi.settings.get(), devView.settings)
       assert.ok((await uiApi.fuelStations.list()).every((x) => x.openingBalance === undefined && x.openingBalanceDate === undefined), `${r}: no station money`)
       for (const m of ["trips", "payments", "invoices", "tankerLoads", "tankerDispenses", "tankerTransfers", "tankerAdjustments"] as const)
@@ -409,7 +407,7 @@ async function main() {
       for (const read of [() => uiApi.audit.list(), () => uiApi.audit.history("x"), () => uiApi.diesel.get("x"), () => uiApi.admin.exportBackup(), () => uiApi.audit.checkRestore("x")])
         await assert.rejects(read(), PreviewReadBlockedError, `${r}: off-list read refused`)
       // Every read on the profile's list works in preview (no screen of the profile fails to load).
-      for (const m of profileMethods(r).filter((m) => isReadMethod(m.split(".")[0], m.split(".")[1]))) {
+      for (const m of PROFILE_METHODS.filter((m) => isReadMethod(m.split(".")[0], m.split(".")[1]))) {
         const [ns, fn] = m.split(".")
         await (uiApi as unknown as Record<string, Record<string, (...a: unknown[]) => Promise<unknown>>>)[ns][fn]()
       }
@@ -484,10 +482,12 @@ async function main() {
     const all = { customers: await api.customers.list(), vehicles: await api.vehicles.list(), diesel: await api.diesel.list(), adblue: await api.adblue.list(), assignments: await api.assignments.list(), drivers: await api.drivers.list(), totals: await api.adblueTotals.get() }
     assert.ok(all.customers.length > 1 && all.vehicles.length > 0 && all.diesel.length > 0, "the store has customers to hide")
     setVerifiedSession({ role: "TATA_ADBLUE", email: "tata@example.com" })
-    for (const m of ["customers", "vehicles", "diesel", "adblue", "assignments", "drivers"] as const)
+    for (const m of ["customers", "vehicles", "diesel", "assignments", "drivers"] as const)
       assert.deepEqual(await (uiApi[m] as { list: () => Promise<unknown> }).list(), [], `Tata Adblue (browser backend, no grants): no ${m}`)
-    assert.deepEqual(await uiApi.adblueTotals.get(), all.totals, "Tata Adblue: the company-wide AdBlue totals, unchanged")
-    for (const read of [() => uiApi.adblueStock.list(), () => uiApi.audit.list(), () => uiApi.diesel.get(all.diesel[0].id)]) await assert.rejects(read(), /can't open this/, "Tata Adblue: off-list reads refused")
+    assert.ok(all.adblue.length > 0, "the store has AdBlue entries")
+    assert.deepEqual([await uiApi.adblue.list(), await uiApi.adblueStock.list(), await uiApi.adblueTotals.get()], [all.adblue, await api.adblueStock.list(), all.totals], "Tata Adblue: every AdBlue entry, draw and total (company-wide to view)")
+    await assert.rejects(uiApi.adblue.remove(all.adblue[0].id, "Not mine"), /for this customer/, "…but it changes none of them without a grant")
+    for (const read of [() => uiApi.audit.list(), () => uiApi.diesel.get(all.diesel[0].id)]) await assert.rejects(read(), /can't open this/, "Tata Adblue: off-list reads refused")
     await assert.rejects(uiApi.customers.create({ name: "Sneaky Co" } as never), /can't open this/, "…and off-list writes")
     setVerifiedSession({ role: "ADBLUE", email: "adblue@example.com" })
     assert.deepEqual([await uiApi.customers.list(), await uiApi.diesel.list(), await uiApi.adblueTotals.get()], [all.customers, all.diesel, all.totals], "Adblue: every customer, as before")

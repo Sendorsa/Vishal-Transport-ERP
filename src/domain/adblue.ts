@@ -73,3 +73,14 @@ export function adBlueStats(es: AdBlueRun[]): AdBlueStats {
     costPerKm: km > 0 ? round2(runSpend / km) : null,
   }
 }
+
+/**
+ * The Diesel module's AdBlue figures (owner, 12 Nov 2026): Tata Adblue views every customer's AdBlue on the AdBlue page,
+ * but the Diesel module stays its granted customers' — the customers in its customer list (limited by the server).
+ * `customers` null = no limit (every other role).
+ */
+export function inDieselScope<E extends { customerId: string | null }>(entries: E[], customers: { id: string }[] | null): E[] {
+  if (!customers) return entries
+  const ids = new Set(customers.map((c) => c.id))
+  return entries.filter((e) => e.customerId !== null && ids.has(e.customerId))
+}

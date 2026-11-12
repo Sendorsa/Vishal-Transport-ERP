@@ -71,7 +71,9 @@ export const useDrivers = () => useQuery({ queryKey: queryKeys.drivers, queryFn:
 export const useTrips = () => useQuery({ queryKey: queryKeys.trips, queryFn: () => api.trips.list() })
 export const useAdBlueEntries = () => useQuery({ queryKey: queryKeys.adblue_entries, queryFn: () => api.adblue.list(), select: withRuns })
 /** Every bulk-stock draw (date, litres, order only) — the shared stock, for every role; refreshed with the AdBlue entries. */
-export const useAdBlueStockDraws = (enabled = true) => useQuery({ queryKey: [...queryKeys.adblue_entries, "stock"], queryFn: () => api.adblueStock.list(), enabled })
+export const useAdBlueStockDraws = () => useQuery({ queryKey: [...queryKeys.adblue_entries, "stock"], queryFn: () => api.adblueStock.list() })
+/** Registration of every vehicle with an AdBlue entry — the AdBlue page names each record's vehicle (every role). */
+export const useAdBlueVehicles = () => useQuery({ queryKey: [...queryKeys.adblue_entries, "vehicles"], queryFn: () => api.adblueVehicles.list() })
 /** The AdBlue page's company-wide figures, totals by month only — every role; refreshed with the AdBlue entries and purchases. */
 export const useAdBlueTotals = () => useQuery({ queryKey: [...queryKeys.adblue_entries, "totals"], queryFn: () => api.adblueTotals.get() })
 export const useVehicleAssignments = () => useQuery({ queryKey: queryKeys.vehicle_assignments, queryFn: () => api.assignments.list() })
