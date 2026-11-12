@@ -70,5 +70,5 @@ export async function checkTanker(id = "tnk_check", regNo = "KA00CHK0001") {
 /** Every tanker record as the API returns it — the input of src/domain/tanker.ts. */
 export async function tankerRecordsOf() {
   const { api } = await import("./index")
-  return { loads: await api.tankerLoads.list(), fills: await api.diesel.list(), external: await api.tankerDispenses.list(), transfers: await api.tankerTransfers.list(), adjustments: await api.tankerAdjustments.list() }
+  return { loads: await api.tankerLoads.list(), fills: await api.diesel.list(), external: await api.tankerDispenses.list(), transfers: await api.tankerTransfers.list(), adjustments: await api.tankerAdjustments.list(), industrial: await api.industrialSupplies.list() }
 }

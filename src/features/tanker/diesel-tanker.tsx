@@ -35,6 +35,7 @@ import {
   useMonthLocks,
   useSaveTanker,
   useSaveTankerLoad,
+  useIndustrialSupplies,
   useTankerAdjustments,
   useTankerDispenses,
   useTankerLoads,
@@ -95,6 +96,7 @@ export function DieselTanker() {
   const external = useTankerDispenses()
   const transfers = useTankerTransfers()
   const adjustments = useTankerAdjustments()
+  const industrial = useIndustrialSupplies() // Industrial Diesel Supply draws (12 Nov 2026): part of each tanker's stock
   const locks = useMonthLocks()
   const archive = useArchiveTanker()
   const delLoad = useDeleteTankerLoad()
@@ -113,8 +115,8 @@ export function DieselTanker() {
   >(null)
 
   const d = useMemo(() => {
-    if (!ds || !idx || !tankers.data || !loads.data || !external.data || !transfers.data || !adjustments.data) return null
-    const records = { loads: loads.data, fills: ds.diesel, external: external.data, transfers: transfers.data, adjustments: adjustments.data }
+    if (!ds || !idx || !tankers.data || !loads.data || !external.data || !transfers.data || !adjustments.data || !industrial.data) return null
+    const records = { loads: loads.data, fills: ds.diesel, external: external.data, transfers: transfers.data, adjustments: adjustments.data, industrial: industrial.data }
     const v = valueTankers(records)
     // Only the company tankers (JIO, Office, Mini) are shown. A stock pool (no registration, e.g. tnk_default with the
     // history recorded before tankers were split) keeps its records — they still cost the historical fills and are
@@ -153,7 +155,7 @@ export function DieselTanker() {
     // Opening + Loaded + Transfers + Adjustments − Dispensed = Closing per tanker (tankerLedger / tankerPeriod),
     // asserted in npm run check:diesel. Closing and carry-forward show in the ledgers, never as extra cards (CLAUDE.md).
     return { v, records, moves, through, dispenses, movements, byId, name, loads: inEntryOrder(loads.data.filter((l) => shown(tankerOf(l)))), stations: new Map(ds.fuelStations.map((s) => [s.id, s.name])) }
-  }, [ds, idx, tankers.data, loads.data, external.data, transfers.data, adjustments.data])
+  }, [ds, idx, tankers.data, loads.data, external.data, transfers.data, adjustments.data, industrial.data])
 
   if (!can("diesel")) return <NoAccess what="the diesel tankers" />
   if (isLoading || !d || !tankers.data) return <PageSkeleton />
@@ -256,7 +258,7 @@ export function DieselTanker() {
               icon={Container}
               value={L(m.closing)}
               hint={`As of ${format(endOfMonth(parseISO(`${endedMonth}-01`)), "d MMM yyyy")}`}
-              info={`Inventory at the end of the period: Opening ${L(m.opening)} + Opening stock ${L(m.openingStock)} + Loaded ${L(m.loaded)} + Transfers in ${L(m.transferIn)} + Adjustments ${L(m.adjusted)} − Dispensed ${L(m.dispensed)} − Transfers out ${L(m.transferOut)} = ${L(m.closing)}.`}
+              info={`Inventory at the end of the period: Opening ${L(m.opening)} + Opening stock ${L(m.openingStock)} + Loaded ${L(m.loaded)} + Transfers in ${L(m.transferIn)} + Adjustments ${L(m.adjusted)} − Dispensed ${L(m.dispensed)} − Industrial supplied ${L(m.industrial)} − Transfers out ${L(m.transferOut)} = ${L(m.closing)}.`}
             />
           ) : (
             <StatsCard
@@ -264,7 +266,7 @@ export function DieselTanker() {
               icon={Container}
               value={L(currentStock)}
               hint="As of today"
-              info={`${tanker ? `${tanker.name}: ` : "All tankers: "}Σ loaded + transfers in + adjustments − Σ dispensed − transfers out, all time.`}
+              info={`${tanker ? `${tanker.name}: ` : "All tankers: "}Σ loaded + transfers in + adjustments − Σ dispensed − Σ industrial supplied − transfers out, all time.`}
             />
           )}
           <StatsCard
@@ -362,6 +364,7 @@ export function DieselTanker() {
             { id: "tr", header: "Transfers (net)", align: "right", hideOnMobile: true, cell: (r) => <span className="num">{L(r.pm.transferIn - r.pm.transferOut)}</span>, footer: L(total((r) => r.pm.transferIn - r.pm.transferOut)) },
             { id: "a", header: "Adjustments", align: "right", hideOnMobile: true, cell: (r) => <span className="num">{L(r.pm.adjusted)}</span>, footer: L(total((r) => r.pm.adjusted)) },
             { id: "d", header: "Dispensed", align: "right", cell: (r) => <span className="num">{L(r.pm.dispensed)}</span>, footer: L(total((r) => r.pm.dispensed)) },
+            { id: "ind", header: "Industrial", align: "right", hideOnMobile: true, cell: (r) => <span className="num">{L(r.pm.industrial)}</span>, footer: L(total((r) => r.pm.industrial)) },
             { id: "c", header: "Closing", align: "right", cell: (r) => <span className="num font-semibold">{L(r.pm.closing)}</span>, footer: L(total((r) => r.pm.closing)) },
             { id: "pc", header: "Purchase Cost", align: "right", hideOnMobile: true, cell: (r) => <span className="num">{formatINR(r.pm.loadedCost)}</span>, footer: formatINR(total((r) => r.pm.loadedCost)) },
             { id: "fa", header: "Fills Amount", align: "right", hideOnMobile: true, cell: (r) => <span className="num">{formatINR(r.fillAmount)}</span>, footer: formatINR(total((r) => r.fillAmount)) },
@@ -441,6 +444,7 @@ export function DieselTanker() {
             ...(scope ? [{ id: "to", header: "Transfers Out", align: "right" as const, hideOnMobile: true, cell: (r: (typeof ledger)[number]) => <span className="num">{L(r.transferOut)}</span> }] : []),
             { id: "adj", header: "Adjustments", align: "right", hideOnMobile: true, cell: (r) => <span className="num">{L(r.adjusted)}</span> },
             { id: "out", header: "Dispensed", align: "right", cell: (r) => <span className="num">{L(r.dispensed)}</span> },
+            { id: "ind", header: "Industrial", align: "right", hideOnMobile: true, cell: (r) => <span className="num">{L(r.industrial)}</span> },
             { id: "close", header: "Closing Inventory", align: "right", cell: (r) => <span className="num font-semibold">{L(r.closing)}</span> },
           ]}
         />

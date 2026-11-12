@@ -74,9 +74,14 @@ export interface TankerRecords {
   external: External[]
   transfers?: Pick<TankerTransfer, "id" | "date" | "createdAt" | "fromTankerId" | "toTankerId" | "litres">[]
   adjustments?: Pick<TankerAdjustment, "id" | "date" | "createdAt" | "tankerId" | "litres">[]
+  /**
+   * Industrial Diesel Supply (owner, 12 Nov 2026): diesel supplied to a customer out of one or more tankers — each
+   * allocation a draw on its tanker, on the supply's date. Never a vehicle fill, never a purchase.
+   */
+  industrial?: { id: string; date: string; createdAt?: string; allocations: { tankerId: string; litres: number }[] }[]
 }
 
-export type MoveKind = "LOAD" | "OPENING" | "FILL" | "EXTERNAL" | "TRANSFER_IN" | "TRANSFER_OUT" | "ADJUST"
+export type MoveKind = "LOAD" | "OPENING" | "FILL" | "EXTERNAL" | "TRANSFER_IN" | "TRANSFER_OUT" | "ADJUST" | "INDUSTRIAL"
 
 /** One change to one tanker's stock. `litres` is signed (+ in, − out). */
 export interface TankerMove {
@@ -104,11 +109,12 @@ export function tankerMoves(r: TankerRecords): TankerMove[] {
       { id: t.id, date: t.date, createdAt: at(t), tankerId: t.toTankerId, kind: "TRANSFER_IN", litres: t.litres, otherTankerId: t.fromTankerId },
     ]),
     ...(r.adjustments ?? []).map((a): TankerMove => ({ id: a.id, date: a.date, createdAt: at(a), tankerId: a.tankerId, kind: "ADJUST", litres: a.litres })),
+    ...(r.industrial ?? []).flatMap((x) => x.allocations.map((a): TankerMove => ({ id: x.id, date: x.date, createdAt: at(x), tankerId: a.tankerId, kind: "INDUSTRIAL", litres: -a.litres }))),
   ]
 }
 
 // Same day: purchases / + adjustments first, then transfers (out before in), then draws — so a late-entered load still covers that day.
-const RANK: Record<MoveKind, number> = { OPENING: 0, LOAD: 0, ADJUST: 0, TRANSFER_OUT: 1, TRANSFER_IN: 2, FILL: 3, EXTERNAL: 3 }
+const RANK: Record<MoveKind, number> = { OPENING: 0, LOAD: 0, ADJUST: 0, TRANSFER_OUT: 1, TRANSFER_IN: 2, FILL: 3, EXTERNAL: 3, INDUSTRIAL: 3 }
 const rank = (m: TankerMove) => (m.kind === "ADJUST" && m.litres < 0 ? 3 : RANK[m.kind])
 const moveOrder = (a: TankerMove, b: TankerMove) => a.date.localeCompare(b.date) || rank(a) - rank(b) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
 
@@ -170,7 +176,7 @@ export function valueTankers(r: TankerRecords): TankerValuation {
     }
     const cost = round2(Math.min(q, s.litres) * avg)
     if (m.kind === "TRANSFER_OUT") transferCost.set(m.id, cost)
-    else costOf.set(m.id, cost)
+    else if (m.kind !== "INDUSTRIAL") costOf.set(m.id, cost) // an industrial supply has its own rate; its draws only lower the stock value
     s.value = s.litres - q > 1e-9 ? s.value - cost : 0
     s.litres = Math.max(0, s.litres - q)
   }
@@ -196,8 +202,8 @@ export interface TankerAvailability {
  * (the fill being edited) is left out. `kind`: FILL for vehicle fills and − adjustments (same-day rank), TRANSFER_OUT
  * for a transfer. A draw of q litres keeps the tanker at or above zero exactly when q ≤ available.
  */
-export function tankerAvailability(r: TankerRecords, draw: { id: string; date: string; createdAt: string; tankerId: string; kind?: "FILL" | "TRANSFER_OUT" }): TankerAvailability {
-  const rest = { ...r, fills: r.fills.filter((e) => e.id !== draw.id) }
+export function tankerAvailability(r: TankerRecords, draw: { id: string; date: string; createdAt: string; tankerId: string; kind?: "FILL" | "TRANSFER_OUT" | "INDUSTRIAL" }): TankerAvailability {
+  const rest = { ...r, fills: r.fills.filter((e) => e.id !== draw.id), industrial: (r.industrial ?? []).filter((x) => x.id !== draw.id) }
   const existing = valueTankers(rest).shortfalls.get(draw.tankerId) ?? null
   const probe: TankerMove = { id: draw.id, date: draw.date, createdAt: draw.createdAt, tankerId: draw.tankerId, kind: draw.kind ?? "FILL", litres: 0 }
   const moves = [...tankerMoves(rest).filter((m) => m.tankerId === draw.tankerId), probe].sort(moveOrder)
@@ -259,7 +265,10 @@ export interface TankerLedgerRow {
   transferOut: number
   /** Net of + and − adjustments. */
   adjusted: number
+  /** Vehicle fills and external dispenses from the tanker. */
   dispensed: number
+  /** Industrial Diesel supplied out of the tanker (12 Nov 2026) — kept apart from `dispensed`. */
+  industrial: number
   closing: number
 }
 
@@ -269,7 +278,7 @@ export interface TankerLedgerRow {
  */
 export function tankerLedger(moves: TankerMove[], tankerId: string | null, throughMonth?: string): TankerLedgerRow[] {
   const mine = moves.filter((m) => (tankerId ? m.tankerId === tankerId : m.kind !== "TRANSFER_IN" && m.kind !== "TRANSFER_OUT"))
-  const blank = () => ({ loaded: 0, loadedCost: 0, openingStock: 0, transferIn: 0, transferOut: 0, adjusted: 0, dispensed: 0 })
+  const blank = () => ({ loaded: 0, loadedCost: 0, openingStock: 0, transferIn: 0, transferOut: 0, adjusted: 0, dispensed: 0, industrial: 0 })
   const by = new Map<string, ReturnType<typeof blank>>()
   for (const m of mine) {
     const k = m.date.slice(0, 7)
@@ -281,6 +290,7 @@ export function tankerLedger(moves: TankerMove[], tankerId: string | null, throu
     else if (m.kind === "TRANSFER_IN") r.transferIn += m.litres
     else if (m.kind === "TRANSFER_OUT") r.transferOut -= m.litres
     else if (m.kind === "ADJUST") r.adjusted += m.litres
+    else if (m.kind === "INDUSTRIAL") r.industrial -= m.litres
     else r.dispensed -= m.litres
   }
   const active = [...by.keys()].sort()
@@ -290,7 +300,7 @@ export function tankerLedger(moves: TankerMove[], tankerId: string | null, throu
   let stock = 0
   for (let m = active[0]; m <= last; m = format(addMonths(parseISO(`${m}-01`), 1), "yyyy-MM")) {
     const r = by.get(m) ?? blank()
-    const closing = round2(stock + r.openingStock + r.loaded + r.transferIn + r.adjusted - r.dispensed - r.transferOut)
+    const closing = round2(stock + r.openingStock + r.loaded + r.transferIn + r.adjusted - r.dispensed - r.industrial - r.transferOut)
     rows.push({
       month: m,
       opening: stock,
@@ -301,6 +311,7 @@ export function tankerLedger(moves: TankerMove[], tankerId: string | null, throu
       transferOut: round2(r.transferOut),
       adjusted: round2(r.adjusted),
       dispensed: round2(r.dispensed),
+      industrial: round2(r.industrial),
       closing,
     })
     stock = closing
@@ -324,8 +335,9 @@ export function tankerPeriod(rows: TankerLedgerRow[], months?: string[]) {
     transferOut: sum((r) => r.transferOut),
     adjusted: sum((r) => r.adjusted),
     dispensed: sum((r) => r.dispensed),
+    industrial: sum((r) => r.industrial),
   }
-  return { ...p, closing: round2(p.opening + p.openingStock + p.loaded + p.transferIn + p.adjusted - p.dispensed - p.transferOut), carriedFrom: before?.month ?? null }
+  return { ...p, closing: round2(p.opening + p.openingStock + p.loaded + p.transferIn + p.adjusted - p.dispensed - p.industrial - p.transferOut), carriedFrom: before?.month ?? null }
 }
 
 /* ------------------------------------------------------------------ station ledger */

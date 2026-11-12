@@ -10,7 +10,7 @@ import { readdirSync, readFileSync } from "node:fs"
 import { PGlite } from "@electric-sql/pglite"
 import { btree_gist } from "@electric-sql/pglite/contrib/btree_gist"
 import type { RequestIdentity } from "@/lib/request-scope"
-import type { AdBlueEntry, AdBluePurchase, AuditEvent, Customer, DieselEntry } from "@/lib/types"
+import type { AdBlueEntry, AdBluePurchase, AuditEvent, Customer, DieselEntry, IndustrialSupply } from "@/lib/types"
 import type { AdBlueTotals } from "@/domain/adblue-inventory"
 
 const U = { DEV: "00000000-0000-0000-0000-0000000000d1", OWNER: "00000000-0000-0000-0000-0000000000d2", EMP: "00000000-0000-0000-0000-0000000000d3", TATA: "00000000-0000-0000-0000-0000000000d4", ADB: "00000000-0000-0000-0000-0000000000d5", TATA2: "00000000-0000-0000-0000-0000000000d6" }
@@ -689,6 +689,94 @@ async function main() {
     await grant(DEV, P.TATA, [alpha.id], "Gamma contract ended")
     assert.deepEqual((await call<Customer[]>(TATA, "customers.list")).map((c) => c.id), [alpha.id], "a revoked customer disappears at once")
     await as(OWNER, () => api.diesel.remove(dG.id, "Check cleanup"))
+
+    // Industrial Diesel Supply (12 Nov 2026) on the shared database. The Owner, Dev and Employee as for Diesel; the AdBlue
+    // profiles read only (Tata Adblue its granted customers'); created_by / updated_by from the signed-in profile, never
+    // the request; the amount computed by the database; one audit event per change; RLS refuses the profiles' writes,
+    // a customer change and the Employee's closed month; vehicle Diesel untouched. The diesel comes out of the tankers:
+    // each allocation is a movement of the one tanker stock (fuel.tanker_movements), locked and checked at COMMIT.
+    const dieselBefore = await read(OWNER, () => api.diesel.list())
+    const tk = async (name: string, regNo: string, litres: number) => {
+      const t = await as(OWNER, () => api.tankers.create({ name, regNo, vehicleId: null, capacityLitres: null, notes: "" }))
+      await as(OWNER, () => api.tankerLoads.create({ tankerId: t.id, date: today, stationId: station.id, litres, rate: 90, invoiceNo: "", notes: "" }))
+      return t.id
+    }
+    const TA = await tk("Industrial A", "KA01IND0001", 1000)
+    const TB = await tk("Industrial B", "KA01IND0002", 500)
+    const dbStock = async (t: string) => Number((await db.query<{ s: string }>(`select coalesce(sum(litres), 0)::text as s from fuel.tanker_movements where tanker_id = '${t}'`)).rows[0].s)
+    const allocRows = async (id: string) => (await db.query<{ tanker_id: string; litres: string }>(`select tanker_id, litres::text from fuel.industrial_supply_allocations where supply_id = '${id}' order by tanker_id collate "C"`)).rows
+    const supply = (customerId: string, date: string, litres: number, rate: number, allocations: { tankerId: string; litres: number }[]) => ({ customerId, date, litres, rate, purpose: "Generator operation", remarks: "", allocations })
+    const iA = await call<IndustrialSupply>(OWNER, "industrialSupplies.create", supply(alpha.id, today, 250.5, 96.25, [{ tankerId: TA, litres: 150.5 }, { tankerId: TB, litres: 100 }]))
+    const iB = await call<IndustrialSupply>(EMP, "industrialSupplies.create", supply(beta.id, today, 100, 95, [{ tankerId: TA, litres: 100 }]))
+    assert.deepEqual([await dbStock(TA), await dbStock(TB)], [1000 - 150.5 - 100, 500 - 100], "the database's tanker stock: lowered by each allocation")
+    assert.equal((await db.query(`select 1 from fuel.tanker_movements where kind = 'INDUSTRIAL' and id = '${iA.id}'`)).rows.length, 2, "one INDUSTRIAL movement per tanker")
+    const rowOf = async (id: string) => (await db.query<{ amount: string; created_by: string | null; updated_by: string | null }>(`select amount::text, created_by::text, updated_by::text from fuel.industrial_supplies where id = '${id}'`)).rows[0]
+    assert.deepEqual(await rowOf(iA.id), { amount: "24110.63", created_by: P.OWNER, updated_by: P.OWNER }, "amount by the database; created by the Owner's profile")
+    assert.deepEqual([iA.amount, iA.createdBy, iB.createdBy], [24110.63, P.OWNER, P.EMP])
+    // Edit: change the tankers and the split — the original litres back, the new ones out, one transaction.
+    const iA2 = await call<IndustrialSupply>(EMP, "industrialSupplies.update", iA.id, supply(alpha.id, today, 250.5, 97, [{ tankerId: TA, litres: 250.5 }]), "All from tanker A")
+    assert.deepEqual([iA2.amount, (await rowOf(iA.id)).created_by, (await rowOf(iA.id)).updated_by], [24298.5, P.OWNER, P.EMP], "edited by the Employee: created_by kept, updated_by stamped")
+    assert.deepEqual(await allocRows(iA.id), [{ tanker_id: TA, litres: "250.500" }], "allocations replaced")
+    assert.deepEqual([await dbStock(TA), await dbStock(TB)], [1000 - 250.5 - 100, 500], "B gets its 100 L back; A gives 250.5 L")
+    // Only the split changes (same litres, rate, date): the row is still touched — a new version, updated_by stamped.
+    const v0 = (await db.query<{ v: string }>(`select updated_at::text as v from fuel.industrial_supplies where id = '${iA.id}'`)).rows[0].v
+    await call(OWNER, "industrialSupplies.update", iA.id, supply(alpha.id, today, 250.5, 97, [{ tankerId: TA, litres: 200.5 }, { tankerId: TB, litres: 50 }]), "Split corrected")
+    const v1 = (await db.query<{ v: string }>(`select updated_at::text as v from fuel.industrial_supplies where id = '${iA.id}'`)).rows[0].v
+    assert.ok(v1 !== v0 && (await rowOf(iA.id)).updated_by === P.OWNER, "allocation-only edit: new version, updated by the Owner")
+    assert.deepEqual([await dbStock(TA), await dbStock(TB)], [1000 - 200.5 - 100, 450])
+    await call(OWNER, "industrialSupplies.update", iA.id, supply(alpha.id, today, 250.5, 97, [{ tankerId: TA, litres: 250.5 }]), "Back to all from A")
+    await assert.rejects(call(OWNER, "industrialSupplies.update", iA.id, supply(alpha.id, today, 250.5, 97, [{ tankerId: TB, litres: 600 }]), "Too much"), /must add up|Insufficient/, "refused edits…")
+    await assert.rejects(call(OWNER, "industrialSupplies.update", iA.id, supply(alpha.id, today, 700, 97, [{ tankerId: TB, litres: 700 }]), "Too much"), /Insufficient tanker inventory in Industrial B\. Available: 500 L/)
+    assert.deepEqual(await allocRows(iA.id), [{ tanker_id: TA, litres: "250.500" }], "…change nothing")
+    const iEv = (await read(DEV, () => api.audit.history(iA.id))).map((e) => [e.action, e.actor.role, e.reason ?? null, e.before?.allocations ?? null, e.after?.allocations ?? null])
+    const firstSplit = [{ tankerId: TA, litres: 150.5 }, { tankerId: TB, litres: 100 }].sort((a, b) => (a.tankerId < b.tankerId ? -1 : 1))
+    assert.deepEqual(iEv.slice(0, 2), [
+      ["CREATED", "OWNER", null, null, firstSplit],
+      ["UPDATED", "EMPLOYEE", "All from tanker A", firstSplit, [{ tankerId: TA, litres: 250.5 }]],
+    ], "audited as who did it, with the reason and the previous / new tanker allocations")
+    await assert.rejects(call(OWNER, "industrialSupplies.update", iA.id, supply(alpha.id, today, 1, 1, [{ tankerId: TA, litres: 1 }]), ""), /reason/, "an edit needs a reason")
+    // Reads: Tata Adblue (Alpha granted) sees Alpha's only — through the method list and straight in the database; Adblue every customer's.
+    assert.deepEqual((await call<IndustrialSupply[]>(TATA, "industrialSupplies.list")).map((x) => x.id), [iA.id], "Tata Adblue: its granted customer's supplies only")
+    assert.deepEqual((await rowsAs<{ id: string }>(TATA, `select id from fuel.industrial_supplies`)).map((r) => r.id), [iA.id], "…RLS too")
+    assert.deepEqual((await rowsAs<{ supply_id: string }>(TATA, `select supply_id from fuel.industrial_supply_allocations`)).map((r) => r.supply_id), [iA.id], "…and only its allocations")
+    assert.deepEqual((await call<IndustrialSupply[]>(ADB, "industrialSupplies.list")).map((x) => x.id).sort(), [iA.id, iB.id].sort(), "Adblue: every customer's")
+    // Writes: refused to both profiles by the method list and by RLS (supplies and allocations).
+    const allocsBefore = JSON.stringify((await db.query(`select * from fuel.industrial_supply_allocations order by 1, 2`)).rows)
+    for (const id of [TATA, ADB]) {
+      for (const m of ["industrialSupplies.create", "industrialSupplies.update", "industrialSupplies.remove"]) await assert.rejects(call(id, m, supply(alpha.id, today, 1, 1, [{ tankerId: TA, litres: 1 }])), /refused by the method list/, `${id.role}: ${m}`)
+      await assert.rejects(sqlAs(id, `insert into fuel.industrial_supplies (customer_id, date, litres, rate, purpose) values ('${alpha.id}', '${today}', 1, 1, 'Factory operations'); insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), 'CREATED', 'Diesel', 'Industrial supply', 'x')`), /row-level security/, `RLS: ${id.role} adds no supply`)
+      await assert.rejects(sqlAs(id, `insert into fuel.industrial_supply_allocations (supply_id, tanker_id, litres) values ('${iA.id}', '${TB}', 1)`), /row-level security|permission denied/, `RLS: ${id.role} adds no allocation`)
+      await sqlAs(id, `update fuel.industrial_supplies set rate = 1; delete from fuel.industrial_supplies; delete from fuel.industrial_supply_allocations`)
+    }
+    assert.deepEqual([(await rowOf(iA.id)).amount, !!(await rowOf(iB.id)), JSON.stringify((await db.query(`select * from fuel.industrial_supply_allocations order by 1, 2`)).rows)], ["24298.50", true, allocsBefore], "RLS: the profiles change and delete nothing")
+    // The database's own rules, even past the API.
+    const ev = (id: string, action = "CREATED") => `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), '${action}', 'Diesel', 'Industrial supply', '${id}');`
+    const raw = (id: string, litres: number, allocs: [string, number][], date = today) =>
+      `insert into fuel.industrial_supplies (id, customer_id, date, litres, rate, purpose) values ('${id}', '${alpha.id}', '${date}', ${litres}, 90, 'Factory operations'); ${allocs.map(([t, l]) => `insert into fuel.industrial_supply_allocations (supply_id, tanker_id, litres) values ('${id}', '${t}', ${l});`).join(" ")} ${ev(id)}`
+    await assert.rejects(sqlAs(OWNER, raw("ind_db1", 900, [[TB, 900]])), /Insufficient tanker inventory in Industrial B\. Available: 500\.00 L/, "never beyond a tanker's stock (database)")
+    await assert.rejects(sqlAs(OWNER, raw("ind_db2", 500, [[TA, 100], [TB, 450]])), /must add up|Insufficient/, "one allocation fails: nothing is saved")
+    assert.equal((await db.query(`select 1 from fuel.industrial_supplies where id in ('ind_db1', 'ind_db2')`)).rows.length, 0, "…rolled back, supply and allocations")
+    await assert.rejects(sqlAs(OWNER, raw("ind_db3", 10, [[TA, 9]])), /must add up to the quantity supplied/, "allocations must add up (database)")
+    await assert.rejects(sqlAs(OWNER, raw("ind_db4", 10, [])), /must add up to the quantity supplied \(10/, "no allocation at all (database)")
+    await sqlAs(OWNER, raw("ind_db5", 10, [[TB, 10]]))
+    await assert.rejects(sqlAs(OWNER, `update fuel.industrial_supplies set date = '${day(1)}' where id = 'ind_db5'; ${ev("ind_db5", "UPDATED")}`), /Insufficient tanker inventory in Industrial B/, "moved before the tanker's load: refused at COMMIT")
+    await assert.rejects(sqlAs(OWNER, `delete from fuel.industrial_supply_allocations where supply_id = 'ind_db5'; ${ev("ind_db5", "UPDATED")}`), /must add up/, "its allocations can't just vanish")
+    await sqlAs(OWNER, `delete from fuel.industrial_supplies where id = 'ind_db5'; ${ev("ind_db5", "DELETED")}`)
+    assert.deepEqual([await allocRows("ind_db5"), await dbStock(TB)], [[], 500], "deleting the supply deletes its allocations: the litres back once")
+    await assert.rejects(db.exec(`update fuel.industrial_supplies set customer_id = '${beta.id}' where id = '${iA.id}'`), /can't be moved to another customer/, "never moved to another customer")
+    await assert.rejects(sqlAs(OWNER, `insert into fuel.industrial_supplies (customer_id, date, litres, rate, purpose) values ('${alpha.id}', '${today}', 1, 1, 'Factory operations')`), /no audit event|must add up/, "no supply without its audit event")
+    await assert.rejects(sqlAs(OWNER, `insert into fuel.industrial_supplies (customer_id, date, litres, rate, purpose) values ('${alpha.id}', '${today}', -1, 1, 'x')`), /check constraint|violates/, "no negative litres")
+    await assert.rejects(sqlAs(OWNER, `insert into fuel.industrial_supplies (customer_id, date, litres, rate, purpose) values ('${alpha.id}', '${today}', 1, 1, 'Other')`), /check constraint|violates/, "Other must be described")
+    // Month lock: last month is closed to the Employee (API and RLS), open to the Owner.
+    const lastMonth = new Date(Date.parse(`${today.slice(0, 7)}-01`) - 86_400_000).toISOString().slice(0, 10)
+    await assert.rejects(call(EMP, "industrialSupplies.create", supply(alpha.id, lastMonth, 5, 95, [{ tankerId: JIO, litres: 5 }])), /is locked/, "Employee: closed month refused")
+    await assert.rejects(sqlAs(EMP, `insert into fuel.industrial_supplies (customer_id, date, litres, rate, purpose) values ('${alpha.id}', '${lastMonth}', 5, 95, 'Factory operations')`), /row-level security/, "…by RLS too")
+    // Delete through the API: the litres back to every tanker, once.
+    await call(OWNER, "industrialSupplies.remove", iA.id, "Check cleanup")
+    await call(OWNER, "industrialSupplies.remove", iA.id, "Check cleanup") // a second delete finds nothing
+    await call(OWNER, "industrialSupplies.remove", iB.id, "Check cleanup")
+    assert.deepEqual([await dbStock(TA), await dbStock(TB), (await db.query(`select 1 from fuel.industrial_supply_allocations`)).rows.length], [1000, 500, 0], "every litre back, exactly once")
+    assert.deepEqual(await read(OWNER, () => api.diesel.list()), dieselBefore, "vehicle Diesel untouched")
     // Diesel: a date change can't move a fill into another customer's assignment period either — Owner, Dev, Employee
     // (X: Beta until day 7, Alpha from day 6). Refused = no change, no event; inside the same period it still works.
     const dEdit = (e: DieselEntry, date: string) => ({ date, vendorId: e.vendorId, litres: e.litres, rate: e.rate, odometerKm: e.odometerKm, billNo: e.billNo, paymentMode: e.paymentMode, tankerId: e.tankerId })

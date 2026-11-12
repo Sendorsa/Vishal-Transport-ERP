@@ -8,7 +8,7 @@ import { FormModal } from "@/components/shared/form-modal"
 import { ReasonField } from "@/components/shared/audit"
 import { Field } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
-import { useCreateDiesel, useCreateFuelStation, useDieselEntries, useFuelStations, useTankerAdjustments, useTankerDispenses, useTankerLoads, useTankerTransfers, useTankers, useUpdateDiesel } from "@/lib/api/hooks"
+import { useCreateDiesel, useCreateFuelStation, useDieselEntries, useFuelStations, useIndustrialSupplies, useTankerAdjustments, useTankerDispenses, useTankerLoads, useTankerTransfers, useTankers, useUpdateDiesel } from "@/lib/api/hooks"
 import { fillMileage, fillOrder, odometerConflict } from "@/domain/diesel"
 import { TANKER_SOURCE_ID, availabilityMessage, fitsTanker, isStockPool, tankerAvailability, tankerLabel, tankerOf } from "@/domain/tanker"
 import { CreatableSelect } from "@/components/shared/creatable-select"
@@ -53,6 +53,7 @@ export function AddDieselEntryDialog({
   const external = useTankerDispenses()
   const transfers = useTankerTransfers()
   const adjustments = useTankerAdjustments()
+  const industrial = useIndustrialSupplies() // industrial supplies draw on the tankers too
   const today = todayISO()
   const monthEnd = toISODate(endOfMonth(parseISO(`${month}-01`)))
   const maxDate = monthEnd < today ? monthEnd : today
@@ -104,8 +105,8 @@ export function AddDieselEntryDialog({
   // Stock available to this fill ON ITS DATE — the same rule the API checks on save (tankerAvailability): a load
   // dated after the fill doesn't count, and later fills that already need the diesel are kept covered.
   const records = useMemo(
-    () => ({ loads: loads.data ?? [], fills: entries.data ?? [], external: external.data ?? [], transfers: transfers.data ?? [], adjustments: adjustments.data ?? [] }),
-    [loads.data, entries.data, external.data, transfers.data, adjustments.data]
+    () => ({ loads: loads.data ?? [], fills: entries.data ?? [], external: external.data ?? [], transfers: transfers.data ?? [], adjustments: adjustments.data ?? [], industrial: industrial.data ?? [] }),
+    [loads.data, entries.data, external.data, transfers.data, adjustments.data, industrial.data]
   )
   const cargo = useMemo(
     () => (tankerId && /^\d{4}-\d{2}-\d{2}$/.test(f.date) ? tankerAvailability(records, { id: entry?.id ?? "new", date: f.date, createdAt: entry?.createdAt ?? openedAt, tankerId }) : null),

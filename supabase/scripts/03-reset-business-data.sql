@@ -17,7 +17,7 @@
 select t as "table", (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %s', t), false, true, '')))[1]::text::int as rows
 from unnest(array[
   'finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices', 'ops.trips',
-  'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.diesel_entries', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
+  'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.diesel_entries', 'fuel.industrial_supply_allocations', 'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
   'fuel.tankers', 'core.vehicle_assignments', 'core.vehicle_status_periods', 'core.customer_route_rates', 'core.customer_pricing',
   'core.customer_status_periods', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'
 ]) as t
@@ -32,7 +32,7 @@ declare
   -- Children before parents (foreign keys). Tables with an "id" get one DELETED event per row; the child rows of a
   -- parent (periods, pricing, routes, lines, allocations) are covered by their parent's event.
   audited constant text[] := array['finance.payments', 'billing.invoices', 'ops.trips', 'fuel.adblue_entries', 'fuel.adblue_purchases',
-    'fuel.diesel_entries', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments', 'fuel.tankers', 'core.vehicles',
+    'fuel.diesel_entries', 'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments', 'fuel.tankers', 'core.vehicles',
     'core.drivers', 'core.customers', 'fuel.fuel_stations'];
   t text;
   n bigint;
@@ -65,7 +65,7 @@ begin
   if to_regclass('ops.trips') is not null then update ops.trips set invoice_id = null where invoice_id is not null; end if;
 
   foreach t in array array['core.profile_customer_access', 'finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices', 'ops.trips',
-    'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.diesel_entries', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
+    'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.diesel_entries', 'fuel.industrial_supply_allocations', 'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
     'fuel.tankers', 'core.vehicle_assignments', 'core.vehicle_status_periods', 'core.customer_route_rates', 'core.customer_pricing',
     'core.customer_status_periods', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'] loop
     if to_regclass(t) is null then continue; end if;

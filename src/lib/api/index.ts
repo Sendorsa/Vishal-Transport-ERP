@@ -8,6 +8,7 @@ import { buildInvoice, type InvoiceDraftInput } from "@/domain/invoicing"
 import { calculateTripRevenue, fyLabel } from "@/domain/pricing"
 import { settlementIndex } from "@/domain/analytics"
 import { adBlueNeighbours } from "@/domain/adblue"
+import { allocationProblem, industrialAmount, industrialProblem, sortedAllocations, type TankerAllocation } from "@/domain/industrial"
 import { odometerConflict } from "@/domain/diesel"
 import { dayBefore, statusOn, withStatus } from "@/domain/status-history"
 import { canEditMonth } from "@/domain/month-lock"
@@ -21,7 +22,7 @@ import { addMonths, format, parseISO } from "date-fns"
 import { assignmentIndex, assignmentOn, correctedPeriods, handedOverBy, inferAssignments, isCalendarDate, movedRecords, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type AttributedRecords, type MovedRecord, type StartDateProblem } from "@/domain/assignments"
 import { formatDate, formatINR, formatNumber, round2, todayISO, formatLitres } from "@/lib/format"
 import { appendAuditEvent, appendAuditReviews, readAuditEvents, readAuditReviews, readCollection, readSettings, runInTransaction, writeCollection, writeSettings } from "@/lib/storage/local-store"
-import type { AdBlueEntry, AdBluePurchase, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, Invoice, NewEntity, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
+import type { AdBlueEntry, AdBluePurchase, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, IndustrialSupply, Invoice, NewEntity, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
 import { ensureSeeded, exportBackup, loadDemoData, loadEmptyWorkspace, parseBackup, restoreBackup, type BackupFile } from "./bootstrap"
 import { createLocalRepository, latency, newId, NotFoundError } from "./repository"
 import { ConflictError, pendingVersions, runWithVersions } from "@/lib/versions"
@@ -66,6 +67,7 @@ const tankerDispenses = createLocalRepository("tanker_dispenses", "tkd") // /api
 const tankers = createLocalRepository("tankers", "tnk") // /api/tankers
 const tankerTransfers = createLocalRepository("tanker_transfers", "tkt") // /api/tanker-transfers
 const tankerAdjustments = createLocalRepository("tanker_adjustments", "tka") // /api/tanker-adjustments
+const industrialSupplies = createLocalRepository("industrial_supplies", "ind") // /api/industrial-supplies
 const invoices = createLocalRepository("invoices", "inv") // /api/invoices
 const payments = createLocalRepository("payments", "pay") // /api/payments
 
@@ -323,6 +325,55 @@ function assertReason(reason: string | null | undefined) {
   if (error) throw new Error(error)
 }
 
+/* ------------------------------------------------------------------ Industrial Diesel Supply */
+
+export interface IndustrialSupplyInput {
+  customerId: string
+  date: string
+  litres: number
+  rate: number
+  purpose: string
+  remarks: string
+  /** The tankers it came out of, together exactly `litres` (owner, 12 Nov 2026). */
+  allocations: TankerAllocation[]
+}
+
+/**
+ * A supply as it is saved: validated (domain/industrial.ts), for an existing customer open on the date, amount
+ * calculated, its tanker allocations adding up to the litres. `keep`: tankers of the record being edited — those may stay
+ * on an archived tanker (its existing records stay editable); any other tanker must be an active company tanker.
+ */
+function checkIndustrial(input: IndustrialSupplyInput, keep: string[] = []): NewEntity<IndustrialSupply> {
+  const problem = industrialProblem(input, todayISO()) ?? allocationProblem(input.litres, input.allocations)
+  if (problem) throw new Error(problem)
+  if (!readCollection("customers").some((c) => c.id === input.customerId)) throw new NotFoundError("Customer", input.customerId)
+  assertCustomerScope(input.customerId)
+  assertCustomerOpen(input.customerId, input.date)
+  for (const a of input.allocations) {
+    if (keep.includes(a.tankerId)) {
+      const t = readCollection("tankers").find((x) => x.id === a.tankerId)
+      if (!t || isStockPool(t)) throw new Error("Choose the tanker the diesel was supplied from")
+    } else assertTankerOpen(a.tankerId, "Choose the tanker the diesel was supplied from")
+  }
+  return { customerId: input.customerId, date: input.date, litres: input.litres, rate: input.rate, amount: industrialAmount(input.litres, input.rate), purpose: input.purpose.trim(), remarks: (input.remarks ?? "").trim(), allocations: sortedAllocations(input.allocations) }
+}
+
+/**
+ * Each tanker can give what it holds on the supply's date — the same rule as a vehicle fill (tankerAvailability: the
+ * lowest stock from that moment on, so no later record goes below zero). `id`: the supply being edited — its own
+ * allocations are left out first, so its original litres are back in the tankers before the new ones are taken.
+ */
+function assertIndustrialStock(supply: { id: string; date: string; createdAt: string; allocations: TankerAllocation[] }) {
+  const records = tankerRecords()
+  for (const a of supply.allocations) {
+    const available = tankerAvailability(records, { id: supply.id, date: supply.date, createdAt: supply.createdAt, tankerId: a.tankerId, kind: "INDUSTRIAL" })
+    if (!fitsTanker(available, a.litres)) throw new Error(availabilityMessage(available, tankerName(a.tankerId), supply.date))
+  }
+}
+
+/** Who saves it: the signed-in profile on the shared database (which sets it again itself); none in the browser store. */
+const actorProfileId = () => currentActor().userId
+
 /* ------------------------------------------------------------------ Month lock */
 
 /** Employees can't add or change data in a locked month; the Owner and Dev always can (src/domain/month-lock.ts). */
@@ -393,6 +444,7 @@ function tankerRecords(patch: Partial<TankerRecords> = {}): TankerRecords {
     external: readCollection("tanker_dispenses"),
     transfers: readCollection("tanker_transfers"),
     adjustments: readCollection("tanker_adjustments"),
+    industrial: readCollection("industrial_supplies"),
     ...patch,
   }
 }
@@ -567,6 +619,7 @@ const meta = {
   dispense: (d: TankerDispense) => ({ module: "Diesel Tanker", recordType: "Tanker dispense (external vehicle)", recordId: d.id, label: `${tankerName(tankerOf(d))} · ${d.vehicleNo} · ${formatDate(d.date)} · ${L(d.litres)}`, recordDate: d.date }),
   tanker: (t: Tanker) => ({ module: "Diesel Tanker", recordType: "Tanker", recordId: t.id, label: t.regNo && !t.name.includes(t.regNo) ? `${t.name} (${t.regNo})` : t.name, recordDate: null }),
   transfer: (t: TankerTransfer) => ({ module: "Diesel Tanker", recordType: "Tanker transfer", recordId: t.id, label: `${tankerName(t.fromTankerId)} → ${tankerName(t.toTankerId)} · ${formatDate(t.date)} · ${L(t.litres)}`, recordDate: t.date }),
+  industrial: (x: IndustrialSupply) => ({ module: "Diesel", recordType: "Industrial supply", recordId: x.id, label: `${customerName(x.customerId)} · ${formatDate(x.date)} · ${L(x.litres)} @ ${formatINR(x.rate)} · ${x.purpose} · from ${(x.allocations ?? []).map((a) => `${tankerName(a.tankerId)} ${L(a.litres)}`).join(" + ")}`, recordDate: x.date }),
   adjustment: (a: TankerAdjustment) => ({ module: "Diesel Tanker", recordType: "Tanker stock adjustment", recordId: a.id, label: `${tankerName(a.tankerId)} · ${formatDate(a.date)} · ${a.litres > 0 ? "+" : "−"}${L(Math.abs(a.litres))}`, recordDate: a.date }),
   payment: (p: Payment) => {
     const station = !!p.vendorId && isStationPayment(p, p.vendorId)
@@ -596,6 +649,7 @@ const RECORD_COLLECTION: Record<string, Parameters<typeof readCollection>[0]> = 
   Tanker: "tankers",
   "Tanker transfer": "tanker_transfers",
   "Tanker stock adjustment": "tanker_adjustments",
+  "Industrial supply": "industrial_supplies",
   "Fuel station payment": "payments",
   Receipt: "payments",
   "Payment voucher": "payments",
@@ -772,7 +826,7 @@ async function removePayment(id: string, reason: string) {
 /* ------------------------------------------------------------------ Restore a deleted record */
 
 /** Record types a DELETED event can be restored for (masters and invoices are never deleted — archive / cancel). */
-const RESTORABLE: Record<string, "diesel_entries" | "adblue_entries" | "adblue_purchases" | "tanker_loads" | "tanker_dispenses" | "tanker_transfers" | "tanker_adjustments" | "payments" | "trips"> = {
+const RESTORABLE: Record<string, "diesel_entries" | "adblue_entries" | "adblue_purchases" | "tanker_loads" | "tanker_dispenses" | "tanker_transfers" | "tanker_adjustments" | "industrial_supplies" | "payments" | "trips"> = {
   "Diesel entry": "diesel_entries",
   "Diesel entry (from tanker)": "diesel_entries",
   "AdBlue entry": "adblue_entries",
@@ -785,6 +839,7 @@ const RESTORABLE: Record<string, "diesel_entries" | "adblue_entries" | "adblue_p
   Receipt: "payments",
   "Payment voucher": "payments",
   Trip: "trips",
+  "Industrial supply": "industrial_supplies",
 }
 
 /** Thrown when restoring might double-count: another record looks like the same transaction. */
@@ -960,6 +1015,20 @@ function planRestore(eventId: string): RestorePlan {
           ? `${stationName(p.vendorId!)}'s Payments Made rises by ${formatINR(p.amount)}; its closing balance and later openings fall by the same. The voucher returns to Payments.`
           : `${p.paymentNo} returns to Payments${p.allocations.length ? " and settles its invoices again" : ""}.`,
         duplicate: similar(readCollection("payments"), (x) => x.direction === p.direction && x.partyName === p.partyName && x.date === p.date && x.amount === p.amount, (x) => `${x.paymentNo} · ${x.partyName} · ${formatINR(x.amount)}`),
+      }
+    }
+    case "industrial_supplies": {
+      const x = r as unknown as IndustrialSupply
+      if (!readCollection("customers").some((c) => c.id === x.customerId)) throw new Error("Its customer no longer exists, so it can't be restored.")
+      assertCustomerOpen(x.customerId, x.date)
+      const allocations = x.allocations ?? []
+      if (!allocations.length || allocations.some((a) => !readCollection("tankers").some((t) => t.id === a.tankerId))) throw new Error("Its tankers are not on record, so it can't be restored.")
+      assertTankerStock(tankerRecords({ industrial: [...readCollection("industrial_supplies"), x] }), allocations.map((a) => a.tankerId)) // its litres must still be in those tankers
+      return {
+        key,
+        record: r,
+        note: `Adds ${L(x.litres)} (${formatINR(x.amount)}) back to ${customerName(x.customerId)}'s industrial supply totals and takes them out of ${allocations.map((a) => `${tankerName(a.tankerId)} (${L(a.litres)})`).join(" and ")} again. Vehicle Diesel is not affected.`,
+        duplicate: similar(readCollection("industrial_supplies"), (y) => y.customerId === x.customerId && y.date === x.date && y.litres === x.litres && y.rate === x.rate, (y) => `${customerName(y.customerId)} · ${formatDate(y.date)} · ${L(y.litres)}`),
       }
     }
     case "trips": {
@@ -1524,6 +1593,52 @@ export const api = {
    * AdBlue page names each record's vehicle for every role — also for Tata Adblue, whose vehicle list (Diesel) holds only
    * its granted customers' vehicles (owner, 12 Nov 2026: AdBlue is company-wide to view).
    */
+  /**
+   * /api/industrial-supplies — Industrial Diesel Supply (owner, 12 Nov 2026): diesel supplied to a customer for
+   * industrial use, never a vehicle. The `diesel` permission (as every Diesel record), the month lock on the old and
+   * new date, an existing customer not archived on the date, amount = litres × rate (stored; the database computes it
+   * too), a reason on every edit and delete, audited. Never touches vehicle Diesel, stock, stations or payments.
+   */
+  industrialSupplies: {
+    list: industrialSupplies.list,
+    create: (input: IndustrialSupplyInput) =>
+      tx(async () => {
+        assertCan("diesel", "create")
+        const data = checkIndustrial(input)
+        assertMonthEditable(data.date)
+        assertIndustrialStock({ ...data, id: "new", createdAt: new Date().toISOString() })
+        const after = await industrialSupplies.create({ ...data, createdBy: actorProfileId(), updatedBy: actorProfileId() })
+        audit({ action: "CREATED", ...meta.industrial(after), after })
+        return after
+      }),
+    update: (id: string, input: IndustrialSupplyInput, reason: string) =>
+      tx(async () => {
+        assertCan("diesel", "edit")
+        const why = deletionReasonError(reason, "correcting")
+        if (why) throw new Error(why)
+        const before = await industrialSupplies.get(id)
+        if (!before) throw new NotFoundError("Industrial supply", id)
+        const data = checkIndustrial({ ...input, customerId: before.customerId }, before.allocations.map((a) => a.tankerId)) // an edit never moves it to another customer
+        assertMonthEditable(before.date)
+        assertMonthEditable(data.date)
+        assertIndustrialStock({ ...data, id, createdAt: before.createdAt }) // its original litres back in their tankers first
+        const after = await industrialSupplies.update(id, { ...data, updatedBy: actorProfileId() })
+        audit({ action: "UPDATED", ...meta.industrial(after), before, after, reason: reason.trim() })
+        return after
+      }),
+    remove: (id: string, reason: string) =>
+      tx(async () => {
+        assertCan("diesel", "delete")
+        assertReason(reason)
+        const before = await industrialSupplies.get(id)
+        if (!before) return
+        assertCustomerScope(before.customerId)
+        assertMonthEditable(before.date)
+        await industrialSupplies.remove(id)
+        audit({ action: "DELETED", ...meta.industrial(before), before, reason: reason.trim() })
+      }),
+  },
+
   adblueVehicles: {
     list: async () => {
       const ids = new Set((await adblue.list()).map((e) => e.vehicleId))

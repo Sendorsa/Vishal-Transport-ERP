@@ -30,7 +30,7 @@ select jsonb_build_object(
         'public.profiles', 'core.role_permissions', 'core.companies', 'core.vehicle_types', 'core.app_settings', 'finance.payment_categories', 'audit.events', 'audit.reviews',
         'core.customers', 'core.customer_status_periods', 'core.customer_pricing', 'core.customer_route_rates', 'core.drivers', 'core.vehicles', 'core.vehicle_status_periods',
         'core.vehicle_assignments', 'core.month_locks', 'fuel.fuel_stations', 'fuel.tankers', 'fuel.diesel_entries', 'fuel.tanker_loads', 'fuel.tanker_transfers',
-        'fuel.tanker_adjustments', 'fuel.adblue_purchases', 'fuel.adblue_entries', 'finance.payments', 'finance.payment_allocations', 'ops.trips', 'billing.invoices',
+        'fuel.tanker_adjustments', 'fuel.adblue_purchases', 'fuel.adblue_entries', 'fuel.industrial_supplies', 'fuel.industrial_supply_allocations', 'finance.payments', 'finance.payment_allocations', 'ops.trips', 'billing.invoices',
         'billing.invoice_lines', 'billing.invoice_line_trips', 'core.profile_customer_access')
   ),
   'account_fks', (

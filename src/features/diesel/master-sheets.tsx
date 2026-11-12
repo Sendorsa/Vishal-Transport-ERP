@@ -20,6 +20,7 @@ import { useCan } from "@/lib/app-state"
 import { fuelLabel } from "@/lib/constants"
 import { formatINR, formatNumber, monthKey, todayISO } from "@/lib/format"
 import { MonthSelect, kpiExplain, useDieselIndex, useDieselMonth, useDieselMonthOptions } from "./parts"
+import { IndustrialReport } from "./industrial-report"
 
 type Master = ReturnType<typeof buildMaster>
 type ExtraMeta = Master["extras"]
@@ -305,6 +306,7 @@ export function MonthlyMaster() {
           ]}
         />
       </Section>
+      <IndustrialReport match={(e) => e.date.startsWith(month)} period={period} />
     </div>
   )
 }
@@ -388,6 +390,7 @@ export function YearlyMaster() {
       <Section title="Vehicle yearly summary">
         <DataTable data={d.m.byVehicle} getRowId={(r) => r.vehicle.id} columns={vehicleColumns(d.m, false)} initialSort={{ id: "veh", desc: false }} showFooter pageSize={100} dense emptyMessage={`No entries in ${yearName}.`} />
       </Section>
+      <IndustrialReport match={basis === "fy" ? inFY(Number(year)) : (e) => e.date.startsWith(year)} period={period} />
     </div>
   )
 }
@@ -514,6 +517,7 @@ export function QuarterlyMaster() {
       <Section title={`Quarter comparison · ${year}`}>
         <QuarterComparison year={year} quarters={d.quarters} spendLabel="Combined Spend" volumeLabel="Diesel Litres" />
       </Section>
+      <IndustrialReport match={inQuarter(year, q)} period={period} />
     </div>
   )
 }

@@ -23,6 +23,7 @@ import { asOfMonth, statusOn } from "@/domain/status-history"
 import { customerCards, customerSlug, monthLabel, shortMonthLabel, type CustomerCard } from "@/domain/diesel"
 import { useCan, useRole } from "@/lib/app-state"
 import { inDieselScope } from "@/domain/adblue"
+import { IndustrialDieselSummary } from "./industrial-report"
 import { matchesSearch } from "@/lib/utils"
 import { formatINR, formatNumber, todayISO } from "@/lib/format"
 import { AddCustomerDialog } from "./add-customer-dialog"
@@ -296,6 +297,9 @@ export function DieselOverview() {
           ))}
         </div>
       )}
+
+      {/* Industrial Diesel (12 Nov 2026): its own company-wide section, never mixed into the vehicle figures above */}
+      <IndustrialDieselSummary idx={idx} />
 
       <AddCustomerDialog open={adding} onOpenChange={setAdding} />
       {editing && <AddCustomerDialog key={editing.id} open customer={editing} onOpenChange={(v) => !v && setEditing(null)} />}

@@ -30,7 +30,10 @@ import {
   RevenueTrendChart,
   VehicleProfitChart,
 } from "@/features/analytics/charts"
-import { useDataset } from "@/lib/api/hooks"
+import { useDataset, useIndustrialSupplies, useTankers } from "@/lib/api/hooks"
+import { industrialInView, industrialReport } from "@/domain/industrial"
+import { tankerLabel } from "@/domain/tanker"
+import { IndustrialReport } from "@/features/diesel/industrial-report"
 import { useCan, useCompanyScope } from "@/lib/app-state"
 import { businessUnitLabel } from "@/lib/constants"
 import { downloadCsv } from "@/lib/csv"
@@ -43,12 +46,15 @@ const TABS = [
   { value: "pnl", label: "Profit & loss", finance: true },
   { value: "cashflow", label: "Cash flow", finance: true },
   { value: "aging", label: "Receivables aging", finance: true },
+  { value: "industrial", label: "Industrial Diesel", finance: false }, // owner, 12 Nov 2026 — separate from vehicle Diesel
 ] as const
 
 export function ReportsView({ initialTab }: { initialTab?: string }) {
   const can = useCan()
   const [scope] = useCompanyScope()
   const { data: ds, isLoading } = useDataset()
+  const supplies = useIndustrialSupplies()
+  const tankers = useTankers()
   const financeReports = can("reports", "finance")
   const tabs = TABS.filter((t) => !t.finance || financeReports)
   const [tab, setTab] = useState(tabs.find((t) => t.value === initialTab)?.value ?? tabs[0].value)
@@ -317,6 +323,34 @@ export function ReportsView({ initialTab }: { initialTab?: string }) {
             </Link>
             .
           </Note>
+        </TabsContent>
+
+        {/* ------------------------------------------------ Industrial Diesel (owner, 12 Nov 2026) */}
+        {/* Diesel supplied to customers for industrial use out of the tankers: the page's period and company scope; never
+            part of vehicle profitability, vehicle diesel cost, KM or mileage (domain/industrial.ts). */}
+        <TabsContent value="industrial" className="mt-4 space-y-4">
+          {(() => {
+            const inView = new Set(ds!.customers.map((c) => c.id))
+            const match = (e: { date: string; customerId: string }) => industrialInView([e], r.range, inView).length === 1
+            const rep = industrialReport(industrialInView(supplies.data ?? [], r.range, inView))
+            const customerName = (id: string) => ds!.customers.find((c) => c.id === id)?.name ?? "Unknown customer"
+            const tankerName = (id: string) => {
+              const t = tankers.data?.find((x) => x.id === id)
+              return t ? tankerLabel(t) : "Unknown tanker"
+            }
+            return (
+              <IndustrialReport
+                match={match}
+                period={`${scopeLabel} · ${formatDateLong(r.range.from)} – ${formatDateLong(r.range.to)}`}
+                actions={
+                  <div className="flex gap-2">
+                    {exportBtn(() => downloadCsv("industrial-diesel-customers", rep.byCustomer.map((c) => ({ Customer: customerName(c.customerId), Entries: c.count, Litres: c.litres, "Supply value": c.value, "Average rate per litre": c.avgRate ?? "" }))))}
+                    {exportBtn(() => downloadCsv("industrial-diesel-tankers", rep.byTanker.map((t) => ({ Tanker: tankerName(t.tankerId), "Industrial diesel supplied (L)": t.litres }))))}
+                  </div>
+                }
+              />
+            )
+          })()}
         </TabsContent>
       </Tabs>
     </div>

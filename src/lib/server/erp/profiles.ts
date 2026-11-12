@@ -14,9 +14,9 @@ import { resolveCustomers } from "@/domain/assignments"
 import { customerScope } from "@/lib/identity"
 import { isAdBlueProfile } from "@/lib/permissions"
 import { readCollection } from "@/lib/storage/local-store"
-import type { Customer, DieselEntry, Driver, FuelStation, Role, Vehicle, VehicleAssignment } from "@/lib/types"
+import type { Customer, IndustrialSupply, DieselEntry, Driver, FuelStation, Role, Vehicle, VehicleAssignment } from "@/lib/types"
 
-type Shape = "as-is" | "empty" | "zero" | "stations" | "customers" | "vehicles" | "drivers" | "assignments" | "diesel"
+type Shape = "as-is" | "empty" | "zero" | "stations" | "customers" | "vehicles" | "drivers" | "assignments" | "diesel" | "industrial"
 
 const METHODS: Record<string, Shape> = {
   // Shared, not customer data: settings, month locks, tankers, the one AdBlue stock pool and its purchase history.
@@ -37,6 +37,8 @@ const METHODS: Record<string, Shape> = {
   "drivers.list": "drivers",
   "assignments.list": "assignments",
   "diesel.list": "diesel",
+  // Industrial Diesel Supply (12 Nov 2026): part of Diesel, read-only — the same customers as Diesel. No write method.
+  "industrialSupplies.list": "industrial",
   // The shared Diesel screens also ask for these; nothing of them is shown to these roles.
   "trips.list": "empty",
   "invoices.list": "empty",
@@ -87,6 +89,8 @@ function reshape(shape: Shape, result: unknown, scope: ReadonlySet<string> | nul
   switch (shape) {
     case "customers":
       return (result as Customer[]).filter((c) => mine(c.id))
+    case "industrial":
+      return (result as IndustrialSupply[]).filter((x) => mine(x.customerId))
     case "assignments":
       return (result as VehicleAssignment[]).filter((a) => mine(a.customerId))
     case "vehicles": {

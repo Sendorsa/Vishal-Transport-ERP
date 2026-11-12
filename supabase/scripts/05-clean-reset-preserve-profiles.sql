@@ -30,12 +30,12 @@ declare
   why constant text := 'Production clean reset, accounts preserved (owner-approved, 4 Nov 2026)';
   -- Children before parents (foreign keys). Every one is emptied (fuel stations: all but dv_tanker).
   cleared constant text[] := array['core.profile_customer_access', 'finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices',
-    'ops.trips', 'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.diesel_entries', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
+    'ops.trips', 'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.diesel_entries', 'fuel.industrial_supply_allocations', 'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
     'fuel.tankers', 'core.vehicle_assignments', 'core.vehicle_status_periods', 'core.customer_route_rates', 'core.customer_pricing', 'core.customer_status_periods',
     'core.month_locks', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'];
   -- Tables whose rows carry their own audit record id (child rows are covered by their parent's event).
   audited constant text[] := array['finance.payments', 'billing.invoices', 'ops.trips', 'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.diesel_entries',
-    'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments', 'fuel.tankers', 'core.month_locks', 'core.vehicles', 'core.drivers', 'core.customers',
+    'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments', 'fuel.tankers', 'core.month_locks', 'core.vehicles', 'core.drivers', 'core.customers',
     'fuel.fuel_stations'];
   kept constant text[] := array['public.profiles', 'core.role_permissions', 'core.companies', 'core.vehicle_types', 'core.app_settings', 'finance.payment_categories',
     'audit.events', 'audit.reviews'];

@@ -22,6 +22,7 @@ import { formatINR, formatDate, formatNumber, todayISO } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { AddVehicleDialog } from "./add-vehicle-dialog"
 import { EditAssignmentDialog, TransferVehicleDialog } from "./transfer-vehicle-dialog"
+import { IndustrialSection } from "./industrial-section"
 import { activeVehicleIds, assignmentIndex, handoverFrom, vehicleMatches } from "@/domain/assignments"
 import { CompanyLogo, DieselBreadcrumb, MonthSelect, dieselHref, kpiExplain, readLogoFile, useDieselIndex, useDieselMonth, useDieselMonthOptions, MonthLockControl } from "./parts"
 
@@ -359,6 +360,9 @@ export function CompanyDiesel({ slug }: { slug: string }) {
           </div>
         )}
       </section>
+
+      {/* 3. Industrial Use — the customer's Industrial Diesel Supply register, separate from vehicle Diesel (12 Nov 2026) */}
+      {group.customer && <IndustrialSection customer={group.customer} idx={idx} />}
 
       {group.customer && <AddVehicleDialog open={adding} onOpenChange={setAdding} customer={group.customer} />}
       {group.customer && editingVehicle && <AddVehicleDialog key={editingVehicle.id} open vehicle={editingVehicle} customer={group.customer} onOpenChange={(o) => !o && setEditingVehicle(null)} />}

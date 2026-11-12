@@ -23,6 +23,7 @@ import { CONFIRMED_TANKERS } from "@/domain/tanker"
 import type {
   BusinessUnit,
   CompanyCode,
+  IndustrialSupply,
   Customer,
   AdBlueEntry,
   VehicleAssignment,
@@ -434,6 +435,7 @@ export interface SeedData {
   tankers: Tanker[]
   tanker_transfers: TankerTransfer[]
   tanker_adjustments: TankerAdjustment[]
+  industrial_supplies: IndustrialSupply[]
   invoices: Invoice[]
   payments: Payment[]
 }
@@ -886,5 +888,5 @@ export function generateSeedData(today = new Date(), seed = 20260405): SeedData 
     })
   }
 
-  return { settings, customers, vehicles, drivers, trips, diesel_entries: diesel, adblue_entries: [], vehicle_assignments: [], month_locks: [], fuel_stations: structuredClone(DEFAULT_FUEL_STATIONS), adblue_purchases: [], tanker_loads: [], tanker_dispenses: [], tankers: [], tanker_transfers: [], tanker_adjustments: [], invoices, payments }
+  return { settings, customers, vehicles, drivers, trips, diesel_entries: diesel, adblue_entries: [], vehicle_assignments: [], month_locks: [], fuel_stations: structuredClone(DEFAULT_FUEL_STATIONS), adblue_purchases: [], tanker_loads: [], tanker_dispenses: [], tankers: [], tanker_transfers: [], tanker_adjustments: [], industrial_supplies: [], invoices, payments }
 }

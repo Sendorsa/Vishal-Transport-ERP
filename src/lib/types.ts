@@ -177,6 +177,30 @@ export interface Trip extends BaseEntity {
 
 /* ----------------------------------------------------------------------------- Diesel */
 
+/**
+ * Industrial Diesel Supply (owner, 12 Nov 2026): diesel supplied to a customer for industrial use — a generator,
+ * machinery, a factory. Customer-level, never a vehicle: it never enters vehicle Diesel, KM Run, mileage, AdBlue,
+ * station purchases, ledgers or payments. Amount = litres × the rate of this supply (stored per entry).
+ */
+export interface IndustrialSupply extends BaseEntity {
+  customerId: string
+  date: string
+  litres: number
+  rate: number
+  amount: number
+  /** One of INDUSTRIAL_PURPOSES (domain/industrial.ts), or the text typed for "Other". */
+  purpose: string
+  remarks: string
+  /**
+   * The tankers it came out of (owner, 12 Nov 2026): litres from each, together exactly `litres`. Each allocation is a
+   * draw on that tanker's stock on `date` (domain/tanker.ts, INDUSTRIAL moves) — never a vehicle fill or a purchase.
+   */
+  allocations: { tankerId: string; litres: number }[]
+  /** Profile ids of who created / last changed it (the shared database sets them; null in the browser store). */
+  createdBy?: string | null
+  updatedBy?: string | null
+}
+
 export interface DieselEntry extends BaseEntity {
   companyCode: CompanyCode
   date: string
@@ -593,6 +617,7 @@ export interface CollectionMap {
   tankers: Tanker
   tanker_transfers: TankerTransfer
   tanker_adjustments: TankerAdjustment
+  industrial_supplies: IndustrialSupply
   month_locks: MonthLock
   invoices: Invoice
   payments: Payment

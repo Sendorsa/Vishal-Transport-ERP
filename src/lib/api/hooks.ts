@@ -17,7 +17,7 @@ import { scopeDataset, type Dataset } from "@/domain/analytics"
 import { withRuns } from "@/domain/adblue"
 import type { InvoiceDraftInput } from "@/domain/invoicing"
 import type { CollectionKey, Customer, Driver, EntityStatus, NewEntity, Payment, Settings, Vehicle } from "@/lib/types"
-import type { AdBlueInput, AdBluePurchaseInput, TankerAdjustmentInput, TankerInput, TankerLoadInput, TankerTransferInput, TripInput } from "@/lib/api"
+import type { AdBlueInput, AdBluePurchaseInput, IndustrialSupplyInput, TankerAdjustmentInput, TankerInput, TankerLoadInput, TankerTransferInput, TripInput } from "@/lib/api"
 
 export const queryKeys = {
   customers: ["customers"] as const,
@@ -35,6 +35,7 @@ export const queryKeys = {
   tankers: ["tankers"] as const,
   tanker_transfers: ["tanker_transfers"] as const,
   tanker_adjustments: ["tanker_adjustments"] as const,
+  industrial_supplies: ["industrial_supplies"] as const,
   invoices: ["invoices"] as const,
   payments: ["payments"] as const,
   settings: ["settings"] as const,
@@ -46,7 +47,7 @@ export const queryKeys = {
  * Unknown modules refresh nothing but the audit log.
  */
 const MODULE_KEYS: Record<string, (keyof typeof queryKeys)[]> = {
-  Diesel: ["diesel_entries", "vehicles"],
+  Diesel: ["diesel_entries", "vehicles", "industrial_supplies"],
   AdBlue: ["adblue_entries", "adblue_purchases"],
   "Diesel Tanker": ["tankers", "tanker_loads", "tanker_transfers", "tanker_adjustments", "tanker_dispenses", "diesel_entries"],
   "Fuel Stations": ["fuel_stations", "payments"],
@@ -567,6 +568,26 @@ export function useSaveAdBlue() {
     onSuccess: () => invalidate("adblue_entries"),
     onError,
   })
+}
+
+/* ------------------------------------------------------------------ Industrial Diesel Supply (owner, 12 Nov 2026) */
+
+export const useIndustrialSupplies = () => useQuery({ queryKey: queryKeys.industrial_supplies, queryFn: () => api.industrialSupplies.list() })
+
+/** Add (no id) or edit (id + reason) a customer's industrial supply. */
+export function useSaveIndustrialSupply() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, data, reason, version }: { id?: string; data: IndustrialSupplyInput; reason?: string; version?: string }) =>
+      v(id, version, () => (id ? api.industrialSupplies.update(id, data, reason ?? "") : api.industrialSupplies.create(data))),
+    onSuccess: () => invalidate("industrial_supplies"),
+    onError,
+  })
+}
+
+export function useDeleteIndustrialSupply() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.industrialSupplies.remove(id, reason)), onSuccess: () => invalidate("industrial_supplies"), onError })
 }
 
 /* ------------------------------------------------------------------ Go-live openings (owner, 3 Nov 2026) — Owner / Dev */

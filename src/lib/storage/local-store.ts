@@ -39,6 +39,7 @@ const STORAGE_NAME: Record<CollectionKey, string> = {
   tankers: "tankers",
   tanker_transfers: "tankerTransfers",
   tanker_adjustments: "tankerAdjustments",
+  industrial_supplies: "industrialSupplies",
   invoices: "invoices",
   payments: "payments",
 }
@@ -59,6 +60,7 @@ export const COLLECTION_KEYS: CollectionKey[] = [
   "tankers",
   "tanker_transfers",
   "tanker_adjustments",
+  "industrial_supplies",
   "invoices",
   "payments",
 ]

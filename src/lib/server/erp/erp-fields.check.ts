@@ -38,7 +38,14 @@ async function main() {
   await db.exec(`set session_replication_role = replica; set timezone = 'UTC';`)
   // The demo data as the offline checks load it — installed after PGlite starts (it looks for \`window\`).
   await import("@/lib/api/test-browser")
-  const { readCollection, readSettings } = await import("@/lib/storage/local-store")
+  const { readCollection, readSettings, writeCollection } = await import("@/lib/storage/local-store")
+  // Industrial Diesel Supply (12 Nov 2026): the demo data has none — two supplies at different rates, one split across two
+  // tankers, every field set (triggers and foreign keys are off in this check, so the tanker ids needn't exist).
+  const supplyCustomer = readCollection("customers")[0].id
+  writeCollection("industrial_supplies", [
+    { id: "ind_field1", createdAt: "2026-10-05T04:30:00.000Z", updatedAt: "2026-10-05T04:30:00.000Z", customerId: supplyCustomer, date: "2026-10-05", litres: 500.125, rate: 94.5625, amount: 47293.07, purpose: "Generator operation", remarks: "DG set, plant 2", allocations: [{ tankerId: "tnk_field_a", litres: 300.125 }, { tankerId: "tnk_field_b", litres: 200 }], createdBy: null, updatedBy: null },
+    { id: "ind_field2", createdAt: "2026-10-06T04:30:00.000Z", updatedAt: "2026-10-06T04:30:00.000Z", customerId: supplyCustomer, date: "2026-10-06", litres: 120, rate: 96, amount: 11520, purpose: "Borewell pump", remarks: "", allocations: [{ tankerId: "tnk_field_a", litres: 120 }], createdBy: null, updatedBy: null },
+  ])
   const ctx = { extras: new Map(), identity: { profileId: "10000000-0000-0000-0000-0000000000f1", userId: "00000000-0000-0000-0000-0000000000f1", role: "DEV" as const, email: null, name: null } }
 
   // Settings (companies, vehicle types, expense categories, tax): the migrations seed reference rows; write the demo ones over them.

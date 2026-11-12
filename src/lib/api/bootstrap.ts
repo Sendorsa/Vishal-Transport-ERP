@@ -146,6 +146,10 @@ export function parseBackup(raw: unknown): BackupFile {
     missing(`tanker transfer ${t.id}`, ids.tankers, t.toTankerId)
   }
   for (const a of c.tanker_adjustments ?? []) missing(`tanker adjustment ${a.id}`, ids.tankers, a.tankerId)
+  for (const x of c.industrial_supplies ?? []) {
+    missing(`industrial supply ${x.id}`, ids.customers, x.customerId)
+    for (const a of x.allocations ?? []) missing(`industrial supply ${x.id}`, ids.tankers, a.tankerId)
+  }
   for (const a of c.vehicle_assignments ?? []) {
     missing(`assignment ${a.id}`, ids.vehicles, a.vehicleId)
     missing(`assignment ${a.id}`, ids.customers, a.customerId)
