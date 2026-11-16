@@ -19,7 +19,7 @@ import { applyUpserts, loadSettings, SPECS, WRITE_ORDER, writeSettings, type Sql
  * (Values: the app's in-memory shape vs what the database gives back.)
  */
 const BY_DESIGN: Partial<Record<CollectionKey, Record<string, string>>> = {
-  // AdBlue: a stock draw's ₹ is costed on read (weighted average); a stored entry's vendorId is legacy (D-15).
+  // AdBlue: a stock draw's ₹ is costed on read (FIFO); a stored entry's vendorId is legacy (D-15).
   adblue_entries: { amount: "computed on read for stock draws", vendorId: "legacy field, not stored (AdBlue is never bought at stations)" },
 }
 
@@ -45,6 +45,19 @@ async function main() {
   writeCollection("industrial_supplies", [
     { id: "ind_field1", createdAt: "2026-10-05T04:30:00.000Z", updatedAt: "2026-10-05T04:30:00.000Z", customerId: supplyCustomer, date: "2026-10-05", litres: 500.125, rate: 94.5625, amount: 47293.07, purpose: "Generator operation", remarks: "DG set, plant 2", allocations: [{ tankerId: "tnk_field_a", litres: 300.125 }, { tankerId: "tnk_field_b", litres: 200 }], createdBy: null, updatedBy: null },
     { id: "ind_field2", createdAt: "2026-10-06T04:30:00.000Z", updatedAt: "2026-10-06T04:30:00.000Z", customerId: supplyCustomer, date: "2026-10-06", litres: 120, rate: 96, amount: 11520, purpose: "Borewell pump", remarks: "", allocations: [{ tankerId: "tnk_field_a", litres: 120 }], createdBy: null, updatedBy: null },
+  ])
+  // AdBlue vendors (16 Nov 2026): the demo data has no AdBlue — two vendors (one archived), a linked purchase, a stock
+  // draw and a direct purchase naming their vendor, every field set.
+  const abVehicle = readCollection("vehicles")[0].id
+  const at = "2026-10-05T04:30:00.000Z"
+  writeCollection("adblue_vendors", [
+    { id: "adv_field1", createdAt: at, updatedAt: at, name: "Field Vendor", defaultRate: 45.125, contactPerson: "Ravi", phone: "98450 00000", notes: "Bulk supplier", status: "ACTIVE" },
+    { id: "adv_field2", createdAt: at, updatedAt: at, name: "Old Vendor", defaultRate: null, contactPerson: "", phone: "", notes: "", status: "ARCHIVED" },
+  ])
+  writeCollection("adblue_purchases", [{ id: "adp_field1", createdAt: at, updatedAt: at, date: "2026-10-05", adblueVendorId: "adv_field1", vendorName: "Field Vendor", product: "AdBlue ISO 22241", buckets: 10, litresPerBucket: 20, totalLitres: 200, pricePerBucket: 900, totalCost: 9000, invoiceNo: "INV-1", notes: "Field check" }])
+  writeCollection("adblue_entries", [
+    { id: "adb_field1", createdAt: at, updatedAt: at, source: "STOCK", adblueVendorId: "adv_field1", beforeVendorTracking: false, vehicleId: abVehicle, customerId: null, vendorId: "", date: "2026-10-06", closingKm: 1000, quantityLitres: 15, amount: 0, invoiceNo: "JC-1", notes: "" },
+    { id: "adb_field2", createdAt: at, updatedAt: at, beforeVendorTracking: true, source: "DIRECT", adblueVendorId: "adv_field1", vendorName: "Field Vendor", rate: 95.5, paymentMode: "CASH", vehicleId: abVehicle, customerId: null, vendorId: "", date: "2026-10-07", closingKm: 1100, quantityLitres: 10, amount: 955, invoiceNo: "R-1", notes: "Direct" },
   ])
   const ctx = { extras: new Map(), identity: { profileId: "10000000-0000-0000-0000-0000000000f1", userId: "00000000-0000-0000-0000-0000000000f1", role: "DEV" as const, email: null, name: null } }
 

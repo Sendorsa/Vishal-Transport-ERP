@@ -122,7 +122,10 @@ async function main() {
   const adjEvents = await api.audit.history(adj.id)
   assert.deepEqual([adjEvents[0].action, adjEvents[0].reason], ["CREATED", "Dip reading 30 Sep: 12.5 L less"])
   setRole("EMPLOYEE")
-  await assert.rejects(api.tankerAdjustments.remove(adj.id, ""), /reason/) // the Employee may delete (5 Nov 2026), with a reason like everyone
+  await assert.rejects(api.tankerAdjustments.remove(adj.id, "Employee attempt"), /can't delete fuel records/) // only the Owner and Dev delete (16 Nov 2026)
+  setRole("OWNER")
+  await assert.rejects(api.tankerAdjustments.remove(adj.id, ""), /reason/) // with a reason, like every delete
+  setRole("EMPLOYEE")
   setRole("OWNER")
 
   /* ---------------------------------------------------------------- 6. Archive / restore keeps history */

@@ -30,6 +30,7 @@ import type {
   MonthLock,
   FuelStation,
   AdBluePurchase,
+  AdBlueVendor,
   TankerLoad,
   TankerDispense,
   Tanker,
@@ -430,6 +431,7 @@ export interface SeedData {
   month_locks: MonthLock[]
   fuel_stations: FuelStation[]
   adblue_purchases: AdBluePurchase[]
+  adblue_vendors: AdBlueVendor[]
   tanker_loads: TankerLoad[]
   tanker_dispenses: TankerDispense[]
   tankers: Tanker[]
@@ -888,5 +890,5 @@ export function generateSeedData(today = new Date(), seed = 20260405): SeedData 
     })
   }
 
-  return { settings, customers, vehicles, drivers, trips, diesel_entries: diesel, adblue_entries: [], vehicle_assignments: [], month_locks: [], fuel_stations: structuredClone(DEFAULT_FUEL_STATIONS), adblue_purchases: [], tanker_loads: [], tanker_dispenses: [], tankers: [], tanker_transfers: [], tanker_adjustments: [], industrial_supplies: [], invoices, payments }
+  return { settings, customers, vehicles, drivers, trips, diesel_entries: diesel, adblue_entries: [], vehicle_assignments: [], month_locks: [], fuel_stations: structuredClone(DEFAULT_FUEL_STATIONS), adblue_purchases: [], adblue_vendors: [], tanker_loads: [], tanker_dispenses: [], tankers: [], tanker_transfers: [], tanker_adjustments: [], industrial_supplies: [], invoices, payments }
 }

@@ -5,6 +5,7 @@
  * Generated columns (amounts, totals) are read, never written: the database computes money exactly (D-12).
  */
 import type {
+  AdBlueVendor,
   AdBlueEntry, AdBluePurchase, AuditEvent, AuditReview, CollectionKey, CompanyProfile, Customer, DieselEntry, Driver,
   ExpenseCategory, FuelStation, IndustrialSupply, Invoice, MonthLock, Payment, Settings, StatusPeriod, Tanker, TankerAdjustment, TankerLoad,
   TankerTransfer, Trip, Vehicle, VehicleAssignment, VehicleType,
@@ -293,27 +294,34 @@ const industrialSupplies: Spec<IndustrialSupply> = {
   },
 }
 
+const adblueVendors: Spec<AdBlueVendor> = {
+  table: "fuel.adblue_vendors",
+  load: async (sql) =>
+    (await rows(sql, "fuel.adblue_vendors")).map((j) => ({ ...base(j), name: str(j.name), defaultRate: numOrNull(j.default_rate), contactPerson: str(j.contact_person), phone: str(j.phone), notes: str(j.notes), status: j.status as AdBlueVendor["status"] })),
+  cols: (v) => ({ id: v.id, name: v.name, default_rate: v.defaultRate, contact_person: v.contactPerson ?? "", phone: v.phone ?? "", notes: v.notes ?? "", status: v.status }),
+}
+
 const adbluePurchases: Spec<AdBluePurchase> = {
   table: "fuel.adblue_purchases",
   load: async (sql) =>
     (await rows(sql, "fuel.adblue_purchases")).map((j) => ({
-      ...base(j), date: j.date as string, vendorName: str(j.vendor_name), product: str(j.product), buckets: num(j.buckets), litresPerBucket: num(j.litres_per_bucket),
+      ...base(j), date: j.date as string, adblueVendorId: (j.vendor_id as string) ?? null, vendorName: str(j.vendor_name), product: str(j.product), buckets: num(j.buckets), litresPerBucket: num(j.litres_per_bucket),
       totalLitres: num(j.total_litres), pricePerBucket: num(j.price_per_bucket), totalCost: num(j.total_cost), invoiceNo: str(j.invoice_no), notes: str(j.notes), ...opt("opening", j.opening ? true : null),
     })),
-  cols: (p) => ({ id: p.id, date: p.date, vendor_name: p.vendorName ?? "", product: p.product ?? "", buckets: p.buckets, litres_per_bucket: p.litresPerBucket, price_per_bucket: p.pricePerBucket, invoice_no: p.invoiceNo ?? "", notes: p.notes ?? "", opening: !!p.opening }),
+  cols: (p) => ({ id: p.id, date: p.date, vendor_id: p.adblueVendorId ?? null, vendor_name: p.vendorName ?? "", product: p.product ?? "", buckets: p.buckets, litres_per_bucket: p.litresPerBucket, price_per_bucket: p.pricePerBucket, invoice_no: p.invoiceNo ?? "", notes: p.notes ?? "", opening: !!p.opening }),
 }
 
 const adblueEntries: Spec<AdBlueEntry> = {
   table: "fuel.adblue_entries",
   load: async (sql) =>
     (await rows(sql, "fuel.adblue_entries")).map((j) => ({
-      ...base(j), source: j.source as AdBlueEntry["source"], ...opt("vendorName", j.vendor_name), ...opt("rate", numOrNull(j.rate)), ...opt("paymentMode", j.payment_mode),
+      ...base(j), source: j.source as AdBlueEntry["source"], adblueVendorId: (j.vendor_id as string) ?? null, beforeVendorTracking: j.before_vendor_tracking === true, ...opt("vendorName", j.vendor_name), ...opt("rate", numOrNull(j.rate)), ...opt("paymentMode", j.payment_mode),
       vehicleId: j.vehicle_id as string, customerId: (j.customer_id as string) ?? null, vendorId: "", date: j.date as string, closingKm: num(j.closing_km), quantityLitres: num(j.quantity_litres),
       amount: num(j.amount), invoiceNo: str(j.invoice_no), notes: str(j.notes),
     })),
   cols: (e) => {
     const direct = e.source === "DIRECT"
-    return { id: e.id, source: e.source ?? "STOCK", vehicle_id: e.vehicleId, customer_id: e.customerId, date: e.date, closing_km: e.closingKm, quantity_litres: e.quantityLitres, vendor_name: direct ? e.vendorName : null, rate: direct ? e.rate : null, payment_mode: direct ? e.paymentMode : null, invoice_no: e.invoiceNo ?? "", notes: e.notes ?? "" }
+    return { id: e.id, source: e.source ?? "STOCK", vendor_id: e.adblueVendorId ?? null, before_vendor_tracking: e.beforeVendorTracking ?? false, vehicle_id: e.vehicleId, customer_id: e.customerId, date: e.date, closing_km: e.closingKm, quantity_litres: e.quantityLitres, vendor_name: direct ? e.vendorName : null, rate: direct ? e.rate : null, payment_mode: direct ? e.paymentMode : null, invoice_no: e.invoiceNo ?? "", notes: e.notes ?? "" }
   },
 }
 
@@ -390,9 +398,9 @@ const tankerDispenses: Spec<{ id: string; updatedAt: string; createdAt: string }
 export const SPECS: Record<CollectionKey, Spec<never>> = {
   customers, drivers, vehicles, vehicle_assignments: assignments, month_locks: monthLocks, fuel_stations: fuelStations, tankers,
   diesel_entries: diesel, tanker_loads: tankerLoads, tanker_transfers: tankerTransfers, tanker_adjustments: tankerAdjustments,
-  industrial_supplies: industrialSupplies, adblue_purchases: adbluePurchases, adblue_entries: adblueEntries, tanker_dispenses: tankerDispenses, invoices, trips, payments,
+  industrial_supplies: industrialSupplies, adblue_vendors: adblueVendors, adblue_purchases: adbluePurchases, adblue_entries: adblueEntries, tanker_dispenses: tankerDispenses, invoices, trips, payments,
 } as unknown as Record<CollectionKey, Spec<never>>
-export const WRITE_ORDER: CollectionKey[] = ["customers", "drivers", "vehicles", "vehicle_assignments", "month_locks", "fuel_stations", "tankers", "diesel_entries", "tanker_loads", "tanker_transfers", "tanker_adjustments", "industrial_supplies", "adblue_purchases", "adblue_entries", "invoices", "trips", "payments", "tanker_dispenses"]
+export const WRITE_ORDER: CollectionKey[] = ["customers", "drivers", "vehicles", "vehicle_assignments", "month_locks", "fuel_stations", "tankers", "diesel_entries", "tanker_loads", "tanker_transfers", "tanker_adjustments", "industrial_supplies", "adblue_vendors", "adblue_purchases", "adblue_entries", "invoices", "trips", "payments", "tanker_dispenses"]
 
 /** Applies one collection's changes: deletes (by the caller, in reverse FK order) are separate from upserts. */
 export async function applyUpserts(sql: Sql, key: CollectionKey, before: { id: string; updatedAt: string }[], after: { id: string; updatedAt: string }[], ctx: WriteCtx) {
@@ -430,7 +438,7 @@ export async function applyDeletes(sql: Sql, key: CollectionKey, before: { id: s
   const keep = new Set(after.map((r) => r.id))
   for (const r of before.filter((x) => !keep.has(x.id))) {
     if (!spec.table) continue
-    if (key === "customers" || key === "vehicles" || key === "drivers" || key === "fuel_stations" || key === "tankers" || key === "invoices")
+    if (key === "customers" || key === "vehicles" || key === "drivers" || key === "fuel_stations" || key === "tankers" || key === "adblue_vendors" || key === "invoices")
       throw new Error("Master records and invoices are never deleted — archive or cancel them.")
     await deleteRow(sql, spec.table, r.id, r.updatedAt)
   }

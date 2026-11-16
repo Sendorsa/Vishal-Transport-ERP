@@ -108,10 +108,10 @@ async function main() {
   }
   const a0 = await ad()
   const purchase = await api.adbluePurchases.create({ date: today, vendorName: "Action Check Chemicals", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" })
-  const draw = await api.adblue.create({ vehicleId: vehicle.id, customerId, date: today, closingKm: odo0 + 1000, quantityLitres: 15, invoiceNo: "", notes: "" })
+  const draw = await api.adblue.create({ vehicleId: vehicle.id, customerId, date: today, closingKm: odo0 + 1000, quantityLitres: 15, invoiceNo: "", notes: "", adblueVendorId: purchase.adblueVendorId })
   await api.adblue.update(draw.id, { vehicleId: vehicle.id, customerId, date: today, closingKm: odo0 + 1000, quantityLitres: 20, invoiceNo: "", notes: "" }, "Incorrect litres entered")
   assert.deepEqual([(await ad()).stock, (await ad()).consumed], [a0.stock + 180, a0.consumed + 20])
-  await assert.rejects(api.adbluePurchases.remove(purchase.id, "Check: test record"), /Insufficient AdBlue inventory/) // its AdBlue is in use
+  await assert.rejects(api.adbluePurchases.remove(purchase.id, "Check: test record"), /Insufficient AdBlue stock from Action Check Chemicals/) // its AdBlue is in use (by a draw from that vendor)
   await api.adblue.remove(draw.id, "Wrong vehicle")
   const a1 = await ad()
   assert.deepEqual([a1.stock, a1.consumed, a1.nextOpening], [a0.stock + 200, a0.consumed, a0.nextOpening + 200]) // stock, consumption, carry-forward
@@ -140,19 +140,20 @@ async function main() {
   const trip = (await api.trips.list()).find((t) => !t.invoiceId && t.date.startsWith(month))!
   const n1 = await logSize()
   // The Employee has the Owner's access except Settings (owner, 5 Nov 2026): permission is checked first, so a missing
-  // reason proves the delete was allowed; Settings and Settings → Data stay refused. A removed role acts as the Employee.
+  // the Employee deletes nothing (owner, 16 Nov 2026), refused before the reason is checked; Settings and Settings → Data stay refused. A removed role acts as the Employee.
   for (const [role, call, msg] of [
-    ["EMPLOYEE", () => api.diesel.remove(entry.id, ""), /reason/i],
-    ["EMPLOYEE", () => api.tankerLoads.remove(loadB.id, ""), /reason/i],
-    ["EMPLOYEE", () => api.fuelStationPayments.remove(payB.id, ""), /reason/i],
-    ["EMPLOYEE", () => api.payments.remove(payB.id, ""), /reason/i],
-    ["EMPLOYEE", () => api.trips.remove(trip.id, ""), /reason/i],
+    ["EMPLOYEE", () => api.diesel.remove(entry.id, ""), /can't delete/],
+    ["EMPLOYEE", () => api.tankerLoads.remove(loadB.id, ""), /can't delete/],
+    ["EMPLOYEE", () => api.fuelStationPayments.remove(payB.id, ""), /can't delete/],
+    ["EMPLOYEE", () => api.payments.remove(payB.id, ""), /can't delete/],
+    ["EMPLOYEE", () => api.trips.remove(trip.id, ""), /can't delete/],
     ["EMPLOYEE", () => api.settings.update({ companies: [] }), /can't/],
     ["EMPLOYEE", () => api.admin.resetDemoData(), /Only the Owner or Dev/],
     ["EMPLOYEE", () => api.admin.clearAllData(), /Only the Owner or Dev/],
     ["EMPLOYEE", () => api.admin.exportBackup(), /Only the Owner or Dev/],
     ["ACCOUNTANT", () => api.settings.update({ companies: [] }), /can't/],
-    ["OPS_MANAGER", () => api.diesel.remove(entry.id, ""), /reason/i],
+    ["OPS_MANAGER", () => api.diesel.remove(entry.id, ""), /can't delete/], // a removed role acts as an Employee, who deletes nothing (16 Nov 2026)
+    ["EMPLOYEE", () => api.diesel.remove(entry.id, "Employee attempt"), /can't delete fuel records/],
   ] as const) {
     setRole(role)
     await assert.rejects(call(), msg)
@@ -174,9 +175,9 @@ async function main() {
 
   /* ---------------------------------------------------------------- 6. Month lock */
   const old = (await api.diesel.list()).find((e) => e.date.startsWith(lastMonth) && e.vendorId !== "dv_tanker")!
-  setRole("EMPLOYEE") // may edit and delete like the Owner, but never in a locked month (owner, 5 Nov 2026)
+  setRole("EMPLOYEE") // edits like the Owner, but never in a locked month (owner, 5 Nov 2026); deletes nothing (16 Nov 2026)
   await assert.rejects(api.diesel.update(old.id, { date: old.date, vendorId: old.vendorId, litres: old.litres + 1, rate: old.rate, odometerKm: old.odometerKm, billNo: old.billNo, paymentMode: old.paymentMode }), /is locked/)
-  await assert.rejects(api.diesel.remove(old.id, "Check: test record"), /is locked/)
+  await assert.rejects(api.diesel.remove(old.id, "Check: test record"), /can't delete/)
   setRole("OWNER") // the Owner can change any month (Monthly Sheet Lock)…
   assert.ok(await api.diesel.get(old.id))
   await api.diesel.remove(old.id, "Owner correction")
@@ -184,7 +185,7 @@ async function main() {
   // Station payments in a locked month: the Employee handles money, but not a locked month's.
   const oldPay = (await api.payments.list()).find((p) => p.categoryCode === "DIESEL_SETTLEMENT" && p.date < `${lastMonth}-01`)!
   setRole("EMPLOYEE")
-  await assert.rejects(api.fuelStationPayments.remove(oldPay.id, "Check: test record"), /is locked/)
+  await assert.rejects(api.fuelStationPayments.remove(oldPay.id, "Check: test record"), /can't delete/)
   await assert.rejects(api.fuelStationPayments.update(oldPay.id, { paymentDate: oldPay.date, amount: oldPay.amount + 1, paymentMode: oldPay.mode, notes: "" }), /is locked/)
   setRole("OWNER")
   assert.ok(await api.payments.get(oldPay.id))

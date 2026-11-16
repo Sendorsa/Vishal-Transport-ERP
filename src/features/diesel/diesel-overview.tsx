@@ -163,7 +163,7 @@ export function DieselOverview() {
               icon={Droplets}
               value={fleet.adblue ? formatINR(fleet.adblue.spend) : "—"}
               hint={fleet.adblue ? `${periodShort} · ${fleet.adblue.entries} entries` : unavailable}
-              info="Σ amount of the AdBlue entries in the month: stock draws at the weighted-average cost, direct vendor purchases at their own amount. Bulk purchases are stock, not spending. Never part of Diesel."
+              info="Σ amount of the AdBlue entries in the month: stock draws at the purchase cost of the vendor's batches used (oldest first), direct vendor purchases at their own amount. Bulk purchases are stock, not spending. Never part of Diesel."
             />
             <StatsCard
               label="Industrial Diesel Spending"
@@ -337,9 +337,9 @@ export function DieselOverview() {
               active={c.group.id && ds ? activeVehicleIds(ds.assignments ?? [], idx!.vehicles, c.group.id, today) : null}
               vehicles={idx?.vehicles}
               onEdit={can("customers", "edit") ? setEditing : undefined}
-              onArchive={can("customers", "delete") ? setArchiving : undefined}
+              onArchive={can("customers", "edit") ? setArchiving : undefined}
               onRestore={
-                can("customers", "delete")
+                can("customers", "edit")
                   ? async (cu) => {
                       await archive.mutateAsync({ id: cu.id, version: cu.updatedAt, restore: true })
                       toast.success(`${cu.shortName} restored`)

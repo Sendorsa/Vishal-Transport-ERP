@@ -312,7 +312,7 @@ export function CompanyDiesel({ slug }: { slug: string }) {
                       <Card size="sm" className={cn("h-full gap-3 px-4 transition-all group-hover:shadow-md group-hover:ring-foreground/20", fuelTheme(v.vehicle.fuelType).card, handover(v.vehicle.id) && "bg-muted/40 opacity-70")}>
                         {/* Whole card opens the vehicle; the ⋮ menu sits above this overlay. */}
                         <Link href={dieselHref(group.slug, month, v.vehicle.regNo)} className="absolute inset-0 z-0 rounded-xl" aria-label={`Open ${v.vehicle.regNo}`} />
-                        {group.customer && ownsNow(v.vehicle) && (can("vehicles", "edit") || can("vehicles", "delete")) && (
+                        {group.customer && ownsNow(v.vehicle) && can("vehicles", "edit") && (
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button variant="ghost" size="icon-sm" className="absolute top-2 right-2 z-10" aria-label={`Actions for ${v.vehicle.regNo}`}>
@@ -335,7 +335,7 @@ export function CompanyDiesel({ slug }: { slug: string }) {
                                   <CalendarClock /> Edit Assignment
                                 </DropdownMenuItem>
                               )}
-                              {can("vehicles", "delete") &&
+                              {can("vehicles", "edit") &&
                                 (v.vehicle.status === "ARCHIVED" ? (
                                   <DropdownMenuItem
                                     onSelect={async () => {
@@ -505,7 +505,7 @@ function FuelSummary({
             value={adblue ? formatINR(adblue.spend) : "—"}
             period={period}
             detail={adblue ? `${adblue.entries} ${adblue.entries === 1 ? "entry" : "entries"}` : na}
-            info="Σ amount of this customer's AdBlue entries in the month: stock draws at the weighted-average cost, direct vendor purchases at their own amount. Bulk purchases are stock, not spending. Never part of Diesel."
+            info="Σ amount of this customer's AdBlue entries in the month: stock draws at the purchase cost of the vendor's batches used (oldest first), direct vendor purchases at their own amount. Bulk purchases are stock, not spending. Never part of Diesel."
           />
         )}
         <SpendCell

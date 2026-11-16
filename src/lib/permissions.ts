@@ -37,9 +37,9 @@ export type Permission = `${Resource}:${Action}` | `${Resource}:*` | "*"
 export const ROLES: { value: Role; label: string; description: string }[] = [
   { value: "OWNER", label: "Owner", description: "Every business module and Owner-level control (month locks, restore, deletion review); no account or system administration" },
   { value: "DEV", label: "Dev", description: "Everything the Owner can do, plus exclusive account and system administration" },
-  { value: "EMPLOYEE", label: "Employee", description: "Everything the Owner can do except Settings" },
-  { value: "TATA_ADBLUE", label: "Tata Adblue", description: "AdBlue entries for the customers Dev assigns, bulk purchases into the shared stock; Diesel read-only for those customers" },
-  { value: "ADBLUE", label: "Adblue", description: "AdBlue entries for every customer, bulk purchases into the shared stock; Diesel read-only for every customer" },
+  { value: "EMPLOYEE", label: "Employee", description: "Everything the Owner can do except Settings, locking months and deleting records" },
+  { value: "TATA_ADBLUE", label: "Tata Adblue", description: "AdBlue entries (add / edit) for the customers Dev assigns, bulk purchases into the shared stock; Diesel read-only for those customers" },
+  { value: "ADBLUE", label: "Adblue", description: "AdBlue entries (add / edit) for every customer, bulk purchases into the shared stock; Diesel read-only for every customer" },
 ]
 
 /**
@@ -57,8 +57,16 @@ const MAP: Record<Role, Permission[]> = {
   ADBLUE: ["diesel:view", "adblue:*"],
 }
 
+/**
+ * Deleting any record: the Owner and Dev only (owner, 16 Nov 2026) — every role's `delete` goes through here (API
+ * assertCan, the UI's useCan) and the database's private.can refuses it the same way. Archive / restore, edits and
+ * Restore / Push Back of a deletion are not deletes.
+ */
+export const canDelete = (role: Role) => role === "OWNER" || role === "DEV"
+
 export function can(role: Role, resource: Resource, action: Action = "view") {
   if (DEV_ONLY.includes(resource) && role !== "DEV") return false
+  if (action === "delete" && !canDelete(role)) return false
   const perms = MAP[role]
   return perms.includes("*") || perms.includes(`${resource}:*`) || perms.includes(`${resource}:${action}`)
 }

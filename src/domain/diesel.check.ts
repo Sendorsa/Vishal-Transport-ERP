@@ -13,7 +13,7 @@ import { fillAmount, insufficientTankerMessage, loadsAsStationPurchases, tankerL
 import { fyMonths, fyName, fyRange, fyStartYear, inFY, fyLabel } from "./financial-year"
 import { FUEL_TDS_PERCENT, tdsDate, tdsDue } from "./station-ledger"
 import { isDirectAdBlue, stockDraws } from "./adblue-inventory"
-import { insufficientMessage, inventoryLedger, purchasedIn, stockFor, valueInventory, vendorAnalytics } from "./adblue-inventory"
+import { adBlueShortfallMessage, insufficientMessage, insufficientVendorMessage, inventoryLedger, NO_VENDOR, purchasedIn, stockFor, valueInventory, vendorAnalytics, vendorLedger } from "./adblue-inventory"
 import { inPeriod } from "./consumables"
 import { adBlueStats, withRuns } from "./adblue"
 import { asOfMonth, historyOf, statusOn, withStatus } from "./status-history"
@@ -319,13 +319,13 @@ assert.deepEqual(inEntryOrder([{ id: "pay_000a", date: "2026-09-12", createdAt: 
   // 10 buckets × 20 L @ ₹900 = 200 L for ₹9,000; a bus draws 15 L → 185 L worth ₹8,325.
   const v = valueInventory([buy("b1", "2026-10-01", 10, 20, 900)], [draw("u1", "2026-10-02", 15)])
   assert.deepEqual([v.stockLitres, v.stockValue, v.avgRate, v.costOf.get("u1"), v.shortfall], [185, 8325, 45, 675, null])
-  // Weighted average re-averages on each purchase: 100 L @ ₹40 + 100 L @ ₹50 → ₹45/L.
+  // FIFO (owner, 16 Nov 2026): 100 L @ ₹40 then 100 L @ ₹50 — the oldest batch is used first.
   const w = valueInventory([buy("b1", "2026-09-01", 5, 20, 800), buy("b2", "2026-09-10", 5, 20, 1000)], [draw("u1", "2026-09-05", 50), draw("u2", "2026-09-20", 50)])
-  assert.deepEqual([w.costOf.get("u1"), w.costOf.get("u2"), w.stockLitres, w.stockValue], [2000, 2333.33, 100, 4666.67]) // 50 L @ 40; then (2000+5000)/150 = 46.67/L
-  assert.equal(round2(2000 + 2333.33 + w.stockValue), 9000) // Σ consumption cost + stock value = Σ purchase cost
+  assert.deepEqual([w.costOf.get("u1"), w.costOf.get("u2"), w.stockLitres, w.stockValue], [2000, 2000, 100, 5000]) // both 50 L from the ₹40 batch
+  assert.equal(round2(2000 + 2000 + w.stockValue), 9000) // Σ consumption cost + stock value = Σ purchase cost
   // No negative stock: 5 L in stock, 10 L drawn → blocked with the available stock.
   const short = valueInventory([buy("b1", "2026-10-01", 1, 5, 225)], [draw("u1", "2026-10-02", 10)])
-  assert.deepEqual(short.shortfall, { date: "2026-10-02", available: 5, needed: 10, consumptionId: "u1" })
+  assert.deepEqual(short.shortfall, { date: "2026-10-02", available: 5, needed: 10, consumptionId: "u1", vendor: null })
   assert.equal(insufficientMessage(5), "Insufficient AdBlue inventory. Available stock: 5L")
   // A back-dated draw before stock arrived is also a shortfall (stock is checked at every point in time).
   assert.equal(valueInventory([buy("b1", "2026-10-05", 1, 20, 900)], [draw("u1", "2026-10-03", 5)]).shortfall?.available, 0)
@@ -349,6 +349,82 @@ assert.deepEqual(inEntryOrder([{ id: "pay_000a", date: "2026-09-12", createdAt: 
   assert.equal(round2(all.purchasedCost - all.consumedCost), round2(170 * 45)) // value reconciles too (single rate here)
   // Vendor analytics.
   assert.deepEqual(vendorAnalytics([buy("a", "2026-10-01", 60, 20, 900), buy("b", "2026-10-02", 1, 20, 1000, "ABC")]).map((x) => [x.vendor, x.litres, x.amount, x.avgRate]), [["XYZ Chemicals", 1200, 54000, 45], ["ABC", 20, 1000, 50]])
+  // Grouped by vendor id: a renamed vendor stays one row (under the name first saved) and one "Vendors Bought From".
+  const renamed = [{ ...buy("r1", "2026-10-01", 1, 20, 900, "Old Name"), adblueVendorId: "adv_1" }, { ...buy("r2", "2026-10-05", 1, 20, 900, "New Name"), adblueVendorId: "adv_1" }]
+  assert.deepEqual(vendorAnalytics(renamed).map((x) => [x.vendor, x.litres, x.purchases]), [["Old Name", 40, 2]])
+  assert.equal(purchasedIn(renamed, () => true).vendors, 1)
+}
+
+// AdBlue vendor batches (owner, 16 Nov 2026): FIFO per vendor; each litre keeps its batch's rate and its vendor.
+{
+  const lot = (id: string, date: string, litres: number, rate: number, adblueVendorId: string | null) => ({ id, date, totalLitres: litres, totalCost: litres * rate, adblueVendorId })
+  const take = (id: string, date: string, quantityLitres: number, adblueVendorId: string | null) => ({ id, date, quantityLitres, adblueVendorId })
+  const buys = [lot("a1", "2026-11-01", 100, 45, "A"), lot("a2", "2026-11-03", 200, 48, "A"), lot("b1", "2026-11-02", 500, 46, "B")]
+  // The spec example: 150 L from Vendor A = 100 L × ₹45 + 50 L × ₹48 = ₹6,900 (effective ₹46 / L). Vendor B is untouched.
+  const v = valueInventory(buys, [take("r1", "2026-11-05", 150, "A")])
+  assert.equal(v.costOf.get("r1"), 6900)
+  assert.equal(round2(v.costOf.get("r1")! / 150), 46)
+  assert.deepEqual(v.vendorStock.get("A"), { litres: 150, value: 7200 }) // 150 L left, all from the ₹48 batch
+  assert.deepEqual(v.vendorStock.get("B"), { litres: 500, value: 23000 })
+  assert.deepEqual(v.takes.map((t) => [t.vendor, t.litres, t.cost]), [["A", 100, 4500], ["A", 50, 2400]])
+  // A draw never uses another vendor's stock: 151 L from A is refused although B holds 500 L.
+  const short = valueInventory(buys, [take("r1", "2026-11-05", 150, "A"), take("r2", "2026-11-06", 151, "A")])
+  assert.deepEqual([short.shortfall?.vendor, short.shortfall?.available, short.shortfall?.consumptionId], ["A", 150, "r2"])
+  assert.equal(insufficientVendorMessage("Vendor A", 150), "Insufficient AdBlue stock from Vendor A. Available: 150L")
+  // Stock is per vendor at every point in time: A's second batch arrives on 3 Nov, so 120 L on 2 Nov is short.
+  assert.equal(valueInventory(buys, [take("r1", "2026-11-02", 120, "A")]).shortfall?.available, 100)
+  // A NEW draw without a vendor takes unattributed stock only (opening stock) — never a vendor's batch.
+  const fresh = valueInventory([lot("o", "2026-10-31", 10, 40, null), ...buys], [take("n", "2026-11-04", 60, null)])
+  assert.deepEqual([fresh.shortfall?.vendor, fresh.shortfall?.available], [NO_VENDOR, 10]) // 10 L unattributed, although A and B hold 800 L
+  assert.equal(adBlueShortfallMessage(fresh.shortfall!, () => "?"), "Not enough unattributed AdBlue stock (no vendor): 10L. Choose the vendor whose stock is used.")
+
+  // Draws recorded before vendor tracking (beforeVendorTracking, no vendor): their vendor is never guessed.
+  const oldDraw = (id: string, date: string, quantityLitres: number) => ({ ...take(id, date, quantityLitres, null), beforeVendorTracking: true })
+  const reconciles = (ps: Parameters<typeof valueInventory>[0], ds: Parameters<typeof valueInventory>[1], keys: string[]) => {
+    const v = valueInventory(ps, ds)
+    assert.equal(v.shortfall, null) // a valid history (the API refuses anything else)
+    const company = stockFor(inventoryLedger(ps, ds))
+    const per = keys.map((k) => stockFor(vendorLedger(ps, ds, k)))
+    const sum = (f: (r: (typeof per)[number]) => number) => round2(per.reduce((t, r) => t + f(r), 0))
+    assert.equal(sum((r) => r.closing), company.closing) // Σ vendors + unattributed = company stock
+    assert.equal(company.closing, v.stockLitres)
+    assert.equal(sum((r) => r.purchased + r.openingStock), round2(company.purchased + company.openingStock))
+    assert.equal(sum((r) => r.consumed), company.consumed) // every old litre counted once — never twice
+    assert.equal(sum((r) => r.consumedCost), company.consumedCost)
+    assert.equal(sum((r) => r.unattributed), 0) // relabelled only: what leaves a vendor arrives in unattributed stock
+    assert.equal(round2(company.purchasedCost - company.consumedCost), v.stockValue)
+    for (const k of keys) assert.equal(stockFor(vendorLedger(ps, ds, k)).closing, v.vendorStock.get(k)?.litres ?? 0)
+    return v
+  }
+  // The reviewer's example: A 1,000 L, B 500 L, then 300 L used with no vendor. Company stock 1,200 L — never 1,500 L.
+  // Both vendors held stock, so the 300 L can't be attributed: all 1,500 L on hand became unattributed, 1,200 L remain.
+  const ab = [lot("A1", "2026-11-01", 1000, 45, "A"), lot("B1", "2026-11-02", 500, 48, "B")]
+  const r1 = reconciles(ab, [oldDraw("h1", "2026-11-03", 300)], [NO_VENDOR, "A", "B"])
+  assert.deepEqual([r1.stockLitres, r1.vendorStock.get("A")?.litres, r1.vendorStock.get("B")?.litres, r1.vendorStock.get(NO_VENDOR)?.litres], [1200, undefined, undefined, 1200]) // A and B hold nothing attributable
+  assert.deepEqual(r1.moves.map((m) => [m.vendor, m.litres]), [["A", 1000], ["B", 500]])
+  assert.equal(r1.costOf.get("h1"), 300 * 45) // cost: oldest batch first (FIFO is the costing rule; it names no vendor)
+  assert.deepEqual(stockFor(vendorLedger(ab, [oldDraw("h1", "2026-11-03", 300)], "A")), { opening: 0, openingStock: 0, purchased: 1000, consumed: 0, unattributed: -1000, closing: 0, purchasedCost: 45000, consumedCost: 0, carriedFrom: null })
+  // A new draw then names a vendor: A has nothing attributable left — the unattributed 1,200 L are drawn as "no vendor".
+  assert.equal(valueInventory(ab, [oldDraw("h1", "2026-11-03", 300), take("n1", "2026-11-04", 10, "A")]).shortfall?.available, 0)
+  assert.equal(valueInventory(ab, [oldDraw("h1", "2026-11-03", 300), take("n1", "2026-11-04", 1200, null)]).shortfall, null)
+  // Where the history settles it: the old draw came when only A held stock, so it can only be A's — A 700 L, B 500 L.
+  const r2 = reconciles([lot("A1", "2026-11-01", 1000, 45, "A"), lot("B1", "2026-11-05", 500, 48, "B")], [oldDraw("h1", "2026-11-03", 300)], [NO_VENDOR, "A", "B"])
+  assert.deepEqual([r2.vendorStock.get("A")?.litres, r2.vendorStock.get("B")?.litres, r2.moves.length], [700, 500, 0])
+  // Opening stock (no vendor) + a vendor on hand is two sources: an old draw then can't be attributed either.
+  const r3 = reconciles([lot("o", "2026-10-31", 10, 40, null), ...buys], [oldDraw("h2", "2026-11-04", 60), take("r1", "2026-11-05", 50, null)], [NO_VENDOR, "A", "B"])
+  assert.deepEqual([r3.vendorStock.get(NO_VENDOR)?.litres, r3.vendorStock.get("A")?.litres, r3.stockLitres], [700, undefined, 700])
+  // New vendor-named draws after an unattributed point use that vendor's later batches only.
+  const later = [...ab, lot("A2", "2026-11-10", 100, 50, "A")]
+  const r4 = reconciles(later, [oldDraw("h1", "2026-11-03", 300), take("n2", "2026-11-11", 100, "A")], [NO_VENDOR, "A", "B"])
+  assert.deepEqual([r4.costOf.get("n2"), r4.vendorStock.get("A")?.litres, r4.vendorStock.get(NO_VENDOR)?.litres], [5000, 0, 1200])
+  // Mixed history: vendor-named draws, an old draw and a new unattributed draw all reconcile.
+  // (the old draw on 31 Oct found only opening stock on hand, so it took opening stock; 5 L of it are left for r5)
+  const mixed = reconciles([lot("o", "2026-10-31", 10, 40, null), ...buys], [take("r1", "2026-11-05", 150, "A"), take("r3", "2026-11-07", 80, "B"), oldDraw("old", "2026-10-31", 5), take("r5", "2026-11-08", 5, null)], [NO_VENDOR, "A", "B"])
+  assert.deepEqual([mixed.moves.length, mixed.vendorStock.get(NO_VENDOR)?.litres, mixed.vendorStock.get("A")?.litres, mixed.vendorStock.get("B")?.litres], [0, 0, 150, 420])
+  // Paise: three 1 L draws from a 3 L batch worth ₹100 cost 33.33 + 33.34 + 33.33 — the batch's value is used exactly.
+  const p = valueInventory([lot("x", "2026-11-01", 3, 100 / 3, "A")].map((l) => ({ ...l, totalCost: 100 })), [take("1", "2026-11-02", 1, "A"), take("2", "2026-11-03", 1, "A"), take("3", "2026-11-04", 1, "A")])
+  assert.deepEqual(["1", "2", "3"].map((id) => p.costOf.get(id)), [33.33, 33.34, 33.33])
+  assert.equal(p.stockValue, 0)
 }
 
 // AdBlue purchased in a period = only batches bought in it (spec: Sep 500 L ₹15,000, used 200; Oct 400 L ₹12,000, used 100).

@@ -16,16 +16,18 @@ import { PageHeader } from "@/components/shared/page-header"
 import { AdBlueOpeningDialog } from "@/features/go-live/opening-dialogs"
 import { canChangeAdBluePurchases, hasOwnerAuthority } from "@/lib/permissions"
 import { StatsCard } from "@/components/shared/stats-card"
-import { inventoryLedger, isDirectAdBlue, purchasedIn, stockDraws, stockFor, totalsFor, valueInventory, vendorAnalytics } from "@/domain/adblue-inventory"
+import { inventoryLedger, isDirectAdBlue, purchasedIn, stockDraws, stockFor, totalsFor, valueInventory } from "@/domain/adblue-inventory"
+import { CreatableSelect } from "@/components/shared/creatable-select"
+import { AdBlueVendorsSection } from "./adblue-vendors"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { AddAdBlueDialog } from "../diesel/add-adblue-dialog"
 import { monthLabel } from "@/domain/diesel"
 import { canEditMonth } from "@/domain/month-lock"
 import { inEntryOrder } from "@/domain/payment-order"
-import { useAdBlueEntries, useAdBluePurchases, useAdBlueTotals, useAdBlueVehicles, useDeleteAdBluePurchase, useMonthLocks, useSaveAdBluePurchase } from "@/lib/api/hooks"
+import { useAdBlueEntries, useAdBluePurchases, useAdBlueTotals, useAdBlueVehicles, useAdBlueVendors, useCreateAdBlueVendorByName, useDeleteAdBluePurchase, useMonthLocks, useSaveAdBluePurchase } from "@/lib/api/hooks"
 import { useCan, useRole } from "@/lib/app-state"
 import { formatDate, formatINR, formatNumber, monthKey, todayISO, formatLitres } from "@/lib/format"
-import type { AdBluePurchase, Vehicle } from "@/lib/types"
+import type { AdBluePurchase, AdBlueVendor, Vehicle } from "@/lib/types"
 import { MonthLockControl, useDieselIndex } from "../diesel/parts"
 import { usePeriod } from "../diesel/period"
 
@@ -50,6 +52,7 @@ export function AdBlueInventory() {
   const entries = useAdBlueEntries()
   const totals = useAdBlueTotals() // company-wide figures, totals by month only (computed on the server for the shared database)
   const regs = useAdBlueVehicles() // every AdBlue vehicle's registration — also those outside Tata Adblue's Diesel vehicles
+  const vendors = useAdBlueVendors()
   const locks = useMonthLocks()
   const del = useDeleteAdBluePurchase()
   const [editing, setEditing] = useState<{ purchase?: AdBluePurchase } | null>(null)
@@ -60,7 +63,7 @@ export function AdBlueInventory() {
   const d = useMemo(() => {
     if (!purchases.data || !entries.data || !totals.data) return null
     // Purchased − Consumed = Current Stock is asserted in npm run check:diesel — an internal check, never shown to users.
-    return { totals: totals.data, ledger: totals.data.ledger, directs: inEntryOrder(entries.data.filter(isDirectAdBlue)), vendors: vendorAnalytics(purchases.data), history: inEntryOrder(purchases.data) }
+    return { totals: totals.data, ledger: totals.data.ledger, all: inEntryOrder(entries.data), history: inEntryOrder(purchases.data) }
   }, [purchases.data, entries.data, totals.data])
 
   if (!can("adblue")) return <NoAccess what="AdBlue inventory" />
@@ -74,13 +77,14 @@ export function AdBlueInventory() {
   const endedMonth = lastMonth && lastMonth < monthKey(todayISO()) ? lastMonth : null
   // Every card and the direct purchases table are company-wide, for every role (Tata Adblue too: owner, 12 Nov 2026).
   const { stock, directCost, directLitres, directCount } = totalsFor(d.totals, period.periodMonths, endedMonth)
-  const directInPeriod = d.directs.filter(period.match)
+  const entriesInPeriod = d.all.filter(period.match)
   const issued = { cost: m.consumedCost, litres: m.consumed }
   const regOf = (id: string) => idx?.vehicles.get(id)?.regNo ?? regs.data?.find((v) => v.id === id)?.regNo ?? "Unknown"
   const asOf = endedMonth ? `As of ${format(endOfMonth(parseISO(`${endedMonth}-01`)), "d MMM yyyy")}` : "As of today"
   const open = (p: AdBluePurchase) => canEditMonth(role, p.date.slice(0, 7), todayISO(), locks.data ?? [])
   const mayEdit = canChangeAdBluePurchases(role, "edit")
   const mayDelete = canChangeAdBluePurchases(role, "delete")
+  const mayManageVendors = can("adblue", "create") && hasOwnerAuthority(role) // the AdBlue profiles pick existing vendors only
 
   return (
     <div className="space-y-5">
@@ -125,8 +129,8 @@ export function AdBlueInventory() {
             label="Inventory Value"
             icon={IndianRupee}
             value={formatINR(stock.stockValue)}
-            hint={`${asOf}${stock.avgRate ? ` · Weighted average ${formatINR(stock.avgRate)} / L` : " · No stock"}`}
-            info="Stock valued at the moving weighted-average purchase rate: each purchase re-averages the rate, each draw is costed at the rate of that moment. For a past period, the value at its month end."
+            hint={`${asOf}${stock.avgRate ? ` · Average ${formatINR(stock.avgRate)} / L` : " · No stock"}`}
+            info="The stock still on hand, at the purchase rate of the batches it is left from (each vendor's batches are used oldest first). For a past period, the value at its month end."
           />
         </div>
       </section>
@@ -158,7 +162,7 @@ export function AdBlueInventory() {
             info="Closing stock before the period (carried forward), plus any opening stock recorded in it. Never a purchase."
           />
           <StatsCard label="Purchased (in)" icon={PackagePlus} value={L(m.purchased)} hint={p} info="Litres of AdBlue batches dated in the period." />
-          <StatsCard label="Consumed (out)" icon={PackageMinus} value={L(m.consumed)} hint={`${formatINR(m.consumedCost)} at average cost`} info="Σ litres of vehicle AdBlue entries dated in the period, valued at the weighted-average rate." />
+          <StatsCard label="Consumed (out)" icon={PackageMinus} value={L(m.consumed)} hint={`${formatINR(m.consumedCost)} at purchase cost`} info="Σ litres of vehicle AdBlue entries dated in the period, each at the purchase rate of the vendor's batches it used (oldest first)." />
           <StatsCard label="Closing Stock" icon={Package} value={L(m.closing)} hint="Carries into the next period" info={`Opening ${L(m.opening + m.openingStock)} + Purchased ${L(m.purchased)} − Consumed ${L(m.consumed)} = ${L(m.closing)}.`} />
         </div>
       </section>
@@ -168,36 +172,38 @@ export function AdBlueInventory() {
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <StatsCard label="Direct Vendor Purchases" icon={Store} value={formatINR(directCost)} hint={`${p} · ${directCount} purchase${directCount === 1 ? "" : "s"}`} info="Σ amount (litres × rate) of AdBlue bought from a vendor straight into a vehicle, dated in the period. Never part of bulk stock or bulk purchases." />
           <StatsCard label="Direct Litres" icon={PackagePlus} value={L(directLitres)} hint={p} info="Σ litres of direct vendor purchases dated in the period. Not in bulk stock." />
-          <StatsCard label="Bulk Issued to Vehicles" icon={PackageMinus} value={formatINR(issued.cost)} hint={`${L(issued.litres)} at average cost`} info="Σ bulk-stock draws by vehicles dated in the period, valued at the weighted-average rate." />
+          <StatsCard label="Bulk Issued to Vehicles" icon={PackageMinus} value={formatINR(issued.cost)} hint={`${L(issued.litres)} at purchase cost`} info="Σ bulk-stock draws by vehicles dated in the period, each at the purchase rate of the vendor's batches it used (oldest first)." />
           <StatsCard
             label="Total AdBlue Expense"
             icon={Sigma}
             value={formatINR(issued.cost + directCost)}
             hint={`${L(issued.litres + directLitres)} used`}
-            info="Bulk issued to vehicles (at average cost) + direct vendor purchases. Bulk purchases are stock, not expense, so they're not added again — nothing is counted twice."
+            info="Bulk issued to vehicles (at purchase cost) + direct vendor purchases. Bulk purchases are stock, not expense, so they're not added again — nothing is counted twice."
           />
         </div>
-        {directInPeriod.length > 0 && (
-          <div className="mt-3">
-            <DataTable
-              data={directInPeriod}
-              getRowId={(e) => e.id}
-              dense
-              pageSize={10}
-              columns={[
-                { id: "d", header: "Date", cell: (e) => <span className="num">{formatDate(e.date)}</span> },
-                { id: "v", header: "Vehicle", cell: (e) => <span className="font-medium">{regOf(e.vehicleId)}</span> },
-                { id: "vendor", header: "Vendor", cell: (e) => e.vendorName },
-                { id: "l", header: "Litres", align: "right", cell: (e) => <span className="num">{L(e.quantityLitres)}</span> },
-                { id: "r", header: "Rate / L", align: "right", cell: (e) => <span className="num">{e.rate ? formatINR(e.rate) : "—"}</span> },
-                { id: "a", header: "Amount", align: "right", cell: (e) => <span className="num font-medium">{formatINR(e.amount)}</span> },
-                { id: "pm", header: "Paid", hideOnMobile: true, cell: (e) => <span className="text-xs text-muted-foreground">{e.paymentMode ?? "—"}</span> },
-                { id: "i", header: "Invoice", hideOnMobile: true, cell: (e) => <span className="text-xs text-muted-foreground">{e.invoiceNo || "—"}</span> },
-              ]}
-            />
-            <p className="mt-1 text-xs text-muted-foreground">Edit or delete a direct purchase on the vehicle&apos;s AdBlue tab.</p>
-          </div>
-        )}
+      </section>
+
+      <section>
+        <h2 className="mb-2 text-sm font-semibold">AdBlue added to vehicles · {p}</h2>
+        <DataTable
+          data={entriesInPeriod}
+          getRowId={(e) => e.id}
+          dense
+          pageSize={15}
+          emptyMessage="No AdBlue added to vehicles in this period."
+          columns={[
+            { id: "d", header: "Date", cell: (e) => <span className="num">{formatDate(e.date)}</span> },
+            { id: "v", header: "Vehicle", cell: (e) => <span className="font-medium">{regOf(e.vehicleId)}</span> },
+            { id: "src", header: "Source", hideOnMobile: true, cell: (e) => <span className="text-xs text-muted-foreground">{isDirectAdBlue(e) ? "Direct purchase" : "Bulk stock"}</span> },
+            { id: "vendor", header: "Source Vendor", cell: (e) => <span className={e.adblueVendorId || isDirectAdBlue(e) ? "" : "text-muted-foreground"}>{e.sourceVendor || "—"}</span> },
+            { id: "l", header: "Litres", align: "right", cell: (e) => <span className="num">{L(e.quantityLitres)}</span> },
+            { id: "r", header: "Rate / L", align: "right", cell: (e) => <span className="num">{e.costRate ? formatINR(e.costRate) : "—"}</span> },
+            { id: "a", header: "Total", align: "right", cell: (e) => <span className="num font-medium">{formatINR(e.amount)}</span> },
+            { id: "pm", header: "Paid", hideOnMobile: true, cell: (e) => <span className="text-xs text-muted-foreground">{e.paymentMode ?? "—"}</span> },
+            { id: "notes", header: "Notes", hideOnMobile: true, cell: (e) => <span className="text-xs text-muted-foreground">{[e.invoiceNo, e.notes].filter(Boolean).join(" · ") || "—"}</span> },
+          ]}
+        />
+        <p className="mt-1 text-xs text-muted-foreground">Bulk stock is costed at the purchase rate of the vendor&apos;s batches used (oldest first). Edit or delete an entry on the vehicle&apos;s AdBlue tab.</p>
       </section>
 
       <section>
@@ -258,7 +264,7 @@ export function AdBlueInventory() {
             { id: "product", header: "Product", cell: (p) => <span className="text-muted-foreground">{p.opening ? "—" : p.product || "—"}</span> },
             { id: "buckets", header: "Buckets", align: "right", cell: (p) => (p.opening ? "—" : `${formatNumber(p.buckets)} × ${formatNumber(p.litresPerBucket, 2)} L`) },
             { id: "litres", header: "Litres", align: "right", cell: (p) => <span className="num">{L(p.totalLitres)}</span> },
-            { id: "rate", header: "Rate", align: "right", cell: (p) => <span className="num">{p.opening ? "—" : `${formatINR(p.pricePerBucket)} / bucket`}</span> },
+            { id: "rate", header: "Rate", align: "right", cell: (p) => (p.opening ? "—" : <span className="num flex flex-col items-end"><span>{formatINR(p.pricePerBucket)} / bucket</span>{p.totalLitres > 0 && <span className="text-xs text-muted-foreground">{formatINR(p.totalCost / p.totalLitres)} / L</span>}</span>) },
             { id: "amt", header: "Amount", align: "right", cell: (p) => <span className="num font-medium">{formatINR(p.totalCost)}</span> },
             { id: "inv", header: "Voucher / Invoice", cell: (p) => <span className="text-muted-foreground">{p.invoiceNo || "—"}</span> },
             { id: "notes", header: "Notes", cell: (p) => <span className="text-xs text-muted-foreground">{p.notes || "—"}</span> },
@@ -278,22 +284,16 @@ export function AdBlueInventory() {
         />
       </section>
 
-      <section>
-        <h2 className="mb-2 text-sm font-semibold">Vendors</h2>
-        <DataTable
-          data={d.vendors}
-          getRowId={(r) => r.vendor}
-          initialSort={{ id: "amount", desc: true }}
-          dense
-          emptyMessage="No vendors yet."
-          columns={[
-            { id: "vendor", header: "Vendor", sortValue: (r) => r.vendor, cell: (r) => <span className="font-medium">{r.vendor}</span> },
-            { id: "litres", header: "Total Litres Purchased", align: "right", sortValue: (r) => r.litres, cell: (r) => <span className="num">{L(r.litres)}</span> },
-            { id: "amount", header: "Total Amount Purchased", align: "right", sortValue: (r) => r.amount, cell: (r) => <span className="num">{formatINR(r.amount)}</span> },
-            { id: "rate", header: "Average Rate / Litre", align: "right", sortValue: (r) => r.avgRate, cell: (r) => <span className="num">{r.avgRate ? formatINR(r.avgRate) : "—"}</span> },
-          ]}
-        />
-      </section>
+      <AdBlueVendorsSection
+        vendors={vendors.data ?? []}
+        purchases={purchases.data ?? []}
+        entries={entries.data ?? []}
+        months={period.periodMonths}
+        endedMonth={endedMonth}
+        periodLabel={p}
+        regOf={regOf}
+        mayManage={mayManageVendors}
+      />
 
       {openingOpen && <AdBlueOpeningDialog onOpenChange={setOpeningOpen} />}
       {direct && !direct.vehicle && (
@@ -309,7 +309,7 @@ export function AdBlueInventory() {
         </FormModal>
       )}
       {direct?.vehicle && <AddAdBlueDialog open onOpenChange={(o) => !o && setDirect(null)} vehicle={direct.vehicle} customer={null} month={monthKey(todayISO())} initialSource="DIRECT" />}
-      {editing && <PurchaseDialog key={editing.purchase?.id ?? "new"} purchase={editing.purchase} vendors={d.vendors.map((v) => v.vendor)} onOpenChange={(o) => !o && setEditing(null)} />}
+      {editing && <PurchaseDialog key={editing.purchase?.id ?? "new"} purchase={editing.purchase} vendors={vendors.data ?? []} mayAddVendor={mayManageVendors} onOpenChange={(o) => !o && setEditing(null)} />}
       {deleting && (
         <DeleteDialog
           title="Delete this AdBlue purchase?"
@@ -327,13 +327,18 @@ export function AdBlueInventory() {
   )
 }
 
-/** Add / edit a bulk AdBlue purchase. Totals are Buckets × per-bucket values. */
-function PurchaseDialog({ purchase, vendors, onOpenChange }: { purchase?: AdBluePurchase; vendors: string[]; onOpenChange: (o: boolean) => void }) {
+/**
+ * Add / edit a bulk AdBlue purchase. Totals are Buckets × per-bucket values. The vendor comes from the vendor master;
+ * its default rate per litre pre-fills Price per Bucket (rate × litres per bucket), which stays editable — the rate
+ * actually paid is saved on this purchase and costs every litre of it (FIFO).
+ */
+function PurchaseDialog({ purchase, vendors, mayAddVendor, onOpenChange }: { purchase?: AdBluePurchase; vendors: AdBlueVendor[]; mayAddVendor: boolean; onOpenChange: (o: boolean) => void }) {
   const save = useSaveAdBluePurchase()
+  const createVendor = useCreateAdBlueVendorByName()
   const today = todayISO()
   const [f, setF] = useState({
     date: purchase?.date ?? today,
-    vendorName: purchase?.vendorName ?? "",
+    vendorId: purchase?.adblueVendorId ?? "",
     product: purchase?.product ?? "AdBlue",
     buckets: purchase ? String(purchase.buckets) : "",
     litresPerBucket: purchase ? String(purchase.litresPerBucket) : "20",
@@ -344,6 +349,15 @@ function PurchaseDialog({ purchase, vendors, onOpenChange }: { purchase?: AdBlue
   const [error, setError] = useState<string | null>(null)
   const [reason, setReason] = useState("")
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF((s) => ({ ...s, [k]: e.target.value }))
+  // Active vendors (the purchase's own vendor kept even if archived since).
+  const options = vendors.filter((v) => v.status === "ACTIVE" || v.id === purchase?.adblueVendorId).sort((a, b) => a.name.localeCompare(b.name)).map((v) => ({ value: v.id, label: v.defaultRate ? `${v.name} · ${formatINR(v.defaultRate)} / L` : v.name }))
+  const defaultPrice = (vendorId: string, perBucket: string) => {
+    const rate = vendors.find((v) => v.id === vendorId)?.defaultRate
+    return rate && Number(perBucket) > 0 ? String(Number((rate * Number(perBucket)).toFixed(2))) : ""
+  }
+  // Picking a vendor (or changing litres per bucket) fills Price per Bucket from its default rate until a price is typed.
+  const [priceTyped, setPriceTyped] = useState(!!purchase)
+  const pickVendor = (vendorId: string) => setF((s) => ({ ...s, vendorId, pricePerBucket: priceTyped ? s.pricePerBucket : defaultPrice(vendorId, s.litresPerBucket) }))
   const buckets = Number(f.buckets)
   const perBucket = Number(f.litresPerBucket)
   const price = Number(f.pricePerBucket)
@@ -352,12 +366,12 @@ function PurchaseDialog({ purchase, vendors, onOpenChange }: { purchase?: AdBlue
 
   const submit = async () => {
     setError(null)
-    if (!f.vendorName.trim()) return setError("Enter the vendor name")
+    if (!f.vendorId) return setError("Choose the vendor")
     if (!(buckets > 0) || !(perBucket > 0)) return setError("Enter the number of buckets and litres per bucket")
     if (!(price >= 0) || f.pricePerBucket === "") return setError("Enter the price per bucket")
     await save.mutateAsync({
       id: purchase?.id, version: purchase?.updatedAt,
-      data: { date: f.date, vendorName: f.vendorName, product: f.product, buckets, litresPerBucket: perBucket, pricePerBucket: price, invoiceNo: f.invoiceNo.trim(), notes: f.notes.trim() },
+      data: { date: f.date, adblueVendorId: f.vendorId, product: f.product, buckets, litresPerBucket: perBucket, pricePerBucket: price, invoiceNo: f.invoiceNo.trim(), notes: f.notes.trim() },
       reason,
     })
     toast.success(`${purchase ? "Purchase updated" : "Purchase saved"} — +${L(totalLitres)} to inventory`)
@@ -378,13 +392,16 @@ function PurchaseDialog({ purchase, vendors, onOpenChange }: { purchase?: AdBlue
         <Field label="Purchase date" required>
           <Input type="date" value={f.date} max={today} onChange={set("date")} />
         </Field>
-        <Field label="Vendor name" required error={error ?? undefined}>
-          <Input value={f.vendorName} onChange={set("vendorName")} list="adblue-vendors" placeholder="e.g. XYZ Chemicals" autoFocus />
-          <datalist id="adblue-vendors">
-            {vendors.map((v) => (
-              <option key={v} value={v} />
-            ))}
-          </datalist>
+        <Field label="Vendor" required error={error ?? undefined}>
+          <CreatableSelect
+            value={f.vendorId}
+            options={options}
+            onChange={pickVendor}
+            onCreate={mayAddVendor ? async (name) => createVendor(name) : undefined}
+            createLabel={(q) => `Add vendor "${q}"`}
+            placeholder="Select vendor"
+            invalid={!!error && !f.vendorId}
+          />
         </Field>
         <Field label="Product / grade / quality" className="sm:col-span-2">
           <Input value={f.product} onChange={set("product")} placeholder="e.g. AdBlue ISO 22241" />
@@ -393,10 +410,10 @@ function PurchaseDialog({ purchase, vendors, onOpenChange }: { purchase?: AdBlue
           <Input type="number" min={0} step="1" value={f.buckets} onChange={set("buckets")} />
         </Field>
         <Field label="Litres per bucket" required>
-          <Input type="number" min={0} step="0.01" value={f.litresPerBucket} onChange={set("litresPerBucket")} />
+          <Input type="number" min={0} step="0.01" value={f.litresPerBucket} onChange={(e) => { const v = e.target.value; setF((s) => ({ ...s, litresPerBucket: v, pricePerBucket: priceTyped ? s.pricePerBucket : defaultPrice(s.vendorId, v) })) }} />
         </Field>
-        <Field label="Price per bucket (₹)" required>
-          <Input type="number" min={0} step="0.01" value={f.pricePerBucket} onChange={set("pricePerBucket")} />
+        <Field label="Price per bucket (₹)" required hint={price > 0 && perBucket > 0 ? `Actual rate ${formatINR(price / perBucket)} / L${(() => { const d = vendors.find((v) => v.id === f.vendorId)?.defaultRate; return d && Math.abs(d - price / perBucket) > 0.005 ? ` · vendor default ${formatINR(d)} / L` : "" })()}` : "Filled from the vendor's default rate — change it to the price actually paid"}>
+          <Input type="number" min={0} step="0.01" value={f.pricePerBucket} onChange={(e) => { setPriceTyped(true); set("pricePerBucket")(e) }} />
         </Field>
         <Field label="Invoice number">
           <Input value={f.invoiceNo} onChange={set("invoiceNo")} />

@@ -137,7 +137,7 @@ async function main() {
   setRole("EMPLOYEE")
   const n2 = (await api.audit.history(old.id)).length
   await assert.rejects(api.diesel.update(old.id, { date: old.date, vendorId: old.vendorId, litres: old.litres + 1, rate: old.rate, odometerKm: old.odometerKm, billNo: old.billNo, paymentMode: old.paymentMode }), /is locked/)
-  await assert.rejects(api.diesel.remove(old.id, "Employee attempt"), /is locked/)
+  await assert.rejects(api.diesel.remove(old.id, "Employee attempt"), /can't delete fuel records/) // deletes: Owner and Dev only (16 Nov 2026)
   assert.equal((await api.audit.history(old.id)).length, n2)
   assert.equal((await api.diesel.get(old.id))!.litres, old.litres)
   //   b) The Owner may edit a locked month (Monthly Sheet Lock) — and it is recorded as the Owner.

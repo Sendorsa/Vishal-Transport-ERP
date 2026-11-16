@@ -38,7 +38,7 @@ export function AdBlueOpeningDialog({ onOpenChange }: { onOpenChange: (o: boolea
       open
       onOpenChange={onOpenChange}
       title="AdBlue opening stock"
-      description="AdBlue already on hand when records begin. It becomes stock and carries forward; draws are costed at the weighted average including it. It is not a purchase (never in AdBlue Purchased)."
+      description="AdBlue already on hand when records begin. It becomes stock (no vendor) and carries forward; a vehicle draw can take it by choosing “Opening stock”, costed at its value per litre. It is not a purchase (never in AdBlue Purchased)."
       submitLabel="Save opening stock"
       pending={save.isPending}
       onSubmit={submit}

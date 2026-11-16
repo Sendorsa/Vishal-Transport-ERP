@@ -409,10 +409,21 @@ export interface Settings {
  */
 export interface AdBlueEntry extends BaseEntity {
   /**
-   * STOCK (default, also when absent) = drawn from bulk inventory, costed at the weighted-average rate.
+   * STOCK (default, also when absent) = drawn from bulk inventory, costed FIFO from its vendor's batches.
    * DIRECT = bought from a vendor straight into this vehicle: its own litres × rate, never touches bulk stock.
    */
   source?: "STOCK" | "DIRECT"
+  /**
+   * The AdBlue vendor (owner, 16 Nov 2026). STOCK: whose bulk stock the draw takes (FIFO, src/domain/adblue-inventory.ts);
+   * null / absent = unattributed stock (opening stock, or stock whose vendor is unknown). DIRECT: who sold it.
+   */
+  adblueVendorId?: string | null
+  /**
+   * Recorded before vendor tracking (16 Nov 2026): true on every entry that existed then (database: the column default
+   * at the migration; browser: `migrateStorage`), false on every new one. Never set from a request. A draw with this
+   * flag and no vendor never gets a vendor guessed (see "Old draws" in src/domain/adblue-inventory.ts).
+   */
+  beforeVendorTracking?: boolean
   /** DIRECT only: who sold it, the rate per litre and how it was paid (informational — no AdBlue payables ledger). */
   vendorName?: string
   rate?: number
@@ -430,6 +441,9 @@ export interface AdBlueEntry extends BaseEntity {
   amount: number
   invoiceNo: string
   notes: string
+  /** Read-only view fields (never stored): the vendor the AdBlue came from (DIRECT: vendorName; STOCK: the batch's vendor, "No vendor" before vendor tracking) and ₹ per litre (DIRECT: its rate; STOCK: FIFO cost ÷ litres). */
+  sourceVendor?: string
+  costRate?: number | null
   /** Read-only view fields (never stored): the previous AdBlue entry's reading and date, set for customer-scoped lists (see DieselEntry.prevOdometerKm). */
   prevKm?: number | null
   prevDate?: string | null
@@ -494,9 +508,25 @@ export interface TankerDispense extends BaseEntity {
   notes: string
 }
 
+/**
+ * AdBlue vendor master (owner, 16 Nov 2026): who bulk and direct AdBlue is bought from. Never deleted — archived and
+ * restored. The default rate per litre only pre-fills a purchase; each purchase keeps its own rate.
+ */
+export interface AdBlueVendor extends BaseEntity {
+  name: string
+  defaultRate: number | null
+  contactPerson: string
+  phone: string
+  notes: string
+  status: "ACTIVE" | "ARCHIVED"
+}
+
 /** Bulk AdBlue purchase into inventory (buckets). Totals are always Buckets × per-bucket values. */
 export interface AdBluePurchase extends BaseEntity {
   date: string
+  /** The AdBlue vendor master record: the batch belongs to that vendor's stock. Null on opening stock ("No vendor"). */
+  adblueVendorId?: string | null
+  /** The vendor's name when the purchase was saved (kept as history if the vendor is renamed). */
   vendorName: string
   /** Product / grade / quality. */
   product: string
@@ -612,6 +642,7 @@ export interface CollectionMap {
   vehicle_assignments: VehicleAssignment
   fuel_stations: FuelStation
   adblue_purchases: AdBluePurchase
+  adblue_vendors: AdBlueVendor
   tanker_loads: TankerLoad
   tanker_dispenses: TankerDispense
   tankers: Tanker

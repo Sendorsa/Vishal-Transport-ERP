@@ -148,8 +148,11 @@ async function main() {
   assert.deepEqual([ownerPump.openingBalance, ownerPump.openingBalanceDate], [7500, today], "the Owner sees the Employee's pump and opening balance")
   assert.ok((await read(OWNER, () => api.fuelStationPayments.list())).some((p) => p.id === empPay.id && p.amount === 2500), "…and its payment")
   await as(EMP, () => api.fuelStationPayments.update(empPay.id, { paymentDate: today, amount: 3000, paymentMode: "UPI", notes: "" }))
-  await as(EMP, () => api.fuelStationPayments.remove(empPay.id, "Entered on the wrong pump"))
-  assert.ok(!(await read(OWNER, () => api.fuelStationPayments.list())).some((p) => p.id === empPay.id), "the Employee edits and deletes payments, like the Owner")
+  // Deleting: the Owner and Dev only (owner, 16 Nov 2026) — the API refuses the Employee, and so does RLS (below).
+  await assert.rejects(as(EMP, () => api.fuelStationPayments.remove(empPay.id, "Entered on the wrong pump")), /can't delete payment records/)
+  assert.ok((await read(OWNER, () => api.fuelStationPayments.list())).some((p) => p.id === empPay.id), "the Employee edits payments, but deletes none")
+  await as(OWNER, () => api.fuelStationPayments.remove(empPay.id, "Entered on the wrong pump"))
+  assert.ok(!(await read(OWNER, () => api.fuelStationPayments.list())).some((p) => p.id === empPay.id), "the Owner deletes it")
   const st = (await read(OWNER, () => api.fuelStations.list())).find((s) => s.id === station.id)!
   const purchases = [...fills, ...loadsAsStationPurchases(loads)]
   const led = stationLedger(station.id, purchases, await read(OWNER, () => api.payments.list()), today.slice(0, 7), openingOf(st))
@@ -181,12 +184,18 @@ async function main() {
   assert.deepEqual([kmplOf(f1.id), kmplOf(f2.id), kmplOf(tf.id)], [fillMileage(400, 100), fillMileage(100, 37.64), fillMileage(250, 300)])
   assert.deepEqual([kmplOf(f1.id), kmplOf(f2.id), kmplOf(tf.id)], [4, 2.66, 0.83])
 
-  /* ---------------------------------------------------------------- 6. AdBlue: opening + bulk, weighted-average draw */
-  await as(OWNER, () => api.adbluePurchases.create({ date: today, vendorName: "Bulk Vendor", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" }))
-  const draw = await as(EMP, () => api.adblue.create({ date: today, vehicleId: bus.id, customerId: minda.id, closingKm: 120600, quantityLitres: 15, invoiceNo: "", notes: "", source: "STOCK" }))
+  /* ---------------------------------------------------------------- 6. AdBlue: opening + bulk, FIFO draw from its vendor */
+  const bulkBuy = await as(OWNER, () => api.adbluePurchases.create({ date: today, vendorName: "Bulk Vendor", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" }))
+  const draw = await as(EMP, () => api.adblue.create({ date: today, vehicleId: bus.id, customerId: minda.id, closingKm: 120600, quantityLitres: 15, invoiceNo: "", notes: "", source: "STOCK", adblueVendorId: bulkBuy.adblueVendorId }))
   const ap = await read(OWNER, () => api.adbluePurchases.list())
   const inv = valueInventory(ap, stockDraws(await read(OWNER, () => api.adblue.list())))
-  assert.deepEqual([inv.stockLitres, inv.stockValue, inv.costOf.get(draw.id)], [285, 17100, 900])
+  assert.deepEqual([inv.stockLitres, inv.stockValue, inv.costOf.get(draw.id)], [285, 17325, 675]) // FIFO from Bulk Vendor's batch (15 L × ₹45); the opening stock is "No vendor"
+  // The vendor master on the shared database (16 Nov 2026): the purchase created its vendor; the draw reads back its source.
+  const dbVendors = await read(EMP, () => api.adblueVendors.list())
+  assert.deepEqual(dbVendors.filter((v) => v.id === bulkBuy.adblueVendorId).map((v) => [v.name, v.status]), [["Bulk Vendor", "ACTIVE"]])
+  const dbDraw = (await read(OWNER, () => api.adblue.list())).find((e) => e.id === draw.id)!
+  assert.deepEqual([dbDraw.adblueVendorId, dbDraw.sourceVendor, dbDraw.amount, dbDraw.costRate], [bulkBuy.adblueVendorId, "Bulk Vendor", 675, 45], "vendor, FIFO cost and rate survive the database")
+  await assert.rejects(as(EMP, () => api.adblue.create({ date: today, vehicleId: bus.id, customerId: minda.id, closingKm: 120700, quantityLitres: 186, invoiceNo: "", notes: "", source: "STOCK", adblueVendorId: bulkBuy.adblueVendorId })), /Insufficient AdBlue stock from Bulk Vendor\. Available: 185L/, "a draw can't take another vendor's stock (the opening 100 L)")
   assert.deepEqual([purchasedIn(ap, (p) => p.date.startsWith("2026-10")).cost, purchasedIn(ap, () => true).cost], [0, 9000], "opening stock is never AdBlue Purchased")
 
   /* ---------------------------------------------------------------- 7. trips → invoice → receipts (allocations) */
@@ -241,7 +250,7 @@ async function main() {
   /* ---------------------------------------------------------------- 9. month lock: locked data — Employee refused, Dev and Owner allowed; lock / unlock — Owner and Dev only */
   const octFill = await as(OWNER, () => api.diesel.create({ ...fill(10, 119000), date: "2026-10-30" }))
   await assert.rejects(as(EMP, () => api.diesel.update(octFill.id, { ...fill(11, 119000), date: "2026-10-30", vendorId: station.id })), /October 2026 is locked/)
-  await assert.rejects(as(EMP, () => api.diesel.remove(octFill.id, "Employee attempt")), /October 2026 is locked/)
+  await assert.rejects(as(EMP, () => api.diesel.remove(octFill.id, "Employee attempt")), /can't delete fuel records/)
   await as(DEV, () => api.diesel.update(octFill.id, { ...fill(12, 119000), date: "2026-10-30", vendorId: station.id }, "Dev correction in a closed month"))
   const lock = await as(DEV, () => api.monthLocks.set(today.slice(0, 7), "LOCKED"))
   assert.equal(lock.changedBy, "DEV")
@@ -256,7 +265,8 @@ async function main() {
   assert.equal((await as(DEV, () => api.monthLocks.set(today.slice(0, 7), "OPEN"))).changedBy, "DEV", "Dev unlocks it again")
 
   /* ---------------------------------------------------------------- 10. delete with reason; Dev restores; audit identity */
-  await assert.rejects(as(EMP, () => api.diesel.remove(f2.id, "")), /reason/i) // permission passes; the reason is still required
+  await assert.rejects(as(EMP, () => api.diesel.remove(f2.id, "Entered twice")), /can't delete fuel records/) // Owner and Dev only (16 Nov 2026)
+  await assert.rejects(as(DEV, () => api.diesel.remove(f2.id, "")), /reason/i) // permission passes; the reason is still required
   await as(OWNER, () => api.diesel.remove(f2.id, "Entered twice"))
   const log = await read(DEV, () => api.audit.list())
   const del = log.find((e) => e.recordId === f2.id && e.action === "DELETED")!
@@ -414,7 +424,9 @@ async function main() {
     const vB = await veh("TN70PB0002", beta.id)
     const vX = await veh("TN70PX0003", beta.id)
     const dfill = (vehicleId: string, customerId: string, date: string, odometerKm: number) => ({ date, vehicleId, customerId, vendorId: station.id, litres: 50, rate: 95, odometerKm, billNo: "", paymentMode: "CREDIT" as const })
-    const ab = (vehicleId: string, customerId: string, date: string, closingKm: number, quantityLitres: number) => ({ date, vehicleId, customerId, closingKm, quantityLitres, invoiceNo: "", notes: "", source: "STOCK" as const })
+    // These draws are back-dated: a vendor batch dated before them (the opening stock has no vendor, so no draw takes it).
+    const earlyBuy = await as(OWNER, () => api.adbluePurchases.create({ date: day(9), vendorName: "Early Vendor", product: "AdBlue", buckets: 5, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" }))
+    const ab = (vehicleId: string, customerId: string, date: string, closingKm: number, quantityLitres: number) => ({ date, vehicleId, customerId, closingKm, quantityLitres, invoiceNo: "", notes: "", source: "STOCK" as const, adblueVendorId: earlyBuy.adblueVendorId })
     const dX1 = await as(OWNER, () => api.diesel.create(dfill(vX.id, beta.id, day(8), 1000)))
     await as(OWNER, () => api.adblue.create(ab(vX.id, beta.id, day(8), 1000, 5)))
     await as(OWNER, () => api.vehicles.transfer(vX.id, alpha.id, day(6), "Moved to Alpha"))
@@ -426,9 +438,9 @@ async function main() {
     // The method list: exactly these, every other api method refused for both profiles (and nothing changes for the others).
     for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) {
       const writes = PROFILE_METHODS.filter((m) => !isReadMethod(m.split(".")[0], m.split(".")[1]))
-      assert.deepEqual(writes.sort(), ["adblue.create", "adblue.remove", "adblue.update", "adbluePurchases.create"], `${role}: the only writes: AdBlue entries and bulk purchases`)
+      assert.deepEqual(writes.sort(), ["adblue.create", "adblue.update", "adbluePurchases.create"], `${role}: the only writes: AdBlue entries (add / edit — no delete, 16 Nov 2026) and bulk purchases`)
     }
-    assert.ok(["adblue.list", "adblueStock.list", "adblueVehicles.list", "adblueTotals.get", "adbluePurchases.list"].every((m) => PROFILE_METHODS.includes(m)), "both profiles: every AdBlue read (owner, 12 Nov 2026)")
+    assert.ok(["adblue.list", "adblueStock.list", "adblueVehicles.list", "adblueTotals.get", "adbluePurchases.list", "adblueVendors.list"].every((m) => PROFILE_METHODS.includes(m)), "both profiles: every AdBlue read (owner, 12 Nov 2026)")
     for (const ns of Object.keys(methods))
       for (const m of Object.keys(methods[ns])) {
         const name = `${ns}.${m}`
@@ -532,10 +544,10 @@ async function main() {
     const tNew = await call<AdBlueEntry>(TATA, "adblue.create", ab(vA.id, alpha.id, today, 2000, 2))
     assert.equal(tNew.customerId, alpha.id)
     await call(TATA, "adblue.update", tNew.id, ab(vA.id, alpha.id, today, 2000, 3), "Wrong litres")
-    await assert.rejects(call(TATA, "adblue.remove", tNew.id, ""), /reason/i)
-    await call(TATA, "adblue.remove", tNew.id, "Entered twice")
+    await assert.rejects(call(TATA, "adblue.remove", tNew.id, "Entered twice"), /refused by the method list/, "Tata Adblue deletes nothing (16 Nov 2026)")
+    await as(OWNER, () => api.adblue.remove(tNew.id, "Entered twice")) // the Owner deletes it
     const tEvents = (await read(DEV, () => api.audit.list())).filter((e) => e.recordId === tNew.id)
-    assert.deepEqual(tEvents.map((e) => [e.action, e.actor.role, e.actor.userId]).sort(), [["CREATED", "TATA_ADBLUE", P.TATA], ["DELETED", "TATA_ADBLUE", P.TATA], ["UPDATED", "TATA_ADBLUE", P.TATA]], "audited as Tata Adblue")
+    assert.deepEqual(tEvents.map((e) => [e.action, e.actor.role, e.actor.userId]).sort(), [["CREATED", "TATA_ADBLUE", P.TATA], ["DELETED", "OWNER", P.OWNER], ["UPDATED", "TATA_ADBLUE", P.TATA]], "audited as Tata Adblue; the deletion as the Owner")
     assert.equal(tEvents.find((e) => e.action === "DELETED")!.reason, "Entered twice")
     /** The events of one record: the actor, the vehicle / customer in the snapshots, the litres, a server timestamp. */
     const snapshotsOf = (events: AuditEvent[]) =>
@@ -543,7 +555,7 @@ async function main() {
     assert.deepEqual(snapshotsOf(tEvents), {
       CREATED: { name: "Tata Person", before: null, after: [vA.id, alpha.id, 2], date: today, reason: null, at: true },
       UPDATED: { name: "Tata Person", before: [vA.id, alpha.id, 2], after: [vA.id, alpha.id, 3], date: today, reason: "Wrong litres", at: true },
-      DELETED: { name: "Tata Person", before: [vA.id, alpha.id, 3], after: null, date: today, reason: "Entered twice", at: true },
+      DELETED: { name: "Owner Person", before: [vA.id, alpha.id, 3], after: null, date: today, reason: "Entered twice", at: true },
     }, "Tata Adblue's events: who, which vehicle and customer, before and after")
     const tUpd = tEvents.find((e) => e.action === "UPDATED")!
     assert.ok(tUpd.changes.some((c) => c.field === "quantityLitres" && c.before === 2 && c.after === 3) && !tUpd.changes.some((c) => c.field === "vehicleId" || c.field === "customerId"), "the change: litres only")
@@ -569,29 +581,36 @@ async function main() {
     await as(OWNER, () => api.monthLocks.set(today.slice(0, 7), "LOCKED"))
     for (const [id, e, v, c] of [[TATA, tMove, vA, alpha], [ADB, aMove, vB, beta]] as const) {
       await assert.rejects(call(id, "adblue.update", e.id, ab(v.id, c.id, e.date, e.closingKm, 2), "Change in a locked month"), /is locked/, `${id.role}: no edit in a locked month`)
-      await assert.rejects(call(id, "adblue.remove", e.id, "Delete in a locked month"), /is locked/, `${id.role}: no delete in a locked month`)
+      await assert.rejects(call(id, "adblue.remove", e.id, "Delete in a locked month"), /refused by the method list/, `${id.role}: no delete at all`)
       await sqlAs(id, `update fuel.adblue_entries set quantity_litres = 9 where id = '${e.id}'; delete from fuel.adblue_entries where id = '${e.id}';`) // RLS: month_open
       assert.equal((await read(OWNER, () => api.adblue.list())).find((x) => x.id === e.id)!.quantityLitres, 1, `${id.role}: untouched, also straight in the database`)
     }
     await as(DEV, () => api.monthLocks.set(today.slice(0, 7), "OPEN"))
-    await call(TATA, "adblue.remove", tMove.id, "Lock check cleanup")
-    await call(ADB, "adblue.remove", aMove.id, "Lock check cleanup")
+    await as(OWNER, () => api.adblue.remove(tMove.id, "Lock check cleanup"))
+    await as(OWNER, () => api.adblue.remove(aMove.id, "Lock check cleanup"))
     await assert.rejects(call(TATA, "adblue.create", ab(vB.id, beta.id, today, 900, 1)), /for this customer/, "Beta's vehicle: refused")
     await assert.rejects(call(TATA, "adblue.create", ab(vB.id, alpha.id, today, 900, 1)), /assigned to BETA/, "…and its customer can't be chosen around")
     await assert.rejects(call(TATA, "adblue.update", aB.id, ab(vB.id, beta.id, day(5), 500, 1)), /for this customer/)
-    await assert.rejects(call(TATA, "adblue.remove", aB.id, "Not mine"), /for this customer/)
+    await assert.rejects(call(TATA, "adblue.remove", aB.id, "Not mine"), /refused by the method list/)
     await assert.rejects(call(TATA, "adblue.create", ab(vA.id, alpha.id, "2026-10-31", 1500, 1)), /October 2026 is locked/, "the month lock applies")
     const bulk = { date: today, vendorName: "Tata Bulk Vendor", product: "AdBlue", buckets: 2, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" }
+    await assert.rejects(call(TATA, "adbluePurchases.create", bulk), /can't change the AdBlue vendor list/, "an unknown vendor: the profiles never add one")
+    await as(OWNER, () => api.adblueVendors.create({ name: "Tata Bulk Vendor", defaultRate: 45 }))
     const tBulk = await call<AdBluePurchase>(TATA, "adbluePurchases.create", bulk)
     assert.equal((await read(OWNER, () => api.adbluePurchases.list())).find((x) => x.id === tBulk.id)!.totalLitres, 40, "into the one shared stock")
     // RLS, even if the server's checks were bypassed: Beta's entries, Diesel, purchases and opening stock stay closed.
     const evSql = (id: string, action = "CREATED") => `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), '${action}', 'AdBlue', 'AdBlue entry', '${id}');`
-    await assert.rejects(sqlAs(TATA, `insert into fuel.adblue_entries (id, vehicle_id, customer_id, date, closing_km, quantity_litres) values ('adb_rls1', '${vB.id}', '${beta.id}', '${today}', 950, 1); ${evSql("adb_rls1")}`), /row-level security/, "RLS: an ungranted customer")
-    await sqlAs(TATA, `insert into fuel.adblue_entries (id, vehicle_id, customer_id, date, closing_km, quantity_litres) values ('adb_rls2', '${vA.id}', '${alpha.id}', '${today}', 2100, 1); ${evSql("adb_rls2")}`)
+    await assert.rejects(sqlAs(TATA, `insert into fuel.adblue_entries (id, vehicle_id, customer_id, date, closing_km, quantity_litres, before_vendor_tracking) values ('adb_rls1', '${vB.id}', '${beta.id}', '${today}', 950, 1, false); ${evSql("adb_rls1")}`), /row-level security/, "RLS: an ungranted customer")
+    await sqlAs(TATA, `insert into fuel.adblue_entries (id, vehicle_id, customer_id, date, closing_km, quantity_litres, before_vendor_tracking) values ('adb_rls2', '${vA.id}', '${alpha.id}', '${today}', 2100, 1, false); ${evSql("adb_rls2")}`)
     await sqlAs(TATA, `update fuel.adblue_entries set notes = 'tampered' where id = '${aB.id}'; delete from fuel.adblue_entries where id = '${aB.id}'; update fuel.adblue_purchases set notes = 'tampered'; delete from fuel.adblue_purchases where opening;`)
     assert.equal((await read(OWNER, () => api.adblue.list())).find((e) => e.id === aB.id)!.notes, "", "RLS: Beta's entry untouched")
     assert.ok((await read(OWNER, () => api.adbluePurchases.list())).every((x) => x.notes !== "tampered") && (await read(OWNER, () => api.adbluePurchases.list())).some((x) => x.opening), "RLS: purchases and opening stock untouched")
     await assert.rejects(sqlAs(TATA, `insert into fuel.adblue_purchases (date, vendor_name, product, buckets, litres_per_bucket, price_per_bucket, opening) values ('${today}', '', 'Opening', 1, 10, 10, true)`), /row-level security/, "RLS: no opening stock")
+    // Deleting (16 Nov 2026): not even the profile's own granted entry, straight in the database; and no vendor master writes.
+    await sqlAs(TATA, `delete from fuel.adblue_entries where id = 'adb_rls2'`)
+    assert.ok((await read(OWNER, () => api.adblue.list())).some((e) => e.id === "adb_rls2"), "RLS: Tata Adblue deletes nothing, its own entry included")
+    await assert.rejects(sqlAs(TATA, `delete from fuel.adblue_entries where id = 'adb_rls2'; ${evSql("adb_rls2", "DELETED")}`), /row-level security|reason|check constraint/, "…and writes no deletion event")
+    for (const id of [TATA, ADB]) await assert.rejects(sqlAs(id, `insert into fuel.adblue_vendors (name) values ('Profile Vendor'); insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), 'CREATED', 'AdBlue', 'AdBlue vendor', 'x');`), /row-level security/, `RLS: ${id.role} adds no vendor`)
     await assert.rejects(sqlAs(ADB, `insert into fuel.diesel_entries (company_code, date, vehicle_id, station_id, litres, rate, odometer_km) values ('VT', '${today}', '${vA.id}', '${station.id}', 5, 95, 2500)`), /row-level security/, "RLS: no Diesel writes")
     await assert.rejects(sqlAs(TATA, `insert into fuel.tanker_adjustments (date, tanker_id, litres, reason) values ('${today}', '${JIO}', 1, 'x')`), /row-level security/)
     await sqlAs(ADB, `update fuel.diesel_entries set litres = 1; delete from fuel.diesel_entries; update core.customers set notes = 'x'`)
@@ -648,11 +667,15 @@ async function main() {
     const dEnd = await as(DEV, () => api.adblue.create(ab(vEnd.id, null as never, day(2), 200, 1)))
     const mLate = await as(EMP, () => api.adblue.create(ab(vLate.id, null as never, day(4), 50, 1)))
     assert.deepEqual([oSpare.customerId, dEnd.customerId, mLate.customerId], [null, null, null], "Owner / Dev / Employee: unchanged")
-    // Audit and reasons as before: the profiles' entries are recorded as them; deletes still need a reason.
+    // Audit as before: the profiles' entries are recorded as them. They delete nothing (owner, 16 Nov 2026): the method
+    // list refuses adblue.remove, the API refuses it, and RLS refuses it (below).
     const evs = await read(OWNER, () => api.audit.history(eEnd.id))
     assert.deepEqual(evs.map((e) => [e.action, e.actor.role]), [["CREATED", "ADBLUE"], ["UPDATED", "TATA_ADBLUE"]], "each recorded as the profile that did it")
-    await assert.rejects(call(TATA, "adblue.remove", eLate.id, ""), /reason/i)
-    for (const [id, e] of [[TATA, eLate], [ADB, eEnd], [OWNER, oSpare], [OWNER, dEnd], [OWNER, mLate]] as const) await (id === OWNER ? as(OWNER, () => api.adblue.remove(e.id, "Check cleanup")) : call(id, "adblue.remove", e.id, "Check cleanup"))
+    for (const [id, e] of [[TATA, eLate], [ADB, eEnd]] as const) {
+      await assert.rejects(call(id, "adblue.remove", e.id, "Profile delete"), /refused by the method list/)
+      await assert.rejects(as(id, () => api.adblue.remove(e.id, "Profile delete")), /can't delete AdBlue records/, "…and by the API itself")
+    }
+    for (const e of [eLate, eEnd, oSpare, dEnd, mLate]) await as(OWNER, () => api.adblue.remove(e.id, "Check cleanup"))
     for (const m of months) await as(DEV, () => api.monthLocks.set(m, "LOCKED"))
 
     // Diesel visibility with two granted customers (owner, 12 Nov 2026). Alpha and Gamma granted, Beta not; vehicle X
@@ -798,21 +821,22 @@ async function main() {
     assert.equal(dInEvents.length, moveTo === today ? 0 : 3, "one UPDATED event per real date change")
     assert.ok(dInEvents.every((e) => e.changes.some((c) => c.field === "date") && e.before?.customerId === alpha.id && e.after?.customerId === alpha.id), "…the date changed, the customer didn't")
     await as(OWNER, () => api.diesel.remove(dIn.id, "Date check cleanup"))
-    await call(DEV, "adblue.remove", "adb_rls2", "RLS check cleanup")
+    await as(DEV, () => api.adblue.remove("adb_rls2", "RLS check cleanup"))
     // Adblue: every customer's entries; bulk purchases; Diesel refused.
     const aNew = await call<AdBlueEntry>(ADB, "adblue.create", ab(vB.id, beta.id, today, 900, 1))
     await call(ADB, "adblue.update", aNew.id, ab(vB.id, beta.id, today, 900, 2), "Wrong litres")
-    await call(ADB, "adblue.remove", aNew.id, "Check cleanup")
+    await assert.rejects(call(ADB, "adblue.remove", aNew.id, "Check cleanup"), /refused by the method list/, "Adblue deletes nothing (16 Nov 2026)")
+    await as(DEV, () => api.adblue.remove(aNew.id, "Check cleanup"))
     const aEvents = (await read(DEV, () => api.audit.list())).filter((e) => e.recordId === aNew.id)
-    assert.deepEqual(aEvents.map((e) => [e.action, e.actor.kind, e.actor.role, e.actor.userId]).sort(), [["CREATED", "SESSION", "ADBLUE", P.ADB], ["DELETED", "SESSION", "ADBLUE", P.ADB], ["UPDATED", "SESSION", "ADBLUE", P.ADB]], "audited as Adblue, never another role")
+    assert.deepEqual(aEvents.map((e) => [e.action, e.actor.kind, e.actor.role, e.actor.userId]).sort(), [["CREATED", "SESSION", "ADBLUE", P.ADB], ["DELETED", "SESSION", "DEV", P.DEV], ["UPDATED", "SESSION", "ADBLUE", P.ADB]], "audited as Adblue, never another role; the deletion as Dev")
     assert.deepEqual(snapshotsOf(aEvents), {
       CREATED: { name: ADB.email, before: null, after: [vB.id, beta.id, 1], date: today, reason: null, at: true },
       UPDATED: { name: ADB.email, before: [vB.id, beta.id, 1], after: [vB.id, beta.id, 2], date: today, reason: "Wrong litres", at: true },
-      DELETED: { name: ADB.email, before: [vB.id, beta.id, 2], after: null, date: today, reason: "Check cleanup", at: true },
+      DELETED: { name: "Dev Person", before: [vB.id, beta.id, 2], after: null, date: today, reason: "Check cleanup", at: true },
     }, "Adblue's events: who (no name → the signed-in email), which vehicle and customer, before and after")
     for (const id of [OWNER, EMP]) assert.deepEqual((await read(id, () => api.audit.list())).filter((e) => e.recordId === aNew.id), aEvents, `${id.role} reads Adblue's events`)
     for (const id of [TATA, ADB]) assert.deepEqual(await rowsAs(id, `select id from audit.events where record_id = '${aNew.id}'`), [], `${id.role} reads none of them`)
-    await call(ADB, "adbluePurchases.create", { ...bulk, vendorName: "Adblue Bulk Vendor" })
+    await call(ADB, "adbluePurchases.create", { ...bulk, vendorName: "Tata Bulk Vendor" }) // an existing vendor
     await assert.rejects(as(ADB, () => api.diesel.create(dfill(vB.id, beta.id, today, 950))), /can't create fuel records/, "Diesel refused by the API itself too")
 
     // Live sync: module names only — AdBlue changes reach them, Payments never; the others unchanged.
@@ -839,6 +863,69 @@ async function main() {
     assert.deepEqual(await call(TATA, "adblue.list"), await read(OWNER, () => api.adblue.list()), "AdBlue is still viewed company-wide (grants limit writes and Diesel only)")
     assert.ok((await read(OWNER, () => api.adblue.list())).some((e) => e.id === aX2.id), "history intact after revocation")
     await grant(DEV, P.TATA, [alpha.id], "Contract renewed") // left in place: the reset scripts below must handle a grant
+
+    /* -------------------------------------------------------------- 12e. delete = Owner / Dev: rows an edit removes (owner, 16 Nov 2026) */
+    // Legitimate edits by the Employee keep working through the engine (they remove child rows inside an audited edit).
+    const epsilon = await mkCust("EPSILON")
+    const routeRows = async () => (await db.query<{ route: string; rate: string }>(`select route, rate::text from core.customer_route_rates where customer_id = '${epsilon.id}' order by line_no`)).rows
+    const r2 = { route: "R2", distanceKm: 20, rate: 250 }
+    await as(EMP, () => api.customers.update(epsilon.id, { pricing: { ...epsilon.pricing, routes: [{ route: "R1", distanceKm: 10, rate: 100 }, { route: "R2", distanceKm: 20, rate: 200 }] } }))
+    await as(EMP, () => api.customers.update(epsilon.id, { pricing: { ...epsilon.pricing, routes: [r2] } }))
+    assert.deepEqual(await routeRows(), [{ route: "R2", rate: "250.00" }], "the Employee edits route rates (rows rewritten inside the audited customer edit)")
+    await as(EMP, () => api.customers.update(epsilon.id, { pricing: { ...epsilon.pricing, rate: 1750, routes: [r2] } }))
+    assert.equal(Number((await db.query<{ rate: string }>(`select rate::text from core.customer_pricing where customer_id = '${epsilon.id}'`)).rows[0].rate), 1750, "…and the price")
+    const periods = async (t: string, col: string, id: string) => (await db.query<{ status: string; start: string; end: string | null }>(`select status::text, start_date::text as start, end_date::text as "end" from core.${t} where ${col} = '${id}' order by start_date`)).rows
+    const vE = await veh("TN70PE0012", epsilon.id)
+    for (const [kind, t, col, id] of [["customers", "customer_status_periods", "customer_id", epsilon.id], ["vehicles", "vehicle_status_periods", "vehicle_id", vE.id]] as const) {
+      // History that began before today (records here are created today, when an archive just rewrites the one period).
+      await db.exec(`begin; update core.${t} set start_date = '${day(9)}' where ${col} = '${id}'; insert into audit.events (actor_kind, action, module, record_type, record_id) values ('SYSTEM', 'UPDATED', '${kind === "customers" ? "Customers" : "Vehicles"}', 'Fixture', '${id}'); commit;`)
+      const before = await periods(t, col, id)
+      await (kind === "customers" ? as(EMP, () => api.customers.archive(id)) : as(EMP, () => api.vehicles.archive(id)))
+      assert.equal((await periods(t, col, id)).length, before.length + 1, `${kind}: archived today`)
+      await (kind === "customers" ? as(EMP, () => api.customers.restore(id)) : as(EMP, () => api.vehicles.restore(id)))
+      assert.deepEqual(await periods(t, col, id), before, `${kind}: restored the same day — the Employee's same-day undo removes today's period`)
+    }
+    const assignmentsOf = async (id: string) => (await db.query<{ customer_id: string }>(`select customer_id from core.vehicle_assignments where vehicle_id = '${id}' order by start_date`)).rows.map((r) => r.customer_id)
+    await as(EMP, () => api.vehicles.transfer(vE.id, beta.id, today, ""))
+    assert.deepEqual(await assignmentsOf(vE.id), [epsilon.id, beta.id], "the Employee transfers (an assignment is closed and appended, never deleted)")
+    const sup = await call<IndustrialSupply>(EMP, "industrialSupplies.create", supply(alpha.id, today, 10, 95, [{ tankerId: TA, litres: 10 }]))
+    await call(EMP, "industrialSupplies.update", sup.id, supply(alpha.id, today, 10, 95, [{ tankerId: TB, litres: 6 }, { tankerId: TA, litres: 4 }]), "Split between tankers")
+    await call(EMP, "industrialSupplies.update", sup.id, supply(alpha.id, today, 10, 95, [{ tankerId: TB, litres: 10 }]), "All from tanker B")
+    assert.deepEqual(await allocRows(sup.id), [{ tanker_id: TB, litres: "10.000" }], "the Employee replaces a supply's tankers (allocation rows removed inside the audited supply edit)")
+    const supplyId = sup.id
+
+    // Direct DELETE statements, by each role, on every table whose rows an edit removes. Nothing may change for the
+    // Employee and the AdBlue profiles — with no audit event, with an event that doesn't record the row, or on history.
+    const childTables = ["core.vehicle_assignments", "core.vehicle_status_periods", "core.customer_status_periods", "core.customer_pricing", "core.customer_route_rates", "fuel.industrial_supply_allocations"]
+    const childState = async () => JSON.stringify(await Promise.all(childTables.map(async (t) => (await db.query(`select to_jsonb(x) - 'updated_at' as r from ${t} x order by 1`)).rows)))
+    const evAs = (action: string, module: string, type: string, rid: string, before: unknown) =>
+      `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id, before, after) values ('SESSION', private.current_profile_id(), private.erp_role(), '${action}', '${module}', '${type}', '${rid}', '${JSON.stringify(before)}'::jsonb, '{}'::jsonb);`
+    const attempts = [
+      ...childTables.map((t) => `delete from ${t}`), // a plain delete of everything
+      `delete from core.vehicle_assignments where vehicle_id = '${vE.id}'; ${evAs("UPDATED", "Vehicles", "Vehicle", vE.id, {})}`,
+      `delete from core.customer_pricing where customer_id = '${epsilon.id}'; ${evAs("UPDATED", "Customers", "Customer", epsilon.id, { pricing: epsilon.pricing })}`,
+      `delete from core.customer_route_rates where customer_id = '${epsilon.id}'; ${evAs("UPDATED", "Customers", "Customer", epsilon.id, {})}`, // an event that doesn't record the row
+      `delete from fuel.industrial_supply_allocations where supply_id = '${supplyId}'; ${evAs("UPDATED", "Diesel", "Industrial supply", supplyId, {})}`,
+      // History: an old status period, even with an event that records it — only today's latest period is a same-day undo.
+      `delete from core.vehicle_status_periods where vehicle_id = '${vA.id}'; ${evAs("RESTORED", "Vehicles", "Vehicle", vA.id, { statusHistory: (await periods("vehicle_status_periods", "vehicle_id", vA.id)).map((p) => ({ status: p.status, startDate: p.start })) })}`,
+      // A customer's only period (created today) is never a same-day undo.
+      `delete from core.customer_status_periods where customer_id = '${epsilon.id}'; ${evAs("RESTORED", "Customers", "Customer", epsilon.id, { statusHistory: (await periods("customer_status_periods", "customer_id", epsilon.id)).map((p) => ({ status: p.status, startDate: p.start })) })}`,
+    ]
+    const state0 = await childState()
+    for (const id of [EMP, TATA, ADB])
+      for (const sql of attempts) {
+        await sqlAs(id, sql).catch(() => undefined) // refused by RLS (0 rows), by a grant, or at COMMIT by edit_delete_guard
+        assert.equal(await childState(), state0, `${id.role}: nothing deleted by: ${sql.slice(0, 90)}`)
+      }
+    await assert.rejects(sqlAs(EMP, `delete from core.customer_route_rates where customer_id = '${epsilon.id}'`), /Only the Owner and Dev can delete records|no audit event/, "the Employee is told why")
+    await assert.rejects(sqlAs(EMP, `delete from fuel.industrial_supply_allocations where supply_id = '${supplyId}'; ${evAs("UPDATED", "Diesel", "Industrial supply", supplyId, {})}`), /Only the Owner and Dev can delete records/)
+    // The Owner and Dev may delete each (shown in a rolled-back transaction: the policies let the rows through).
+    for (const id of [OWNER, DEV])
+      for (const t of childTables) assert.ok((await rowsAs(id, `delete from ${t} returning 1`)).length > 0, `${id.role} deletes ${t}`)
+    assert.equal(await childState(), state0)
+    // An Owner's direct delete commits with its audit event (the guard doesn't apply); the Employee's same statement doesn't.
+    await sqlAs(OWNER, `delete from core.customer_route_rates where customer_id = '${epsilon.id}'; ${evAs("UPDATED", "Customers", "Customer", epsilon.id, {})}`)
+    assert.deepEqual(await routeRows(), [], "the Owner deleted the route rate")
   }
 
   /* ---------------------------------------------------------------- 13. the shared database is never reset from the app */
@@ -861,7 +948,7 @@ async function main() {
   const backupRes = await db.exec(backupSql)
   const doc = (backupRes.at(-1)!.rows[0] as { backup: { row_counts: Record<string, number>; tables: Record<string, unknown[] | null> } }).backup
   for (const [t, n] of Object.entries(doc.row_counts)) assert.equal((doc.tables[t] ?? []).length, n, `backup complete: ${t}`)
-  assert.ok(doc.row_counts["fuel.diesel_entries"] >= 5 && doc.row_counts["billing.invoices"] === 2 && doc.row_counts["core.customers"] === 5) // Minda, TEPL, Alpha, Beta, Gamma (12d)
+  assert.ok(doc.row_counts["fuel.diesel_entries"] >= 5 && doc.row_counts["billing.invoices"] === 2 && doc.row_counts["core.customers"] === 6) // Minda, TEPL, Alpha, Beta, Gamma (12d), Epsilon (12e)
   const count = async (t: string) => Number(((await db.query<{ n: number }>(`select count(*)::int as n from ${t}`)).rows[0]).n)
   const before = { profiles: await count("public.profiles"), identities: await count("auth.identities"), users: await count("auth.users"), events: await count("audit.events"), reviews: await count("audit.reviews") }
   const resetSql = readFileSync(new URL("03-reset-business-data.sql", scripts), "utf8")

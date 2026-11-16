@@ -24,6 +24,7 @@ const METHODS: Record<string, Shape> = {
   "monthLocks.list": "as-is",
   "tankers.list": "as-is",
   "adbluePurchases.list": "as-is",
+  "adblueVendors.list": "as-is", // the AdBlue vendor master (they pick existing vendors; they never add or change one)
   "adblueStock.list": "as-is", // every draw (date, litres)
   "adblueTotals.get": "as-is", // company-wide totals by month: the AdBlue page's figures
   // AdBlue is company-wide for both profiles (owner, 12 Nov 2026): every customer's AdBlue entries, and the registration
@@ -50,9 +51,9 @@ const METHODS: Record<string, Shape> = {
   "audit.editedIds": "empty",
   "audit.unreviewedDeletions": "zero", // a count
   // Writes: AdBlue entries (customer scope checked in the API and by RLS) and bulk purchases into the shared stock.
+  // No delete (owner, 16 Nov 2026: only the Owner and Dev delete records — refused here, in can() and in private.can).
   "adblue.create": "as-is",
   "adblue.update": "as-is",
-  "adblue.remove": "as-is",
   "adbluePurchases.create": "as-is",
 }
 

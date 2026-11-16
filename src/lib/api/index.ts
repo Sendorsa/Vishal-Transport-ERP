@@ -12,7 +12,7 @@ import { allocationProblem, industrialAmount, industrialProblem, sortedAllocatio
 import { odometerConflict } from "@/domain/diesel"
 import { dayBefore, statusOn, withStatus } from "@/domain/status-history"
 import { canEditMonth } from "@/domain/month-lock"
-import { adBlueTotals, insufficientMessage, isDirectAdBlue, stockDraws, valueInventory } from "@/domain/adblue-inventory"
+import { adBlueTotals, isDirectAdBlue, NO_VENDOR_LABEL, adBlueShortfallMessage, stockDraws, valueInventory } from "@/domain/adblue-inventory"
 import { availabilityMessage, fillAmount, fitsTanker, isStockPool, isTankerFill, normReg, shortfallMessage, tankerAvailability, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/station-ledger"
 import { currentActor, currentRole, customerScope } from "@/lib/identity"
@@ -22,7 +22,7 @@ import { addMonths, format, parseISO } from "date-fns"
 import { assignmentIndex, assignmentOn, correctedPeriods, handedOverBy, inferAssignments, isCalendarDate, movedRecords, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type AttributedRecords, type MovedRecord, type StartDateProblem } from "@/domain/assignments"
 import { formatDate, formatINR, formatNumber, round2, todayISO, formatLitres } from "@/lib/format"
 import { appendAuditEvent, appendAuditReviews, readAuditEvents, readAuditReviews, readCollection, readSettings, runInTransaction, writeCollection, writeSettings } from "@/lib/storage/local-store"
-import type { AdBlueEntry, AdBluePurchase, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, IndustrialSupply, Invoice, NewEntity, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
+import type { AdBlueEntry, AdBluePurchase, AdBlueVendor, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, IndustrialSupply, Invoice, NewEntity, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
 import { ensureSeeded, exportBackup, loadDemoData, loadEmptyWorkspace, parseBackup, restoreBackup, type BackupFile } from "./bootstrap"
 import { createLocalRepository, latency, newId, NotFoundError } from "./repository"
 import { ConflictError, pendingVersions, runWithVersions } from "@/lib/versions"
@@ -62,6 +62,7 @@ const assignments = createLocalRepository("vehicle_assignments", "vas") // /api/
 const monthLocks = createLocalRepository("month_locks", "mlk") // /api/month-locks
 const fuelStations = createLocalRepository("fuel_stations", "dv") // /api/fuel-stations
 const adbluePurchases = createLocalRepository("adblue_purchases", "adp") // /api/adblue-purchases
+const adblueVendors = createLocalRepository("adblue_vendors", "adv") // /api/adblue-vendors
 const tankerLoads = createLocalRepository("tanker_loads", "tkl") // /api/tanker-loads
 const tankerDispenses = createLocalRepository("tanker_dispenses", "tkd") // /api/tanker-dispenses
 const tankers = createLocalRepository("tankers", "tnk") // /api/tankers
@@ -165,7 +166,16 @@ function checkExternal(input: TankerDispenseInput, existing?: TankerDispense) {
   return { ...input, vehicleNo: input.vehicleNo.trim().toUpperCase(), notes: input.notes.trim() }
 }
 
-export type AdBluePurchaseInput = Pick<AdBluePurchase, "date" | "vendorName" | "product" | "buckets" | "litresPerBucket" | "pricePerBucket" | "invoiceNo" | "notes">
+/** The vendor: `adblueVendorId` (the picker), or — older callers — an existing vendor's name (a new name creates the vendor when the role may). */
+export type AdBluePurchaseInput = Pick<AdBluePurchase, "date" | "product" | "buckets" | "litresPerBucket" | "pricePerBucket" | "invoiceNo" | "notes"> & { adblueVendorId?: string | null; vendorName?: string }
+
+export interface AdBlueVendorInput {
+  name: string
+  defaultRate: number | null
+  contactPerson?: string
+  phone?: string
+  notes?: string
+}
 
 /* ------------------------------------------------------------------ Vehicle assignments */
 
@@ -420,9 +430,13 @@ function checkAdBlue(input: AdBlueInput, id?: string): NewEntity<AdBlueEntry> {
   if (next && !(input.closingKm < next.closingKm)) throw new Error("Closing odometer must be less than the next AdBlue entry's odometer.")
   if (!(input.quantityLitres > 0)) throw new Error("AdBlue quantity must be greater than 0")
   if (input.date > todayISO()) throw new Error("An AdBlue entry can't be dated in the future.")
+  const view = { ...input }
+  delete view.sourceVendor // read-only view fields, never stored
+  delete view.costRate
+  delete view.beforeVendorTracking // set by the API only: false on create, kept as stored on edit
   if (!isDirectAdBlue(input)) {
-    // A stock draw has no vendor, rate or payment of its own.
-    const draw = { ...input, source: "STOCK" as const, vendorId: "", amount: 0 }
+    // A stock draw takes its vendor's stock (FIFO); it has no rate or payment of its own.
+    const draw = { ...view, source: "STOCK" as const, vendorId: "", amount: 0, adblueVendorId: input.adblueVendorId || null }
     delete draw.vendorName
     delete draw.rate
     delete draw.paymentMode
@@ -431,7 +445,70 @@ function checkAdBlue(input: AdBlueInput, id?: string): NewEntity<AdBlueEntry> {
   // Direct vendor purchase: its own vendor and rate; never enters or leaves bulk stock.
   if (!input.vendorName?.trim()) throw new Error("Enter the vendor the AdBlue was bought from")
   if (!(Number(input.rate) > 0)) throw new Error("Enter the rate per litre")
-  return { ...input, source: "DIRECT", vendorName: input.vendorName.trim(), rate: round2(Number(input.rate)), vendorId: "", amount: round2(input.quantityLitres * Number(input.rate)) }
+  return { ...view, source: "DIRECT", vendorName: input.vendorName.trim(), rate: round2(Number(input.rate)), vendorId: "", amount: round2(input.quantityLitres * Number(input.rate)), adblueVendorId: input.adblueVendorId || null }
+}
+
+/* ------------------------------------------------------------------ AdBlue vendors (owner, 16 Nov 2026) */
+
+const vendorKeyOf = (name: string) => name.trim().replace(/\s+/g, " ").toLowerCase()
+const findVendorByName = (name: string) => readCollection("adblue_vendors").find((v) => vendorKeyOf(v.name) === vendorKeyOf(name))
+const vendorName = (id: string | null | undefined) => (id ? (readCollection("adblue_vendors").find((v) => v.id === id)?.name ?? "Unknown vendor") : NO_VENDOR_LABEL)
+const OLD_DRAW_LABEL = "No vendor (before vendor tracking)"
+
+/** The vendor master: the Owner, Dev and Employee. The AdBlue profiles pick existing vendors only (no master data). */
+function assertVendorAdmin(action: "create" | "edit") {
+  assertCan("adblue", action)
+  if (!hasOwnerAuthority(currentRole())) throw new PermissionError("Your role can't change the AdBlue vendor list. Ask the Owner to add the vendor.")
+}
+
+/** Name unique (spaces / case ignored, archived vendors included); default rate optional, > 0, 4 decimals. */
+function checkVendor(input: AdBlueVendorInput, id?: string) {
+  const name = input.name.trim().replace(/\s+/g, " ")
+  if (!name) throw new Error("Enter the vendor name")
+  const rate = input.defaultRate === null || input.defaultRate === undefined || (input.defaultRate as unknown) === "" ? null : Number(input.defaultRate)
+  if (rate !== null && !(rate > 0)) throw new Error("The default rate per litre must be greater than 0")
+  const dup = readCollection("adblue_vendors").find((v) => v.id !== id && vendorKeyOf(v.name) === vendorKeyOf(name))
+  if (dup) throw new Error(`${dup.name} already exists${dup.status === "ARCHIVED" ? " (archived) — restore it instead" : ""}.`)
+  return { name, defaultRate: rate === null ? null : Number(rate.toFixed(4)), contactPerson: input.contactPerson?.trim() ?? "", phone: input.phone?.trim() ?? "", notes: input.notes?.trim() ?? "" }
+}
+
+async function createVendor(input: AdBlueVendorInput) {
+  assertVendorAdmin("create")
+  const after = await adblueVendors.create({ ...checkVendor(input), status: "ACTIVE" })
+  audit({ action: "CREATED", ...meta.adblueVendor(after), after })
+  return after
+}
+
+/**
+ * The vendor of a purchase or direct purchase: the picked id, or an existing vendor's name; an unknown name creates the
+ * vendor when the role may (Owner, Dev, Employee). `required: false` (direct purchases by the AdBlue profiles): an
+ * unknown name stays as text only, as before vendor tracking. An archived vendor takes no new purchase.
+ */
+async function resolveVendor(input: { adblueVendorId?: string | null; vendorName?: string }, keep: string | null | undefined, required = true): Promise<AdBlueVendor | null> {
+  let v = input.adblueVendorId ? readCollection("adblue_vendors").find((x) => x.id === input.adblueVendorId) : input.vendorName?.trim() ? findVendorByName(input.vendorName) : undefined
+  if (input.adblueVendorId && !v) throw new NotFoundError("AdBlue vendor", input.adblueVendorId)
+  if (!v) {
+    if (!input.vendorName?.trim()) throw new Error("Choose the vendor")
+    if (!required && !hasOwnerAuthority(currentRole())) return null
+    v = await createVendor({ name: input.vendorName, defaultRate: null })
+  }
+  if (v.status === "ARCHIVED" && v.id !== keep) throw new Error(`${v.name} is archived. Restore the vendor to buy from it.`)
+  return v
+}
+
+/**
+ * A stock draw names the vendor whose stock it takes; without one it takes unattributed stock only (opening stock, stock
+ * whose vendor is unknown) — assertStock refuses it when that doesn't cover it. A draw recorded before vendor tracking
+ * may keep no vendor as it was (`beforeVendorTracking`, never from the request).
+ */
+function assertDrawVendor(input: AdBlueInput) {
+  if (!isDirectAdBlue(input) && input.adblueVendorId && !readCollection("adblue_vendors").some((v) => v.id === input.adblueVendorId)) throw new NotFoundError("AdBlue vendor", input.adblueVendorId)
+}
+
+/** A direct purchase's vendor from the master (by id or name); the name is saved as it was then. */
+async function directVendor(input: AdBlueInput, before?: AdBlueEntry) {
+  const v = await resolveVendor(input, before?.adblueVendorId, false)
+  return v ? { adblueVendorId: v.id, vendorName: before?.adblueVendorId === v.id && before.vendorName ? before.vendorName : v.name } : { adblueVendorId: null }
 }
 
 /* ------------------------------------------------------------------ Diesel tanker */
@@ -534,26 +611,35 @@ function checkTransfer(input: TankerTransferInput) {
  * Stock may never go below zero at any point in time. `entries` / `purchases` are the would-be
  * state after a change; throws "Insufficient AdBlue inventory. Available stock: 5L".
  */
-function assertStock(purchases: AdBluePurchase[], entries: Pick<AdBlueEntry, "id" | "date" | "createdAt" | "quantityLitres" | "source">[]) {
+function assertStock(purchases: AdBluePurchase[], entries: Pick<AdBlueEntry, "id" | "date" | "createdAt" | "quantityLitres" | "source" | "adblueVendorId" | "beforeVendorTracking">[]) {
   const v = valueInventory(purchases, stockDraws(entries))
-  if (v.shortfall) throw new Error(insufficientMessage(v.shortfall.available))
+  if (v.shortfall) throw new Error(adBlueShortfallMessage(v.shortfall, vendorName))
 }
 
-/** Vehicle AdBlue entries with `amount` = cost at the inventory's weighted-average rate (direct purchases keep their own litres × rate). */
+/**
+ * Vehicle AdBlue entries with `amount` = FIFO cost from their vendor's batches (direct purchases keep their own
+ * litres × rate), and the view fields `sourceVendor` / `costRate` (never stored).
+ */
 function valued<E extends AdBlueEntry>(list: E[]): E[] {
   const { costOf } = valueInventory(readCollection("adblue_purchases"), stockDraws(readCollection("adblue_entries")))
-  return list.map((e) => (isDirectAdBlue(e) ? e : { ...e, amount: costOf.get(e.id) ?? 0 }))
+  return list.map((e) => {
+    if (isDirectAdBlue(e)) return { ...e, sourceVendor: e.vendorName ?? "", costRate: e.rate ?? null }
+    const amount = costOf.get(e.id) ?? 0
+    const source = e.adblueVendorId ? vendorName(e.adblueVendorId) : e.beforeVendorTracking ? OLD_DRAW_LABEL : NO_VENDOR_LABEL
+    return { ...e, amount, sourceVendor: source, costRate: e.quantityLitres ? round2(amount / e.quantityLitres) : null }
+  })
 }
 
-function purchaseTotals(input: AdBluePurchaseInput) {
-  if (!input.vendorName.trim()) throw new Error("Enter the vendor name")
+/** A purchase's totals; its vendor (resolved first) gives the batch its vendor and the name it is saved under. */
+function purchaseTotals(input: AdBluePurchaseInput, vendor: AdBlueVendor, before?: AdBluePurchase) {
   if (!(input.buckets > 0)) throw new Error("Number of buckets must be greater than 0")
   if (!(input.litresPerBucket > 0)) throw new Error("Litres per bucket must be greater than 0")
   if (!(input.pricePerBucket >= 0)) throw new Error("Price per bucket can't be negative")
   if (input.date > todayISO()) throw new Error("A purchase can't be dated in the future.")
   return {
     ...input,
-    vendorName: input.vendorName.trim(),
+    adblueVendorId: vendor.id,
+    vendorName: before?.adblueVendorId === vendor.id ? before.vendorName : vendor.name, // a renamed vendor never rewrites past purchases
     product: input.product.trim(),
     totalLitres: round2(input.buckets * input.litresPerBucket),
     totalCost: round2(input.buckets * input.pricePerBucket),
@@ -613,7 +699,8 @@ const L = formatLitres
 /** Module, record type and description of each kind of record, as the Owner reads them. */
 const meta = {
   diesel: (e: DieselEntry) => ({ module: "Diesel", recordType: isTankerFill(e) ? "Diesel entry (from tanker)" : "Diesel entry", recordId: e.id, label: `${regNo(e.vehicleId)} · ${formatDate(e.date)} · ${L(e.litres)}`, recordDate: e.date }),
-  adblue: (e: AdBlueEntry) => ({ module: "AdBlue", recordType: "AdBlue entry", recordId: e.id, label: `${regNo(e.vehicleId)} · ${formatDate(e.date)} · ${L(e.quantityLitres)}${isDirectAdBlue(e) ? ` · direct from ${e.vendorName}` : ""}`, recordDate: e.date }),
+  adblue: (e: AdBlueEntry) => ({ module: "AdBlue", recordType: "AdBlue entry", recordId: e.id, label: `${regNo(e.vehicleId)} · ${formatDate(e.date)} · ${L(e.quantityLitres)}${isDirectAdBlue(e) ? ` · direct from ${e.vendorName}` : e.adblueVendorId ? ` · from ${vendorName(e.adblueVendorId)} stock` : ""}`, recordDate: e.date }),
+  adblueVendor: (v: AdBlueVendor) => ({ module: "AdBlue", recordType: "AdBlue vendor", recordId: v.id, label: v.name, recordDate: null }),
   adbluePurchase: (p: AdBluePurchase) => ({ module: "AdBlue", recordType: "AdBlue purchase", recordId: p.id, label: `${p.opening ? "Opening stock" : p.vendorName} · ${formatDate(p.date)} · ${L(p.totalLitres)}`, recordDate: p.date }),
   load: (l: TankerLoad) => ({ module: "Diesel Tanker", recordType: "Tanker load", recordId: l.id, label: `${tankerName(tankerOf(l))} · ${l.opening ? "Opening stock" : stationName(l.stationId)} · ${formatDate(l.date)} · ${L(l.litres)} loaded`, recordDate: l.date }),
   dispense: (d: TankerDispense) => ({ module: "Diesel Tanker", recordType: "Tanker dispense (external vehicle)", recordId: d.id, label: `${tankerName(tankerOf(d))} · ${d.vehicleNo} · ${formatDate(d.date)} · ${L(d.litres)}`, recordDate: d.date }),
@@ -644,6 +731,7 @@ const RECORD_COLLECTION: Record<string, Parameters<typeof readCollection>[0]> = 
   "Diesel entry (from tanker)": "diesel_entries",
   "AdBlue entry": "adblue_entries",
   "AdBlue purchase": "adblue_purchases",
+  "AdBlue vendor": "adblue_vendors",
   "Tanker load": "tanker_loads",
   "Tanker dispense (external vehicle)": "tanker_dispenses",
   Tanker: "tankers",
@@ -773,6 +861,15 @@ async function updateStation(id: string, patch: Partial<NewEntity<FuelStation>>)
   const before = await fuelStations.get(id)
   const after = await fuelStations.update(id, patch)
   audit({ action: statusAction(before, after), ...meta.station(after), before, after })
+  return after
+}
+
+async function setVendorStatus(id: string, status: AdBlueVendor["status"]) {
+  assertVendorAdmin("edit")
+  const before = await adblueVendors.get(id)
+  if (!before) throw new NotFoundError("AdBlue vendor", id)
+  const after = await adblueVendors.update(id, { status })
+  audit({ action: statusAction(before, after), ...meta.adblueVendor(after), before, after })
   return after
 }
 
@@ -919,6 +1016,11 @@ function planRestore(eventId: string): RestorePlan {
       assertOpen(a.vehicleId, a.customerId, a.date)
       const direct = isDirectAdBlue(a)
       Object.assign(r, { amount: direct ? round2(a.quantityLitres * (a.rate ?? 0)) : 0, vendorId: "" })
+      delete r.sourceVendor // view fields of the snapshot, never stored
+      delete r.costRate
+      if (r.beforeVendorTracking === undefined) r.beforeVendorTracking = true // a snapshot older than vendor tracking (every later one carries the flag)
+      if (!direct) for (const k of ["vendorName", "rate", "paymentMode"]) delete r[k]
+      if (a.adblueVendorId && !readCollection("adblue_vendors").some((v) => v.id === a.adblueVendorId)) throw new Error("Its AdBlue vendor no longer exists, so it can't be restored.")
       const { prev, next } = adBlueNeighbours(readCollection("adblue_entries"), a.vehicleId, a.date)
       if ((prev && !(a.closingKm > prev.closingKm)) || (next && !(a.closingKm < next.closingKm)))
         throw new Error(`Its odometer (${formatNumber(a.closingKm)} km) no longer fits between ${regNo(a.vehicleId)}'s other AdBlue entries, so it can't be restored.`)
@@ -935,6 +1037,7 @@ function planRestore(eventId: string): RestorePlan {
     case "adblue_purchases": {
       const p = r as unknown as AdBluePurchase
       if (p.opening && readCollection("adblue_purchases").some((x) => x.opening)) throw new Error("AdBlue opening stock is already recorded.")
+      if (p.adblueVendorId && !readCollection("adblue_vendors").some((v) => v.id === p.adblueVendorId)) throw new Error("Its AdBlue vendor no longer exists, so it can't be restored.")
       return {
         key,
         record: r,
@@ -1531,8 +1634,11 @@ export const api = {
         input = { ...input, customerId: assignedCustomer(input.vehicleId, input.date, input.customerId) }
         assertCustomerScope(input.customerId)
         assertOpen(input.vehicleId, input.customerId, input.date)
-        const entry = checkAdBlue(input)
-        assertStock(readCollection("adblue_purchases"), [...readCollection("adblue_entries"), { ...entry, id: "new", createdAt: new Date().toISOString() }]) // direct purchases are left out of the stock check
+        assertDrawVendor(input)
+        if (isDirectAdBlue(input)) input = { ...input, ...(await directVendor(input)) }
+        const entry = { ...checkAdBlue(input), beforeVendorTracking: false }
+        const would = [...readCollection("adblue_entries"), { ...entry, id: "new", createdAt: new Date().toISOString() }]
+        assertStock(readCollection("adblue_purchases"), would) // direct purchases are left out of the stock check
         const after = await adblue.create(entry)
         audit({ action: "CREATED", ...meta.adblue(after), after: adblueView(after) })
         return after
@@ -1548,8 +1654,12 @@ export const api = {
         assertMonthEditable(input.date)
         assertSameCustomerOnDate(before.vehicleId, before.customerId, before.date, input.date)
         assertProfileAssignment(before.vehicleId, input.date)
-        const entry = checkAdBlue(input, id)
-        assertStock(readCollection("adblue_purchases"), readCollection("adblue_entries").map((e) => (e.id === id ? { ...e, ...entry } : e)))
+        if (input.adblueVendorId === undefined) input = { ...input, adblueVendorId: before.adblueVendorId ?? null } // not named: the vendor stays
+        assertDrawVendor(input)
+        if (isDirectAdBlue(input)) input = { ...input, ...(await directVendor(input, before)) }
+        const entry = checkAdBlue(input, id) // beforeVendorTracking stays as stored
+        const would = readCollection("adblue_entries").map((e) => (e.id === id ? { ...e, ...entry } : e))
+        assertStock(readCollection("adblue_purchases"), would)
         const beforeView = adblueView(before)
         const after = await adblue.update(id, entry)
         audit({ action: "UPDATED", ...meta.adblue(after), before: beforeView, after: adblueView(after), reason })
@@ -1576,7 +1686,7 @@ export const api = {
    * for Tata Adblue, whose entry lists are limited to its customers.
    */
   adblueStock: {
-    list: async () => stockDraws(await adblue.list()).map((e) => ({ id: e.id, date: e.date, createdAt: e.createdAt, quantityLitres: e.quantityLitres, source: "STOCK" as const })),
+    list: async () => stockDraws(await adblue.list()).map((e) => ({ id: e.id, date: e.date, createdAt: e.createdAt, quantityLitres: e.quantityLitres, source: "STOCK" as const, adblueVendorId: e.adblueVendorId ?? null, beforeVendorTracking: !!e.beforeVendorTracking })),
   },
 
   /**
@@ -1848,6 +1958,32 @@ export const api = {
       }),
   },
 
+  /**
+   * /api/adblue-vendors — the AdBlue vendor master (owner, 16 Nov 2026), for bulk and direct purchases. Never deleted:
+   * archived and restored (an archived vendor takes no new purchase; its stock can still be drawn). Names are unique
+   * (spaces / case ignored). The default rate per litre only pre-fills a purchase. Owner, Dev and Employee; the AdBlue
+   * profiles read the list and pick existing vendors.
+   */
+  adblueVendors: {
+    list: adblueVendors.list,
+    create: (input: AdBlueVendorInput) =>
+      tx(async () => {
+        ensureSeeded()
+        return createVendor(input)
+      }),
+    update: (id: string, input: AdBlueVendorInput) =>
+      tx(async () => {
+        assertVendorAdmin("edit")
+        const before = await adblueVendors.get(id)
+        if (!before) throw new NotFoundError("AdBlue vendor", id)
+        const after = await adblueVendors.update(id, checkVendor(input, id))
+        audit({ action: "UPDATED", ...meta.adblueVendor(after), before, after })
+        return after
+      }),
+    archive: (id: string) => tx(() => setVendorStatus(id, "ARCHIVED")),
+    restore: (id: string) => tx(() => setVendorStatus(id, "ACTIVE")),
+  },
+
   /** AdBlue bulk purchases into inventory. Month lock as for diesel; stock never below zero. */
   adbluePurchases: {
     list: adbluePurchases.list,
@@ -1880,7 +2016,8 @@ export const api = {
         assertCan("adblue", "create")
         ensureSeeded()
         assertMonthEditable(input.date)
-        const after = await adbluePurchases.create(purchaseTotals(input))
+        const vendor = (await resolveVendor(input, null))!
+        const after = await adbluePurchases.create(purchaseTotals(input, vendor))
         audit({ action: "CREATED", ...meta.adbluePurchase(after), after })
         return after
       }),
@@ -1893,7 +2030,7 @@ export const api = {
         if (before.opening) throw new Error("Opening stock can't be edited.")
         assertMonthEditable(before.date)
         assertMonthEditable(input.date)
-        const next = purchaseTotals(input)
+        const next = purchaseTotals(input, (await resolveVendor(input, before.adblueVendorId))!, before)
         assertStock(readCollection("adblue_purchases").map((p) => (p.id === id ? { ...p, ...next } : p)), readCollection("adblue_entries"))
         const after = await adbluePurchases.update(id, next)
         audit({ action: "UPDATED", ...meta.adbluePurchase(after), before, after, reason })

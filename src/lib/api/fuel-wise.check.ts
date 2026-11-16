@@ -76,7 +76,7 @@ async function main() {
   await api.tankerLoads.create({ tankerId: tanker, date: "2026-09-01", stationId: station, litres: 5000, rate: 90, invoiceNo: "", notes: "" })
   const supply = (customerId: string, date: string, litres: number, rate: number) =>
     api.industrialSupplies.create({ customerId, date, litres, rate, purpose: "Generator operation", remarks: "", allocations: [{ tankerId: tanker, litres }] })
-  await api.adbluePurchases.create({ date: "2026-11-01", vendorName: "FW AdBlue", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" })
+  const fwBulk = await api.adbluePurchases.create({ date: "2026-11-01", vendorName: "FW AdBlue", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" })
 
   const D = await customer("FW Diesel"), P = await customer("FW Petrol"), M = await customer("FW Mixed"), E = await customer("FW EV")
   const X = await customer("FW DPE"), I = await customer("FW Industrial"), ALL = await customer("FW All"), Z = await customer("FW Zero")
@@ -97,8 +97,8 @@ async function main() {
   await fill(aE, ALL, "2026-11-06", 22.25, 20)
   await supply(I, "2026-11-03", 200, 95.25)
   await supply(ALL, "2026-11-04", 150.5, 94)
-  await adblue(dD, "2026-11-05", 12, { source: "STOCK" }) // a stock draw: at the weighted-average cost
-  await adblue(aD, "2026-11-06", 10, { source: "STOCK" })
+  await adblue(dD, "2026-11-05", 12, { source: "STOCK", adblueVendorId: fwBulk.adblueVendorId }) // a stock draw: at its batch's FIFO cost
+  await adblue(aD, "2026-11-06", 10, { source: "STOCK", adblueVendorId: fwBulk.adblueVendorId })
   await adblue(aD, "2026-11-07", 8, { source: "DIRECT", vendorName: "FW Vendor", rate: 60, paymentMode: "CASH" }) // a direct purchase: its own amount
 
   const dataset = async () => ({ customers: await api.customers.list(), vehicles: await api.vehicles.list(), drivers: await api.drivers.list(), diesel: await api.diesel.list(), trips: await api.trips.list(), assignments: await api.assignments.list() })

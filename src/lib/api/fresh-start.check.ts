@@ -255,14 +255,20 @@ async function main() {
   assert.deepEqual([abOpen.opening, abOpen.totalLitres, abOpen.totalCost, abOpen.vendorName], [true, 100, 9000, ""])
   await assert.rejects(api.adbluePurchases.createOpening({ date: OCT, litres: 1, value: 1, notes: "" }), /already recorded/)
   await assert.rejects(api.adbluePurchases.update(abOpen.id, { date: OCT, vendorName: "X", product: "", buckets: 1, litresPerBucket: 1, pricePerBucket: 1, invoiceNo: "", notes: "" }), /can't be edited/)
-  // Bulk purchases still add stock and are "AdBlue Purchased"; draws are costed at the weighted average (opening included).
+  // Bulk purchases still add stock and are "AdBlue Purchased"; a draw takes its vendor's batches (FIFO).
   const bulk = await api.adbluePurchases.create({ date: "2026-11-02", vendorName: "Bulk Vendor", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" })
   assert.deepEqual([bulk.totalLitres, bulk.totalCost], [200, 9000])
-  const draw = await api.adblue.create({ date: todayISO(), vehicleId: vehicle.id, customerId: null, closingKm: odo + 10, quantityLitres: 15, invoiceNo: "", notes: "", source: "STOCK" })
+  const draw = await api.adblue.create({ date: todayISO(), vehicleId: vehicle.id, customerId: null, closingKm: odo + 10, quantityLitres: 15, invoiceNo: "", notes: "", source: "STOCK", adblueVendorId: bulk.adblueVendorId })
   let purchases = await api.adbluePurchases.list()
   let draws = stockDraws(await api.adblue.list())
   const v = valueInventory(purchases, draws)
-  assert.deepEqual([v.stockLitres, v.stockValue, v.costOf.get(draw.id)], [285, 17100, 900]) // (9,000 + 9,000) / 300 L = ₹60/L
+  assert.deepEqual([v.stockLitres, v.stockValue, v.costOf.get(draw.id)], [285, 17325, 675]) // FIFO from Bulk Vendor's batch: 15 L × ₹45; the opening stock ("No vendor") is untouched
+  // Opening stock has no vendor (16 Nov 2026): a draw may take it — choosing no vendor — only while it covers the draw.
+  const fromOpening = await api.adblue.create({ date: todayISO(), vehicleId: vehicle.id, customerId: null, closingKm: odo + 20, quantityLitres: 10, invoiceNo: "", notes: "", source: "STOCK", adblueVendorId: null })
+  const opened = (await api.adblue.list()).find((e) => e.id === fromOpening.id)!
+  assert.deepEqual([opened.sourceVendor, opened.amount, opened.costRate], ["Unattributed stock (no vendor)", 900, 90], "10 L of the ₹9,000 / 100 L opening stock")
+  await assert.rejects(api.adblue.create({ date: todayISO(), vehicleId: vehicle.id, customerId: null, closingKm: odo + 30, quantityLitres: 91, invoiceNo: "", notes: "", source: "STOCK", adblueVendorId: null }), /Not enough unattributed AdBlue stock \(no vendor\): 90L/, "90 L of opening stock left: 91 L must name a vendor")
+  await api.adblue.remove(fromOpening.id, "Check cleanup")
   const novBought = purchasedIn(purchases, (p) => p.date.startsWith(NOV))
   assert.deepEqual([novBought.litres, novBought.cost], [200, 9000])
   // Opening stock is stock, never a purchase.

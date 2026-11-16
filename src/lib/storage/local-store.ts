@@ -34,6 +34,7 @@ const STORAGE_NAME: Record<CollectionKey, string> = {
   month_locks: "monthLocks",
   fuel_stations: "fuelStations",
   adblue_purchases: "adBluePurchases",
+  adblue_vendors: "adBlueVendors",
   tanker_loads: "tankerLoads",
   tanker_dispenses: "tankerDispenses",
   tankers: "tankers",
@@ -55,6 +56,7 @@ export const COLLECTION_KEYS: CollectionKey[] = [
   "month_locks",
   "fuel_stations",
   "adblue_purchases",
+  "adblue_vendors",
   "tanker_loads",
   "tanker_dispenses",
   "tankers",
@@ -407,6 +409,7 @@ export function migrateStorage(force = false) {
   stamp("tanker_dispenses", () => true)
   stamp("diesel_entries", isTankerFill)
   ensureConfirmedTankers()
+  linkAdBlueVendors()
   const fills = readCollection("diesel_entries")
   if (fills.some((e) => "fuelType" in e))
     writeCollection(
@@ -449,6 +452,43 @@ function ensureConfirmedTankers() {
   }
   if (!events.length) return
   writeCollection("tankers", next)
+  for (const e of events) appendAuditEvent(e)
+}
+
+/**
+ * AdBlue vendor master (owner, 16 Nov 2026; as migration 20261116000000 on the shared database): one vendor per
+ * distinct purchase vendor name (spaces / case ignored) and every purchase linked to it. Only the link is added — no
+ * litres, amount, date or name changes. Stock draws stay unlinked and are marked `beforeVendorTracking`. SYSTEM events; idempotent.
+ */
+function linkAdBlueVendors() {
+  // Every entry that existed before vendor tracking is marked so (every new one is saved with false): its vendor was
+  // never recorded and is never guessed. Same as the database migration's column default; idempotent.
+  const entries = readCollection("adblue_entries")
+  if (entries.some((e) => e.beforeVendorTracking === undefined)) writeCollection("adblue_entries", entries.map((e) => (e.beforeVendorTracking === undefined ? { ...e, beforeVendorTracking: true } : e)))
+  const purchases = readCollection("adblue_purchases")
+  const todo = purchases.filter((p) => !p.opening && !p.adblueVendorId && p.vendorName?.trim())
+  if (!todo.length) return
+  const key = (n: string) => n.trim().replace(/\s+/g, " ").toLowerCase()
+  const vendors = [...readCollection("adblue_vendors")]
+  const now = new Date().toISOString()
+  const events: AuditEvent[] = []
+  const idOf = (name: string) => {
+    let v = vendors.find((x) => key(x.name) === key(name))
+    if (!v) {
+      v = { id: `adv_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`, name: name.trim().replace(/\s+/g, " "), defaultRate: null, contactPerson: "", phone: "", notes: "", status: "ACTIVE", createdAt: now, updatedAt: now }
+      vendors.push(v)
+      events.push(systemEvent({ action: "CREATED", module: "AdBlue", recordType: "AdBlue vendor", recordId: v.id, label: v.name, after: v, note: "Vendor master created from existing AdBlue purchases (16 Nov 2026)" }, now))
+    }
+    return v.id
+  }
+  const next = purchases.map((p) => {
+    if (!todo.includes(p)) return p
+    const after = { ...p, adblueVendorId: idOf(p.vendorName), updatedAt: now }
+    events.push(systemEvent({ action: "UPDATED", module: "AdBlue", recordType: "AdBlue purchase", recordId: p.id, label: p.vendorName, recordDate: p.date, before: p, after, note: "Linked to its vendor in the AdBlue vendor master; litres, amount and date unchanged" }, now))
+    return after
+  })
+  writeCollection("adblue_vendors", vendors)
+  writeCollection("adblue_purchases", next)
   for (const e of events) appendAuditEvent(e)
 }
 

@@ -46,7 +46,9 @@ async function main() {
   const roles = (await q<{ r: string }>(`select unnest(enum_range(null::public.erp_role))::text as r`)).map((x) => x.r)
   assert.deepEqual(roles, ["OWNER", "DEV", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"] satisfies Role[], "erp_role = Owner / Dev / Employee + the two AdBlue profiles (11 Nov 2026)")
   const perms = await q<{ role: Role; permission: string }>(`select role::text as role, permission from core.role_permissions`)
-  const dbCan = (role: Role, r: string, a: string) => perms.some((p) => p.role === role && ["*", `${r}:*`, `${r}:${a}`].includes(p.permission))
+  // private.can: the rows, Dev-only resources, and delete for the Owner and Dev only (20261116000000, owner 16 Nov 2026).
+  const dbCan = (role: Role, r: string, a: string) =>
+    (!["accounts", "system"].includes(r) || role === "DEV") && (a !== "delete" || role === "OWNER" || role === "DEV") && perms.some((p) => p.role === role && ["*", `${r}:*`, `${r}:${a}`].includes(p.permission))
   for (const role of roles as Role[]) for (const r of RESOURCES) for (const a of ["view", "create", "edit", "delete", "finance"] as Action[])
     assert.equal(dbCan(role, r, a), can(role, r, a), `role_permissions = can(): ${role} ${r}:${a}`)
 
@@ -174,7 +176,13 @@ async function main() {
   await refused(db.exec(`update fuel.tanker_loads set litres = 150 where id = 'tkl_open'`), /Opening stock can't be edited/, "…not even by the server role")
 
   /* ---------------------------------------------------------------- AdBlue */
-  await tx(EMP, `insert into fuel.adblue_purchases (id, date, vendor_name, buckets, litres_per_bucket, price_per_bucket) values ('adp_1', '${today}', 'Om Sai', 10, 20, 900); ${ev("CREATED", "AdBlue", "AdBlue purchase", "adp_1")}`)
+  // The vendor master (16 Nov 2026): Owner / Dev / Employee add vendors; names unique (spaces / case ignored); never deleted.
+  await tx(EMP, `insert into fuel.adblue_vendors (id, name, default_rate) values ('adv_om', 'Om Sai', 45); ${ev("CREATED", "AdBlue", "AdBlue vendor", "adv_om")}`)
+  await refused(tx(OWNER, `insert into fuel.adblue_vendors (name) values ('  om   SAI '); ${ev("CREATED", "AdBlue", "AdBlue vendor", "x")}`), /adblue_vendors_name_key/, "no duplicate vendor")
+  await refused(tx(OWNER, `insert into fuel.adblue_vendors (name) values ('No Event Co')`), /no audit event/, "a vendor change needs its audit event")
+  await refused(tx(OWNER, `delete from fuel.adblue_vendors where id = 'adv_om'`), /permission denied/, "vendors are archived, never deleted")
+  await refused(tx(EMP, `insert into fuel.adblue_purchases (date, vendor_name, buckets, litres_per_bucket, price_per_bucket) values ('${today}', 'Om Sai', 1, 20, 900); ${ev("CREATED", "AdBlue", "AdBlue purchase", "x")}`), /adblue_purchases_vendor_id_check/, "a purchase names its vendor")
+  await tx(EMP, `insert into fuel.adblue_purchases (id, date, vendor_id, vendor_name, buckets, litres_per_bucket, price_per_bucket) values ('adp_1', '${today}', 'adv_om', 'Om Sai', 10, 20, 900); ${ev("CREATED", "AdBlue", "AdBlue purchase", "adp_1")}`)
   assert.deepEqual(await one(`select total_litres::text, total_cost::text from fuel.adblue_purchases where id = 'adp_1'`), { total_litres: "200.000", total_cost: "9000.00" }, "10 × 20 L at ₹900 = 200 L for ₹9,000.00")
   await tx(EMP, `insert into fuel.adblue_entries (id, vehicle_id, date, closing_km, quantity_litres) values ('adb_1', 'veh_bus', '${today}', 1000, 15); ${ev("CREATED", "AdBlue", "AdBlue entry", "adb_1")}`)
   await refused(tx(EMP, `insert into fuel.adblue_entries (vehicle_id, date, closing_km, quantity_litres) values ('veh_bus', '${today}', 1100, 500); ${ev("CREATED", "AdBlue", "AdBlue entry", "x")}`), /Insufficient AdBlue inventory\. Available stock: 185(\.00)?L/, "a draw can't exceed stock")
@@ -183,6 +191,18 @@ async function main() {
   assert.equal((await one<{ s: string }>(`select sum(litres)::text as s from fuel.adblue_stock_movements`)).s, "185.000", "a direct purchase never touches bulk stock")
   await refused(tx(EMP, `insert into fuel.adblue_entries (vehicle_id, date, closing_km, quantity_litres, vendor_name) values ('veh_bus', '${today}', 1100, 5, 'X'); ${ev("CREATED", "AdBlue", "AdBlue entry", "x")}`), /check constraint/, "a stock draw has no vendor")
   await refused(tx(OWNER, `delete from fuel.adblue_purchases where id = 'adp_1'; ${ev("DELETED", "AdBlue", "AdBlue purchase", "adp_1", "Duplicate")}`), /Insufficient AdBlue inventory/, "a purchase whose AdBlue is used can't be deleted")
+  // Per vendor: a draw naming a vendor never takes more than that vendor bought, whatever the company holds.
+  await tx(EMP, `insert into fuel.adblue_vendors (id, name) values ('adv_b', 'Vendor B'); ${ev("CREATED", "AdBlue", "AdBlue vendor", "adv_b")}; insert into fuel.adblue_purchases (id, date, vendor_id, vendor_name, buckets, litres_per_bucket, price_per_bucket) values ('adp_b', '${today}', 'adv_b', 'Vendor B', 1, 10, 480); ${ev("CREATED", "AdBlue", "AdBlue purchase", "adp_b")}`)
+  await refused(tx(EMP, `insert into fuel.adblue_entries (vehicle_id, vendor_id, date, closing_km, quantity_litres) values ('veh_bus', 'adv_b', '${today}', 1100, 20); ${ev("CREATED", "AdBlue", "AdBlue entry", "x")}`), /Insufficient AdBlue inventory\. Available stock: 10(\.00)?L/, "20 L from Vendor B (10 L) is refused although the company holds 195 L")
+  await tx(EMP, `insert into fuel.adblue_entries (id, vehicle_id, vendor_id, date, closing_km, quantity_litres) values ('adb_b', 'veh_bus', 'adv_b', '${today}', 1100, 10); ${ev("CREATED", "AdBlue", "AdBlue entry", "adb_b")}`)
+
+  /* ---------------------------------------------------------------- deleting: the Owner and Dev only (16 Nov 2026) */
+  const canDel = async (who: string, r: string) => (await asUser<{ c: boolean }>(who, `select private.can('${r}', 'delete') as c`))[0].c
+  for (const r of ["diesel", "adblue", "payments", "trips", "customers"]) assert.deepEqual([await canDel(OWNER, r), await canDel(DEV, r), await canDel(EMP, r)], [true, true, false], `private.can('${r}', 'delete'): Owner and Dev only`)
+  assert.equal((await asUser<{ c: boolean }>(EMP, `select private.can('adblue', 'edit') as c`))[0].c, true, "the Employee still edits")
+  await refused(tx(EMP, `delete from fuel.adblue_entries where id = 'adb_b'; ${ev("DELETED", "AdBlue", "AdBlue entry", "adb_b", "Employee attempt")}`), /row-level security/, "RLS: no deletion (or deletion event) by the Employee")
+  assert.ok(await one(`select 1 from fuel.adblue_entries where id = 'adb_b'`), "…and nothing was deleted")
+  await tx(OWNER, `delete from fuel.adblue_entries where id = 'adb_b'; ${ev("DELETED", "AdBlue", "AdBlue entry", "adb_b", "Owner cleanup")}`)
 
   /* ---------------------------------------------------------------- month lock (RLS) */
   const monthOpen = async (who: string, d: string) => (await asUser<{ o: boolean }>(who, `select private.month_open('${d}'::date) as o`))[0].o
@@ -243,7 +263,8 @@ async function main() {
   /* ---------------------------------------------------------------- delete, reason, restore, review */
   await refused(tx(OWNER, `delete from fuel.diesel_entries where id = 'dsl_p1'`), /has no audit event/, "a delete needs its DELETED event")
   await refused(tx(OWNER, `delete from fuel.diesel_entries where id = 'dsl_p1'; ${ev("DELETED", "Diesel", "Diesel entry", "dsl_p1", "  x ")}`), /check constraint/, "…with a reason of at least 3 characters")
-  await tx(EMP, `delete from fuel.diesel_entries where id = 'dsl_p1'; ${ev("DELETED", "Diesel", "Diesel entry", "dsl_p1", "Wrong vehicle")}`) // the Employee deletes, like the Owner
+  await refused(tx(EMP, `delete from fuel.diesel_entries where id = 'dsl_p1'; ${ev("DELETED", "Diesel", "Diesel entry", "dsl_p1", "Wrong vehicle")}`), /row-level security/, "the Employee deletes nothing (16 Nov 2026)")
+  await tx(OWNER, `delete from fuel.diesel_entries where id = 'dsl_p1'; ${ev("DELETED", "Diesel", "Diesel entry", "dsl_p1", "Wrong vehicle")}`)
   const del = (await one<{ id: string }>(`select id from audit.events where action = 'DELETED' and record_id = 'dsl_p1' order by at limit 1`)).id
   const restore = (who: string) => tx(who, `insert into fuel.diesel_entries (id, company_code, date, vehicle_id, station_id, litres, rate, odometer_km, payment_mode) values ('dsl_p1', 'VT', '${today}', 'veh_car', 'dv_raghuveer', 37.64, 94.8, 500, 'CASH'); ${ev("RESTORED", "Diesel", "Diesel entry", "dsl_p1", "Deleted by mistake", del)}`)
   await restore(EMP) // the Employee restores, like the Owner and Dev (owner, 5 Nov 2026)

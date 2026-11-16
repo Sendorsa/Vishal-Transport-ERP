@@ -232,7 +232,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
         </SummaryRow>
         {(vehicle.fuelType === "DIESEL" || ab.entries > 0) && (
           <SummaryRow title="AdBlue">
-            <StatsCard label="Total AdBlue Spending" icon={IndianRupee} value={adblue.data ? formatINR(ab.spend) : "—"} hint={adblue.data ? period : "Not available — couldn't be loaded"} info={`Σ amount of AdBlue entries = ${formatINR(ab.spend)} — stock draws at the weighted-average cost, direct purchases at their own amount; not part of ${fuelName(vehicle.fuelType)}.`} />
+            <StatsCard label="Total AdBlue Spending" icon={IndianRupee} value={adblue.data ? formatINR(ab.spend) : "—"} hint={adblue.data ? period : "Not available — couldn't be loaded"} info={`Σ amount of AdBlue entries = ${formatINR(ab.spend)} — stock draws at the purchase cost of the vendor's batches used (oldest first), direct purchases at their own amount; not part of ${fuelName(vehicle.fuelType)}.`} />
             <StatsCard label="Total AdBlue Litres" icon={Droplets} value={adblue.data ? `${formatNumber(ab.litres, 2)} L` : "—"} hint={`${period} · ${ab.entries} entries`} info={`Σ litres of this vehicle's AdBlue entries in the month = ${formatNumber(ab.litres, 2)} L.`} />
             <StatsCard
               label="AdBlue KM/L"

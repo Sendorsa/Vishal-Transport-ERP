@@ -4,10 +4,18 @@
  * Completely separate from the fuel station ledger (money owed to pumps).
  *
  *   Purchase        Total Litres = Buckets × Litres per Bucket; Total Cost = Buckets × Price per Bucket
- *   Stock           Σ purchased litres − Σ consumed litres (never below 0 at any point in time)
- *   Valuation       moving weighted average: each purchase re-averages the rate; each consumption
- *                   is valued at the rate at that moment (cost = litres × average rate)
- *   Inventory Value stock value after the last event (= Σ purchase cost − Σ consumption cost)
+ *   Batches         every purchase is a batch of its vendor (owner, 16 Nov 2026); opening stock and purchases without
+ *                   a vendor are "No vendor" batches
+ *   Costing         FIFO: a draw naming a vendor takes that vendor's oldest batches first; a draw without a vendor
+ *                   takes unattributed stock ("No vendor": opening stock, and stock whose vendor is unknown) only.
+ *                   Each litre is costed at its batch's rate, so a draw across two batches costs Σ litres × each rate
+ *   Old draws       a draw recorded before vendor tracking (`beforeVendorTracking`, no vendor) never gets a vendor
+ *                   guessed: when only one source held stock at that moment it took that source (the records leave
+ *                   no other possibility); when two or more did, which one it used is unknown, so ALL the stock on
+ *                   hand at that moment becomes unattributed ("moves"), and the draw takes it oldest first. Litres
+ *                   and value are only relabelled, so Σ every vendor + unattributed = company stock, always
+ *   Stock           Σ purchased litres − Σ consumed litres, per vendor and in total (never below 0 at any point in time)
+ *   Inventory Value Σ value left in the batches (= Σ purchase cost − Σ consumption cost)
  *   Monthly ledger  Opening + Purchased − Consumed = Closing; Closing → next month's Opening
  *
  * Event order: date ASC; on the same day purchases come before consumption; then createdAt, id.
@@ -22,6 +30,8 @@ interface Purchase {
   totalLitres: number
   totalCost: number
   vendorName?: string
+  /** The AdBlue vendor master record (null / absent: "No vendor"). */
+  adblueVendorId?: string | null
   /** Opening stock (fresh start): litres and value already on hand — never a purchase. */
   opening?: boolean
 }
@@ -30,7 +40,16 @@ interface Consumption {
   date: string
   createdAt?: string
   quantityLitres: number
+  /** The vendor whose stock the draw takes (null / absent: unattributed stock). */
+  adblueVendorId?: string | null
+  /** Recorded before vendor tracking (16 Nov 2026): its vendor was never recorded and is never guessed. */
+  beforeVendorTracking?: boolean
 }
+
+/** Vendor key of a batch or draw: the vendor id, or "" for none. */
+export const NO_VENDOR = ""
+export const vendorKey = (x: { adblueVendorId?: string | null }) => x.adblueVendorId || NO_VENDOR
+export const NO_VENDOR_LABEL = "Unattributed stock (no vendor)"
 
 type Event = { kind: "IN"; p: Purchase } | { kind: "OUT"; c: Consumption }
 
@@ -40,43 +59,103 @@ const eventOrder = (a: Event, b: Event) => {
   return da.date.localeCompare(db.date) || (a.kind === b.kind ? 0 : a.kind === "IN" ? -1 : 1) || (da.createdAt ?? "").localeCompare(db.createdAt ?? "") || da.id.localeCompare(db.id)
 }
 
+/** A vendor's stock that became unattributed at an old draw (vendor unknown): litres and value, relabelled only. */
+export interface Move {
+  consumptionId: string
+  date: string
+  vendor: string
+  litres: number
+  value: number
+}
+
+/** Litres a draw took from one vendor's batch, and their cost. */
+export interface Take {
+  consumptionId: string
+  date: string
+  vendor: string
+  litres: number
+  cost: number
+}
+
 export interface Valuation {
-  /** Consumption entry id → its cost at the weighted-average rate when it was drawn. */
+  /** Consumption entry id → its FIFO cost. */
   costOf: Map<string, number>
   stockLitres: number
   stockValue: number
-  /** Current weighted-average ₹ per litre (null when stock is 0). */
+  /** Stock value ÷ stock litres (null when stock is 0). */
   avgRate: number | null
-  /** First moment stock would go below zero, if any (for validation). */
-  shortfall: { date: string; available: number; needed: number; consumptionId: string } | null
+  /** Litres and value left per vendor key (NO_VENDOR = ""). */
+  vendorStock: Map<string, { litres: number; value: number }>
+  /** Every batch portion each draw took, in event order. */
+  takes: Take[]
+  /** Vendor stock that became unattributed at old draws, in event order (Σ litres in = Σ litres out: never counted twice). */
+  moves: Move[]
+  /**
+   * First moment stock would go below zero, if any — of the draw's vendor, of unattributed stock (vendor NO_VENDOR) for
+   * a new draw without one while vendors hold stock too, or in total (vendor null: an old draw, or a draw without a
+   * vendor when unattributed stock is all there is).
+   */
+  shortfall: { date: string; available: number; needed: number; consumptionId: string; vendor: string | null } | null
 }
 
-/** Runs every purchase and consumption in order through a moving weighted average. */
+/** Runs every purchase and consumption in order through FIFO batches. */
 export function valueInventory(purchases: Purchase[], consumptions: Consumption[]): Valuation {
   const events: Event[] = [...purchases.map((p) => ({ kind: "IN" as const, p })), ...consumptions.map((c) => ({ kind: "OUT" as const, c }))].sort(eventOrder)
-  let litres = 0
-  let value = 0
+  const lots: { vendor: string; litres: number; value: number }[] = []
   const costOf = new Map<string, number>()
+  const takes: Take[] = []
+  const moves: Move[] = []
   let shortfall: Valuation["shortfall"] = null
   for (const e of events) {
     if (e.kind === "IN") {
-      litres += e.p.totalLitres
-      value += e.p.totalCost
+      lots.push({ vendor: vendorKey(e.p), litres: e.p.totalLitres, value: e.p.totalCost })
       continue
     }
-    const q = e.c.quantityLitres
-    if (q > litres + 1e-9 && !shortfall) shortfall = { date: e.c.date, available: round2(litres), needed: q, consumptionId: e.c.id }
-    const rate = litres > 0 ? value / litres : 0
-    const cost = round2(Math.min(q, litres) * rate)
-    costOf.set(e.c.id, cost)
-    value = litres - q > 1e-9 ? value - cost : 0
-    litres = Math.max(0, litres - q)
+    const want = e.c.adblueVendorId || null
+    const old = want === null && !!e.c.beforeVendorTracking
+    const open = lots.filter((l) => l.litres > 1e-9)
+    // An old draw while two or more sources held stock: its source is unknown, so everything on hand becomes unattributed.
+    if (old && new Set(open.map((l) => l.vendor)).size > 1)
+      for (const l of open.filter((x) => x.vendor !== NO_VENDOR)) {
+        moves.push({ consumptionId: e.c.id, date: e.c.date, vendor: l.vendor, litres: l.litres, value: l.value })
+        l.vendor = NO_VENDOR
+      }
+    // Old draw: whatever is on hand (one source by now). New draw: its vendor's stock, or unattributed stock only.
+    const pool = old ? open : open.filter((l) => l.vendor === (want ?? NO_VENDOR))
+    const available = pool.reduce((t, l) => t + l.litres, 0)
+    if (e.c.quantityLitres > available + 1e-9 && !shortfall) shortfall = { date: e.c.date, available: round2(available), needed: e.c.quantityLitres, consumptionId: e.c.id, vendor: old || (want === null && pool.length === open.length) ? null : (want ?? NO_VENDOR) }
+    let left = e.c.quantityLitres
+    let cost = 0
+    for (const l of pool) {
+      if (left <= 1e-9) break
+      const take = Math.min(left, l.litres)
+      const whole = take >= l.litres - 1e-9
+      const part = whole ? l.value : round2((l.value * take) / l.litres) // the last litres of a batch take what is left of its value
+      l.litres = whole ? 0 : l.litres - take
+      l.value = whole ? 0 : round2(l.value - part)
+      left -= take
+      cost += part
+      takes.push({ consumptionId: e.c.id, date: e.c.date, vendor: l.vendor, litres: take, cost: part })
+    }
+    costOf.set(e.c.id, round2(cost))
   }
-  return { costOf, stockLitres: round2(litres), stockValue: round2(value), avgRate: litres > 0 ? round2(value / litres) : null, shortfall }
+  const vendorStock = new Map<string, { litres: number; value: number }>()
+  for (const l of lots) {
+    const r = vendorStock.get(l.vendor) ?? { litres: 0, value: 0 }
+    vendorStock.set(l.vendor, { litres: round2(r.litres + l.litres), value: round2(r.value + l.value) })
+  }
+  const litres = lots.reduce((t, l) => t + l.litres, 0)
+  const value = lots.reduce((t, l) => t + l.value, 0)
+  return { costOf, stockLitres: round2(litres), stockValue: round2(value), avgRate: litres > 1e-9 ? round2(value / litres) : null, vendorStock, takes, moves, shortfall }
 }
 
 /** "Insufficient AdBlue inventory. Available stock: 5L" */
 export const insufficientMessage = (available: number) => `Insufficient AdBlue inventory. Available stock: ${round2(available)}L`
+/** "Insufficient AdBlue stock from XYZ Chemicals. Available: 5L" — a draw naming a vendor is checked against that vendor's stock. */
+export const insufficientVendorMessage = (vendor: string, available: number) => `Insufficient AdBlue stock from ${vendor}. Available: ${round2(available)}L`
+/** The message for a shortfall: in total, unattributed stock, or a vendor's (`nameOf` gives the vendor's name). */
+export const adBlueShortfallMessage = (s: NonNullable<Valuation["shortfall"]>, nameOf: (id: string) => string) =>
+  s.vendor === null ? insufficientMessage(s.available) : s.vendor === NO_VENDOR ? `Not enough unattributed AdBlue stock (no vendor): ${round2(s.available)}L. Choose the vendor whose stock is used.` : insufficientVendorMessage(nameOf(s.vendor), s.available)
 
 export interface StockRow {
   month: string
@@ -85,18 +164,23 @@ export interface StockRow {
   openingStock: number
   purchased: number
   consumed: number
+  /** A vendor's ledger only: stock that became unattributed at old draws (− from the vendor, + to unattributed stock). */
+  unattributed: number
   closing: number
   /** ₹ bought and ₹ drawn (at weighted-average cost) in the month. */
   purchasedCost: number
   consumedCost: number
 }
 
-/** Month-by-month stock ledger from the first activity through `throughMonth` (default: last activity). */
-export function inventoryLedger(purchases: Purchase[], consumptions: Consumption[], throughMonth?: string): StockRow[] {
-  const { costOf } = valueInventory(purchases, consumptions)
-  const by = new Map<string, { openingStock: number; purchased: number; consumed: number; purchasedCost: number; consumedCost: number }>()
-  const at = (m: string) => by.get(m) ?? (by.set(m, { openingStock: 0, purchased: 0, consumed: 0, purchasedCost: 0, consumedCost: 0 }), by.get(m)!)
-  for (const p of purchases) {
+type In = { date: string; totalLitres: number; totalCost: number; opening?: boolean }
+type Out = { date: string; litres: number; cost: number }
+
+/** Month-by-month stock ledger from the first activity through `throughMonth` (default: last activity). `moved`: signed litres relabelled to / from unattributed stock. */
+function ledgerRows(ins: In[], outs: Out[], throughMonth?: string, moved: { date: string; litres: number }[] = []): StockRow[] {
+  const empty = () => ({ openingStock: 0, purchased: 0, consumed: 0, unattributed: 0, purchasedCost: 0, consumedCost: 0 })
+  const by = new Map<string, ReturnType<typeof empty>>()
+  const at = (m: string) => by.get(m) ?? (by.set(m, empty()), by.get(m)!)
+  for (const p of ins) {
     const r = at(p.date.slice(0, 7))
     if (p.opening) {
       r.openingStock += p.totalLitres
@@ -105,23 +189,41 @@ export function inventoryLedger(purchases: Purchase[], consumptions: Consumption
     r.purchased += p.totalLitres
     r.purchasedCost += p.totalCost
   }
-  for (const c of consumptions) {
+  for (const c of outs) {
     const r = at(c.date.slice(0, 7))
-    r.consumed += c.quantityLitres
-    r.consumedCost += costOf.get(c.id) ?? 0
+    r.consumed += c.litres
+    r.consumedCost += c.cost
   }
+  for (const x of moved) at(x.date.slice(0, 7)).unattributed += x.litres
   const active = [...by.keys()].sort()
   if (!active.length) return []
   const last = throughMonth && throughMonth > active.at(-1)! ? throughMonth : active.at(-1)!
   const rows: StockRow[] = []
   let stock = 0
   for (let m = active[0]; m <= last; m = format(addMonths(parseISO(`${m}-01`), 1), "yyyy-MM")) {
-    const r = by.get(m) ?? { openingStock: 0, purchased: 0, consumed: 0, purchasedCost: 0, consumedCost: 0 }
-    const closing = round2(stock + r.openingStock + r.purchased - r.consumed)
-    rows.push({ month: m, opening: stock, openingStock: round2(r.openingStock), purchased: round2(r.purchased), consumed: round2(r.consumed), closing, purchasedCost: round2(r.purchasedCost), consumedCost: round2(r.consumedCost) })
+    const r = by.get(m) ?? empty()
+    const closing = round2(stock + r.openingStock + r.purchased + r.unattributed - r.consumed)
+    rows.push({ month: m, opening: stock, openingStock: round2(r.openingStock), purchased: round2(r.purchased), consumed: round2(r.consumed), unattributed: round2(r.unattributed), closing, purchasedCost: round2(r.purchasedCost), consumedCost: round2(r.consumedCost) })
     stock = closing
   }
   return rows
+}
+
+/** The company's monthly AdBlue stock ledger. */
+export function inventoryLedger(purchases: Purchase[], consumptions: Consumption[], throughMonth?: string): StockRow[] {
+  const { costOf } = valueInventory(purchases, consumptions)
+  return ledgerRows(purchases, consumptions.map((c) => ({ date: c.date, litres: c.quantityLitres, cost: costOf.get(c.id) ?? 0 })), throughMonth)
+}
+
+/**
+ * One vendor's monthly stock ledger (key: vendor id, or NO_VENDOR = unattributed stock): its batches in, every litre
+ * vehicles drew from them out, and stock that became unattributed at old draws (out of the vendor, into NO_VENDOR) —
+ * the same FIFO run as the company ledger, so Σ every vendor's ledger = the company ledger.
+ */
+export function vendorLedger(purchases: Purchase[], consumptions: Consumption[], vendor: string, throughMonth?: string): StockRow[] {
+  const { takes, moves } = valueInventory(purchases, consumptions)
+  const moved = moves.filter((x) => vendor === NO_VENDOR || x.vendor === vendor).map((x) => ({ date: x.date, litres: vendor === NO_VENDOR ? x.litres : -x.litres }))
+  return ledgerRows(purchases.filter((p) => vendorKey(p) === vendor), takes.filter((t) => t.vendor === vendor), throughMonth, moved)
 }
 
 /** A period (list of yyyy-MM months; omit for all time): opening before it, Σ in/out, closing. */
@@ -134,19 +236,23 @@ export function stockFor(rows: StockRow[], months?: string[]) {
   const openingStock = sum((r) => r.openingStock)
   const purchased = sum((r) => r.purchased)
   const consumed = sum((r) => r.consumed)
-  return { opening, openingStock, purchased, consumed, closing: round2(opening + openingStock + purchased - consumed), purchasedCost: sum((r) => r.purchasedCost), consumedCost: sum((r) => r.consumedCost), carriedFrom: before?.month ?? null }
+  const unattributed = sum((r) => r.unattributed)
+  return { opening, openingStock, purchased, consumed, unattributed, closing: round2(opening + openingStock + purchased + unattributed - consumed), purchasedCost: sum((r) => r.purchasedCost), consumedCost: sum((r) => r.consumedCost), carriedFrom: before?.month ?? null }
 }
 
-/** Per vendor: litres, amount and average ₹ per litre purchased. */
+/** A purchase's vendor: the vendor master id, or its saved name for a purchase not linked to one. */
+const purchaseVendor = (p: Purchase) => p.adblueVendorId || `name:${p.vendorName?.trim().toLowerCase() || "unknown"}`
+
+/** Per vendor (by vendor id, so a rename keeps one row): litres, amount and average ₹ per litre purchased. */
 export function vendorAnalytics(purchases: Purchase[]) {
-  const m = new Map<string, { litres: number; amount: number; purchases: number }>()
+  const m = new Map<string, { vendor: string; litres: number; amount: number; purchases: number }>()
   for (const p of purchases) {
     if (p.opening) continue // opening stock was bought from nobody in the period
-    const k = p.vendorName?.trim() || "Unknown"
-    const r = m.get(k) ?? { litres: 0, amount: 0, purchases: 0 }
-    m.set(k, { litres: r.litres + p.totalLitres, amount: r.amount + p.totalCost, purchases: r.purchases + 1 })
+    const k = purchaseVendor(p)
+    const r = m.get(k) ?? { vendor: "", litres: 0, amount: 0, purchases: 0 }
+    m.set(k, { vendor: r.vendor || p.vendorName?.trim() || "Unknown", litres: r.litres + p.totalLitres, amount: r.amount + p.totalCost, purchases: r.purchases + 1 })
   }
-  return [...m].map(([vendor, r]) => ({ vendor, litres: round2(r.litres), amount: round2(r.amount), purchases: r.purchases, avgRate: r.litres ? round2(r.amount / r.litres) : null }))
+  return [...m.values()].map(({ vendor, ...r }) => ({ vendor, litres: round2(r.litres), amount: round2(r.amount), purchases: r.purchases, avgRate: r.litres ? round2(r.amount / r.litres) : null }))
 }
 
 /**
@@ -157,12 +263,12 @@ export function purchasedIn<P extends Purchase>(purchases: P[], inPeriod: (p: P)
   const list = purchases.filter((p) => !p.opening && inPeriod(p))
   const litres = round2(list.reduce((t, p) => t + p.totalLitres, 0))
   const cost = round2(list.reduce((t, p) => t + p.totalCost, 0))
-  return { litres, cost, purchases: list.length, vendors: new Set(list.map((p) => p.vendorName?.trim() || "Unknown")).size, avgRate: litres ? round2(cost / litres) : null }
+  return { litres, cost, purchases: list.length, vendors: new Set(list.map(purchaseVendor)).size, avgRate: litres ? round2(cost / litres) : null }
 }
 
 /**
  * Uncle's answer 25 — AdBlue reaches a vehicle two ways:
- *   STOCK  (default) bought in bulk into inventory, then drawn by the vehicle (costed at the weighted average)
+ *   STOCK  (default) bought in bulk into inventory, then drawn by the vehicle from one vendor's stock (FIFO cost)
  *   DIRECT bought from a vendor straight into the vehicle: litres × its own rate; never enters or leaves bulk stock
  * A direct purchase is never a bulk purchase and never a draw, so it can't be counted twice.
  */
@@ -189,7 +295,7 @@ export interface AdBlueTotals {
 }
 
 export function adBlueTotals(purchases: Purchase[], entries: (Consumption & { amount: number; source?: "STOCK" | "DIRECT" })[], throughMonth: string): AdBlueTotals {
-  const draws = stockDraws(entries).map(({ id, date, createdAt, quantityLitres }) => ({ id, date, createdAt, quantityLitres }))
+  const draws = stockDraws(entries).map(({ id, date, createdAt, quantityLitres, adblueVendorId, beforeVendorTracking }) => ({ id, date, createdAt, quantityLitres, adblueVendorId, beforeVendorTracking }))
   const stock = (v: Valuation): Stock => ({ stockLitres: v.stockLitres, stockValue: v.stockValue, avgRate: v.avgRate })
   const ledger = inventoryLedger(purchases, draws, throughMonth)
   const upTo = (m: string) => (e: { date: string }) => e.date.slice(0, 7) <= m

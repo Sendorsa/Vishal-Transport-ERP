@@ -189,11 +189,11 @@ async function main() {
     return { stock: valueInventory(p, e).stockLitres, value: valueInventory(p, e).stockValue, consumed: stockFor(led, [month]).consumed, nextOpening: stockFor(led, [nextMonth]).opening }
   }
   const purchase = await api.adbluePurchases.create({ date: today, vendorName: "Restore Check Chemicals", product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" })
-  const draw = await api.adblue.create({ vehicleId: vehicle.id, customerId, date: today, closingKm: odo0 + 2000, quantityLitres: 15, invoiceNo: "", notes: "" })
+  const draw = await api.adblue.create({ vehicleId: vehicle.id, customerId, date: today, closingKm: odo0 + 2000, quantityLitres: 15, invoiceNo: "", notes: "", adblueVendorId: purchase.adblueVendorId })
   const adWith = await ad()
   await api.adblue.remove(draw.id, "Wrong vehicle")
   const delD = await lastDeletion(draw.id)
-  const clash = await api.adblue.create({ vehicleId: vehicle.id, customerId, date: today, closingKm: odo0 + 2000, quantityLitres: 5, invoiceNo: "", notes: "" })
+  const clash = await api.adblue.create({ vehicleId: vehicle.id, customerId, date: today, closingKm: odo0 + 2000, quantityLitres: 5, invoiceNo: "", notes: "", adblueVendorId: purchase.adblueVendorId })
   const cd = await api.audit.checkRestore(delD.id)
   assert.ok(!cd.ok && /no longer fits/.test(cd.reason)) // odometer order would break: blocked
   await api.adblue.remove(clash.id, "Cleanup")

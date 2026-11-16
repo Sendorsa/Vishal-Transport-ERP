@@ -17,7 +17,7 @@ import { scopeDataset, type Dataset } from "@/domain/analytics"
 import { withRuns } from "@/domain/adblue"
 import type { InvoiceDraftInput } from "@/domain/invoicing"
 import type { CollectionKey, Customer, Driver, EntityStatus, NewEntity, Payment, Settings, Vehicle } from "@/lib/types"
-import type { AdBlueInput, AdBluePurchaseInput, IndustrialSupplyInput, TankerAdjustmentInput, TankerInput, TankerLoadInput, TankerTransferInput, TripInput } from "@/lib/api"
+import type { AdBlueInput, AdBluePurchaseInput, AdBlueVendorInput, IndustrialSupplyInput, TankerAdjustmentInput, TankerInput, TankerLoadInput, TankerTransferInput, TripInput } from "@/lib/api"
 
 export const queryKeys = {
   customers: ["customers"] as const,
@@ -30,6 +30,7 @@ export const queryKeys = {
   month_locks: ["month_locks"] as const,
   fuel_stations: ["fuel_stations"] as const,
   adblue_purchases: ["adblue_purchases"] as const,
+  adblue_vendors: ["adblue_vendors"] as const,
   tanker_loads: ["tanker_loads"] as const,
   tanker_dispenses: ["tanker_dispenses"] as const,
   tankers: ["tankers"] as const,
@@ -48,7 +49,7 @@ export const queryKeys = {
  */
 const MODULE_KEYS: Record<string, (keyof typeof queryKeys)[]> = {
   Diesel: ["diesel_entries", "vehicles", "industrial_supplies"],
-  AdBlue: ["adblue_entries", "adblue_purchases"],
+  AdBlue: ["adblue_entries", "adblue_purchases", "adblue_vendors"],
   "Diesel Tanker": ["tankers", "tanker_loads", "tanker_transfers", "tanker_adjustments", "tanker_dispenses", "diesel_entries"],
   "Fuel Stations": ["fuel_stations", "payments"],
   Payments: ["payments", "invoices"],
@@ -80,6 +81,8 @@ export const useAdBlueTotals = () => useQuery({ queryKey: [...queryKeys.adblue_e
 export const useVehicleAssignments = () => useQuery({ queryKey: queryKeys.vehicle_assignments, queryFn: () => api.assignments.list() })
 export const useFuelStations = () => useQuery({ queryKey: queryKeys.fuel_stations, queryFn: () => api.fuelStations.list() })
 // Own key under "payments", so recording any payment refreshes it too.
+/** The AdBlue vendor master (bulk and direct purchases, and the source vendor of a stock draw). */
+export const useAdBlueVendors = () => useQuery({ queryKey: queryKeys.adblue_vendors, queryFn: () => api.adblueVendors.list() })
 export const useAdBluePurchases = () => useQuery({ queryKey: queryKeys.adblue_purchases, queryFn: () => api.adbluePurchases.list() })
 export const useTankerLoads = () => useQuery({ queryKey: queryKeys.tanker_loads, queryFn: () => api.tankerLoads.list() })
 export const useTankerDispenses = () => useQuery({ queryKey: queryKeys.tanker_dispenses, queryFn: () => api.tankerDispenses.list() })
@@ -531,7 +534,33 @@ export function useDeleteTankerAdjustment() {
   return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.tankerAdjustments.remove(id, reason)), onSuccess: () => invalidate("tanker_adjustments", "diesel_entries"), onError })
 }
 
-/** AdBlue bulk purchase (add / edit). Stock and the weighted-average cost of every draw change too. */
+/** Add / edit an AdBlue vendor. */
+export function useSaveAdBlueVendor() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, data, version }: { id?: string; data: AdBlueVendorInput; version?: string }) => v(id, version, () => (id ? api.adblueVendors.update(id, data) : api.adblueVendors.create(data))),
+    onSuccess: () => invalidate("adblue_vendors", "adblue_purchases", "adblue_entries"),
+    onError,
+  })
+}
+
+/** Archive or restore an AdBlue vendor (never deleted). */
+export function useArchiveAdBlueVendor() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, restore, version }: { id: string; restore?: boolean; version?: string }) => v(id, version, () => (restore ? api.adblueVendors.restore(id) : api.adblueVendors.archive(id))),
+    onSuccess: () => invalidate("adblue_vendors"),
+    onError,
+  })
+}
+
+/** Creates an AdBlue vendor from the pickers' inline "Create …" and returns its id. */
+export function useCreateAdBlueVendorByName() {
+  const save = useSaveAdBlueVendor()
+  return async (name: string) => (await save.mutateAsync({ data: { name, defaultRate: null } })).id
+}
+
+/** AdBlue bulk purchase (add / edit). Stock and the FIFO cost of later draws change too. */
 export function useSaveAdBluePurchase() {
   const invalidate = useInvalidate()
   return useMutation({

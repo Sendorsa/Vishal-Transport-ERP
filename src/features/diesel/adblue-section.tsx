@@ -56,7 +56,17 @@ export function AdBlueSection({ vehicle, customer, month, canEdit, canDelete }: 
               { id: "close", header: "Odometer", align: "right", hideOnMobile: true, cell: (e) => formatNumber(e.closingKm) },
               { id: "km", header: "KM Run", align: "right", cell: (e) => (e.kmRun === null ? "—" : formatNumber(e.kmRun)) },
               { id: "qty", header: "AdBlue (L)", align: "right", cell: (e) => formatNumber(e.quantityLitres, 2) },
-              { id: "src", header: "Source", hideOnMobile: true, cell: (e) => (e.source === "DIRECT" ? <span className="text-xs">Direct · {e.vendorName}</span> : <span className="text-xs text-muted-foreground">Bulk stock</span>) },
+              {
+                id: "src",
+                header: "Source Vendor",
+                cell: (e) => (
+                  <span className="flex flex-col text-xs">
+                    <span className={e.source === "DIRECT" || e.adblueVendorId ? "font-medium" : "text-muted-foreground"}>{e.sourceVendor || "—"}</span>
+                    <span className="text-muted-foreground">{e.source === "DIRECT" ? "Direct purchase" : "Bulk stock"}</span>
+                  </span>
+                ),
+              },
+              { id: "rate", header: "Rate / L", align: "right", hideOnMobile: true, cell: (e) => (e.costRate ? formatINR(e.costRate) : "—") },
               { id: "amt", header: "Cost", align: "right", cell: (e) => formatINR(e.amount) },
               { id: "kmpl", header: "KM / L AdBlue", align: "right", cell: (e) => (e.kmRun && e.quantityLitres ? (e.kmRun / e.quantityLitres).toFixed(1) : "—") },
               { id: "cpk", header: "Cost / KM", align: "right", cell: (e) => (e.kmRun ? formatINR((e.amount / e.kmRun)) : "—") },
@@ -79,11 +89,11 @@ export function AdBlueSection({ vehicle, customer, month, canEdit, canDelete }: 
       {deleting && (
         <DeleteDialog
           title="Delete this AdBlue entry?"
-          record={`${vehicle.regNo} · ${formatDate(deleting.date)} · ${formatNumber(deleting.quantityLitres, 2)} L · ${formatINR(deleting.amount)}${deleting.source === "DIRECT" ? ` · direct from ${deleting.vendorName}` : " at average cost"}`}
+          record={`${vehicle.regNo} · ${formatDate(deleting.date)} · ${formatNumber(deleting.quantityLitres, 2)} L · ${formatINR(deleting.amount)}${deleting.source === "DIRECT" ? ` · direct from ${deleting.vendorName}` : ` · from ${deleting.sourceVendor}'s stock`}`}
           impact={
             deleting.source === "DIRECT"
               ? "The vehicle, customer and monthly AdBlue totals are recalculated. Bulk AdBlue stock is not affected. A later entry's KM Run then covers the gap."
-              : "The litres go back into AdBlue inventory, and the vehicle, customer and monthly AdBlue totals, stock ledger and carry-forward are recalculated. A later entry's KM Run then covers the gap."
+              : "The litres go back into that vendor's AdBlue stock, and the vehicle, customer and monthly AdBlue totals, stock ledger and carry-forward are recalculated. A later entry's KM Run then covers the gap."
           }
           pending={del.isPending}
           onConfirm={(reason) => del.mutateAsync({ id: deleting.id, version: deleting.updatedAt, reason })}

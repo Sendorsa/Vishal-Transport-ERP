@@ -150,6 +150,7 @@ export function parseBackup(raw: unknown): BackupFile {
     missing(`industrial supply ${x.id}`, ids.customers, x.customerId)
     for (const a of x.allocations ?? []) missing(`industrial supply ${x.id}`, ids.tankers, a.tankerId)
   }
+  for (const x of [...(c.adblue_purchases ?? []), ...(c.adblue_entries ?? [])]) missing(`AdBlue record ${x.id}`, ids.adblue_vendors, x.adblueVendorId)
   for (const a of c.vehicle_assignments ?? []) {
     missing(`assignment ${a.id}`, ids.vehicles, a.vehicleId)
     missing(`assignment ${a.id}`, ids.customers, a.customerId)

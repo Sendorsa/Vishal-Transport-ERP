@@ -9,7 +9,7 @@ import { checkTanker, setRole, storage } from "./test-browser"
 
 async function main() {
   const { api } = await import("./index")
-  const { can, RESOURCES, DEV_ONLY, ROLES, roleLabel, hasOwnerAuthority, canBypassMonthLock, canSetMonthLock, canChangeAdBluePurchases, isAdBlueProfile } = await import("@/lib/permissions")
+  const { can, RESOURCES, DEV_ONLY, ROLES, roleLabel, hasOwnerAuthority, canBypassMonthLock, canSetMonthLock, canChangeAdBluePurchases, isAdBlueProfile, canDelete } = await import("@/lib/permissions")
   const { currentRole } = await import("@/lib/app-state")
   const { canEditMonth } = await import("@/domain/month-lock")
   const { actorLabel } = await import("@/domain/audit")
@@ -22,8 +22,8 @@ async function main() {
       assert.ok(can("DEV", r, a), `DEV has ${r}:${a}`) // Dev: everything
       // The Owner: every business module, never a Dev-only resource (account / system administration).
       assert.equal(can("OWNER", r, a), !DEV_ONLY.includes(r), `OWNER ${r}:${a}`)
-      // The Employee (owner, 5 Nov 2026): exactly the Owner, except Settings.
-      assert.equal(can("EMPLOYEE", r, a), can("OWNER", r, a) && r !== "settings", `EMPLOYEE ${r}:${a}`)
+      // The Employee (owner, 5 Nov 2026): exactly the Owner, except Settings — and (16 Nov 2026) deleting nothing.
+      assert.equal(can("EMPLOYEE", r, a), can("OWNER", r, a) && r !== "settings" && a !== "delete", `EMPLOYEE ${r}:${a}`)
     }
   assert.deepEqual([...DEV_ONLY], ["accounts", "system"])
   for (const role of ["OWNER", "EMPLOYEE"] as const) for (const r of DEV_ONLY) assert.equal(can(role, r, "view"), false, `${role} never reaches ${r}`)
@@ -37,16 +37,20 @@ async function main() {
   for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) {
     assert.ok(isAdBlueProfile(role))
     for (const r of RESOURCES)
-      for (const a of actions) assert.equal(can(role, r, a), r === "adblue" || (r === "diesel" && a === "view"), `${role} ${r}:${a}`)
+      for (const a of actions) assert.equal(can(role, r, a), (r === "adblue" && a !== "delete") || (r === "diesel" && a === "view"), `${role} ${r}:${a}`)
     assert.ok(!hasOwnerAuthority(role) && !canSetMonthLock(role) && !canBypassMonthLock(role), `${role}: no Owner-level control`)
     assert.ok(!canChangeAdBluePurchases(role, "edit") && !canChangeAdBluePurchases(role, "delete"), `${role}: adds bulk purchases, never changes them`)
     assert.equal(canEditMonth(role, "2020-01", todayISO(), []), false, `${role} follows the month lock`)
   }
   for (const role of ["OWNER", "DEV", "EMPLOYEE"] as const) {
     assert.ok(!isAdBlueProfile(role))
-    assert.ok(canChangeAdBluePurchases(role, "edit") && canChangeAdBluePurchases(role, "delete"), `${role} still edits / deletes AdBlue purchases`)
-    for (const a of actions) assert.equal(can(role, "adblue", a), true, `${role} keeps AdBlue (adblue:${a})`)
+    assert.ok(canChangeAdBluePurchases(role, "edit"), `${role} still edits AdBlue purchases`)
+    assert.equal(canChangeAdBluePurchases(role, "delete"), role !== "EMPLOYEE", `${role}: deleting an AdBlue purchase is Owner / Dev only`)
+    for (const a of actions) assert.equal(can(role, "adblue", a), role !== "EMPLOYEE" || a !== "delete", `${role} keeps AdBlue (adblue:${a})`)
   }
+  // Deleting any record (owner, 16 Nov 2026): the Owner and Dev only, every resource, whatever the map grants.
+  for (const role of ROLES.map((x) => x.value)) for (const r of RESOURCES) if (can(role, r, "delete")) assert.ok(role === "OWNER" || role === "DEV", `${role} can't delete ${r}`)
+  assert.deepEqual(ROLES.map((x) => x.value).filter(canDelete), ["OWNER", "DEV"])
   assert.equal(roleLabel("DEV"), "Dev")
   assert.equal(roleLabel("ACCOUNTANT"), "Accountant (former role)")
   // A browser still holding a removed role acts as an Employee — never the unknown-role fallback to Owner.
@@ -197,7 +201,25 @@ async function main() {
     assert.equal((await api.fuelStations.setOpeningBalance(pump.id, { amount: 500, date: today })).openingBalance, 500)
     const empPay = await api.fuelStationPayments.create({ stationId: pump.id, paymentDate: today, amount: 250, paymentMode: "CASH", notes: "", companyCode: "VT" })
     await api.fuelStationPayments.update(empPay.id, { paymentDate: today, amount: 300, paymentMode: "CASH", notes: "" })
+    // Deleting (owner, 16 Nov 2026): the Owner and Dev only — refused to the Employee before anything is checked or saved.
+    await assert.rejects(api.fuelStationPayments.remove(empPay.id, "Employee correction"), /can't delete payment records/)
+    assert.ok((await api.fuelStationPayments.list()).some((x) => x.id === empPay.id), "the Employee's refused delete removed nothing")
+    // Every delete path of the API, for every role (a straight API call, the UI bypassed): only the Owner and Dev pass the
+    // permission check. Archive / restore are not deletes and stay with the Employee (above: customers.archive / restore).
+    const removers = Object.entries(api).filter(([, g]) => typeof (g as { remove?: unknown }).remove === "function").map(([ns]) => ns)
+    assert.ok(removers.length >= 11, `every delete path found (${removers.join(", ")})`)
+    for (const role of ["EMPLOYEE", "TATA_ADBLUE", "ADBLUE", "OWNER", "DEV"] as const) {
+      setRole(role)
+      for (const ns of removers) {
+        const remove = (api as unknown as Record<string, { remove: (id: string, reason: string) => Promise<unknown> }>)[ns].remove
+        const outcome = await remove("rec_does_not_exist", "Delete permission check").then(() => "ok", (e: Error) => e.message)
+        if (role === "OWNER" || role === "DEV") assert.ok(!/can't delete/.test(outcome), `${role}: ${ns}.remove passes the delete permission (${outcome})`)
+        else assert.match(outcome, /can't delete/, `${role}: ${ns}.remove refused`)
+      }
+    }
+    setRole("OWNER")
     await api.fuelStationPayments.remove(empPay.id, "Employee correction")
+    setRole("EMPLOYEE")
     // Month lock / unlock — refused in the API (owner, 11 Nov 2026); the lock state stays readable.
     const locksBefore = await api.monthLocks.list()
     await assert.rejects(api.monthLocks.set(month, "LOCKED"), /Only the Owner or Dev can lock or unlock a month/)
@@ -212,7 +234,7 @@ async function main() {
     await assert.rejects(api.admin.exportBackup(), refused)
     await assert.rejects(api.admin.setupTankerMasters(), refused)
     setRole("OWNER")
-    assert.deepEqual((await api.audit.history(empPay.id)).map((e) => [e.action, e.actor.role]), [["PAYMENT_RECORDED", "EMPLOYEE"], ["UPDATED", "EMPLOYEE"], ["DELETED", "EMPLOYEE"]])
+    assert.deepEqual((await api.audit.history(empPay.id)).map((e) => [e.action, e.actor.role]), [["PAYMENT_RECORDED", "EMPLOYEE"], ["UPDATED", "EMPLOYEE"], ["DELETED", "OWNER"]])
   }
 
   /* ---------------------------------------------------------------- 9b. The AdBlue profiles: every write but AdBlue refused in the API */
@@ -221,7 +243,9 @@ async function main() {
     const cust = (await api.customers.list())[0]
     const pump = (await api.fuelStations.list()).find((x) => x.id !== "dv_tanker")!
     const ab = (await api.adblue.list()).find((e) => e.date.startsWith(month))
-    const draw = { vehicleId: vehicle.id, customerId: vehicle.assignedCustomerId, date: today, closingKm: 9_999_999, quantityLitres: 1, invoiceNo: "", notes: "Profile check", source: "STOCK" as const }
+    setRole("OWNER")
+    const profileVendor = await api.adblueVendors.create({ name: "Profile Check Chemicals", defaultRate: 45 }) // the profiles pick existing vendors only
+    const draw = { vehicleId: vehicle.id, customerId: vehicle.assignedCustomerId, date: today, closingKm: 9_999_999, quantityLitres: 1, invoiceNo: "", notes: "Profile check", source: "STOCK" as const, adblueVendorId: profileVendor.id }
     const bulk = { date: today, vendorName: "Profile Check Chemicals", product: "AdBlue", buckets: 1, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" }
     const tk = await checkTanker()
     for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) {
@@ -259,17 +283,24 @@ async function main() {
       await assert.rejects(api.audit.list(), refused)
       await assert.rejects(api.adbluePurchases.createOpening({ date: today, litres: 1, value: 1, notes: "" }), refused)
       // Bulk purchases into the shared stock: added, never edited or deleted.
+      await assert.rejects(api.adblueVendors.create({ name: "Profile Vendor", defaultRate: null }), /can't change the AdBlue vendor list/)
+      await assert.rejects(api.adbluePurchases.create({ ...bulk, vendorName: "Unknown Profile Vendor" }), /can't change the AdBlue vendor list/, `${role}: an unknown vendor isn't created by a bulk purchase`)
       const p = await api.adbluePurchases.create(bulk)
+      assert.equal(p.adblueVendorId, profileVendor.id, `${role}: the purchase is that vendor's stock`)
       await assert.rejects(api.adbluePurchases.update(p.id, { ...bulk, buckets: 2 }), /can't edit AdBlue purchases/)
-      await assert.rejects(api.adbluePurchases.remove(p.id, "Profile check"), /can't delete AdBlue purchases/)
+      await assert.rejects(api.adbluePurchases.remove(p.id, "Profile check"), /can't delete AdBlue/)
       if (role === "TATA_ADBLUE") {
         // In the browser there are no grants (they live in the shared database): customer-wise entries fail closed.
         await assert.rejects(api.adblue.create(draw), /can't add or change AdBlue entries for this customer/)
-        if (ab) await assert.rejects(api.adblue.remove(ab.id, "Profile check"), /for this customer/)
+        if (ab) await assert.rejects(api.adblue.remove(ab.id, "Profile check"), /can't delete AdBlue records/)
       } else {
         const e = await api.adblue.create(draw)
         await api.adblue.update(e.id, { ...draw, quantityLitres: 2 }, "Profile check")
+        // Only the Owner and Dev delete (owner, 16 Nov 2026): the profile's own entry included.
+        await assert.rejects(api.adblue.remove(e.id, "Profile check"), /can't delete AdBlue records/)
+        setRole("OWNER")
         await api.adblue.remove(e.id, "Profile check cleanup")
+        setRole(role)
       }
       setRole("OWNER")
       await api.adbluePurchases.remove(p.id, "Profile check cleanup") // the Owner still can
@@ -285,7 +316,7 @@ async function main() {
   // (On the shared database the method list refuses them first, and RLS again: check:erp-db 12d.)
   {
     const { isReadMethod } = await import("./reads")
-    const allowed = ["adblue.create", "adblue.update", "adblue.remove", "adbluePurchases.create"]
+    const allowed = ["adblue.create", "adblue.update", "adbluePurchases.create"] // adblue.remove: Owner and Dev only (16 Nov 2026)
     // Writes whose permission depends on the input: the inputs the UI's combined flows use.
     const args: Record<string, unknown[]> = {
       "payments.create": [{ direction: "OUT", vehicleId: (await api.vehicles.list())[0].id, allocations: [] }],
@@ -349,8 +380,8 @@ async function main() {
     // AdBlue for the totals (the demo data has none): a bulk purchase, a stock draw and a direct vendor purchase.
     const abVehicle = (await api.vehicles.list()).find((v) => v.status === "ACTIVE" && v.assignedCustomerId)!
     const abEntry = { vehicleId: abVehicle.id, customerId: abVehicle.assignedCustomerId, date: todayISO(), invoiceNo: "", notes: "" }
-    await api.adbluePurchases.create({ date: todayISO(), vendorName: "Preview Check Chemicals", product: "AdBlue", buckets: 2, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" })
-    await api.adblue.create({ ...abEntry, closingKm: 9_999_990, quantityLitres: 3, source: "STOCK" })
+    const previewBulk = await api.adbluePurchases.create({ date: todayISO(), vendorName: "Preview Check Chemicals", product: "AdBlue", buckets: 2, litresPerBucket: 20, pricePerBucket: 900, invoiceNo: "", notes: "" })
+    await api.adblue.create({ ...abEntry, closingKm: 9_999_990, quantityLitres: 3, source: "STOCK", adblueVendorId: previewBulk.adblueVendorId })
     await api.adblue.create({ ...abEntry, closingKm: 9_999_995, quantityLitres: 2, source: "DIRECT", vendorName: "Preview Check Vendor", rate: 100, paymentMode: "CASH" })
     for (const r of ["OWNER", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"] as const) {
       setPreviewRole(r)
@@ -486,7 +517,8 @@ async function main() {
       assert.deepEqual(await (uiApi[m] as { list: () => Promise<unknown> }).list(), [], `Tata Adblue (browser backend, no grants): no ${m}`)
     assert.ok(all.adblue.length > 0, "the store has AdBlue entries")
     assert.deepEqual([await uiApi.adblue.list(), await uiApi.adblueStock.list(), await uiApi.adblueTotals.get()], [all.adblue, await api.adblueStock.list(), all.totals], "Tata Adblue: every AdBlue entry, draw and total (company-wide to view)")
-    await assert.rejects(uiApi.adblue.remove(all.adblue[0].id, "Not mine"), /for this customer/, "…but it changes none of them without a grant")
+    await assert.rejects(uiApi.adblue.remove(all.adblue[0].id, "Not mine"), /can't open this|can't delete/, "…but it changes none of them (and deletes nothing)")
+    await assert.rejects(uiApi.adblue.update(all.adblue[0].id, all.adblue[0], "Not mine"), /for this customer/, "…without a grant")
     for (const read of [() => uiApi.audit.list(), () => uiApi.diesel.get(all.diesel[0].id)]) await assert.rejects(read(), /can't open this/, "Tata Adblue: off-list reads refused")
     await assert.rejects(uiApi.customers.create({ name: "Sneaky Co" } as never), /can't open this/, "…and off-list writes")
     setVerifiedSession({ role: "ADBLUE", email: "adblue@example.com" })

@@ -26,7 +26,7 @@ export type Transact = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>
 /** localStorage key of each collection (as src/lib/storage/local-store.ts names them). */
 const KEY: Record<CollectionKey, string> = {
   customers: "vt:customers", vehicles: "vt:vehicles", drivers: "vt:drivers", trips: "vt:trips", diesel_entries: "vt:fuelEntries", adblue_entries: "vt:adBlueEntries",
-  vehicle_assignments: "vt:vehicleAssignments", month_locks: "vt:monthLocks", fuel_stations: "vt:fuelStations", adblue_purchases: "vt:adBluePurchases", tanker_loads: "vt:tankerLoads",
+  vehicle_assignments: "vt:vehicleAssignments", month_locks: "vt:monthLocks", fuel_stations: "vt:fuelStations", adblue_purchases: "vt:adBluePurchases", adblue_vendors: "vt:adBlueVendors", tanker_loads: "vt:tankerLoads",
   tanker_dispenses: "vt:tankerDispenses", tankers: "vt:tankers", tanker_transfers: "vt:tankerTransfers", tanker_adjustments: "vt:tankerAdjustments", industrial_supplies: "vt:industrialSupplies", invoices: "vt:invoices", payments: "vt:payments",
 }
 const COLLECTION_OF = new Map(Object.entries(KEY).map(([k, v]) => [v, k as CollectionKey]))
