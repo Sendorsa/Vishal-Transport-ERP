@@ -233,6 +233,7 @@ const FIELD_LABEL: Record<string, string> = {
   endKm: "End km",
   distanceKm: "Distance",
   tdsAmount: "TDS",
+  tdsRate: "TDS %",
 }
 const MONEY = new Set(["amount", "rate", "totalCost", "pricePerBucket", "revenue", "baseAmount", "extraKmAmount", "bataAmount", "tollParking", "subtotal", "cgst", "sgst", "igst", "total", "tdsAmount", "emiAmount", "openingBalance"])
 const LITRES = new Set(["litres", "quantityLitres", "totalLitres", "litresPerBucket"])

@@ -124,7 +124,7 @@ async function main() {
   assert.equal(pre.get(36)!.actual, "1150.000 L")
   assert.equal(pre.get(37)!.actual, "2 · 1 draws", "at most the 4 Nov draw can become unattributed")
   assert.equal(pre.get(16)!.status, "OK", "every table an authenticated session may delete from is the known list")
-  await assert.rejects(postStops(db), /vendor_id/, "the post-apply check can't run before the migration (no vendor columns)")
+  await assert.rejects(postStops(db), /vendor_id|tyre_masters|adblue_vendors/, "the post-apply check can't run before the migrations")
   const before = await fingerprint(db)
   const beforeCounts = await counts(db)
 
@@ -161,10 +161,26 @@ async function main() {
   assert.equal(await counts(db).then((c) => c.split("/").slice(0, 3).join("/")), beforeCounts.split("/").slice(0, 3).join("/"), "no purchase or entry added or removed; litres unchanged")
   assert.notEqual(await fingerprint(db), before)
   assert.deepEqual(await stops(db).then((s) => s.map((x) => x.split(" ")[0])), ["3", "4", "5", "6", "10", "12"], "the preflight now says: applied (two new Owner / Dev delete policies; the six child-row policies replaced)")
-  assert.deepEqual(await postStops(db), [], "post-apply: every table covered — Owner / Dev only, or only inside an audited edit")
+  await assert.rejects(postStops(db), /tyre_masters/, "post-apply: needs the Tyre Data migration too (17 Nov 2026)")
   await assert.rejects(db.exec(migration), /already applied/, "a second run stops")
   await db.exec("rollback").catch(() => undefined)
   assert.equal(Number((await run(db, `select count(*)::text as n from fuel.adblue_vendors`))[0].n), 2, "…and changes nothing")
+
+  // Production today: the AdBlue migration applied; then the Tyre Data migration (20261117000000) — compatible, and it
+  // changes none of the AdBlue migration's objects (functions, view, the six child tables' policies and triggers).
+  const withTyre = await production()
+  await withTyre.exec(migration)
+  const adblueObjects = await fingerprint(withTyre)
+  const tyre = read(MIGRATIONS, "20261117000000_tyre_data.sql")
+  await withTyre.exec(tyre)
+  assert.equal(await fingerprint(withTyre), adblueObjects, "the Tyre Data migration leaves every AdBlue-migration object as it was")
+  assert.deepEqual(await postStops(withTyre), [], "post-apply after the Tyre Data migration: AdBlue rows and Tyre rows all OK; tyre invoices Owner / Dev, tyre lines only inside an audited edit")
+  await assert.rejects(withTyre.exec(tyre), /already applied/, "the Tyre Data migration runs once: a second run stops")
+  await withTyre.exec("rollback").catch(() => undefined)
+  const noAdblue = await production()
+  await assert.rejects(noAdblue.exec(tyre), /20261116000000_adblue_vendors_owner_dev_delete\.sql .* must be applied first/, "…and never before the AdBlue migration")
+  await noAdblue.exec("rollback").catch(() => undefined)
+  assert.equal((await run(noAdblue, `select to_regclass('ops.tyre_invoices')::text as t`))[0].t, null, "a stopped Tyre migration changes nothing")
 
   /* ---------------------------------------------------------------- 5. historical inventory reconciles */
   const load = async () => ({
@@ -245,7 +261,7 @@ async function main() {
   assert.deepEqual((await fingerprint(db)).split("|"), before.split("|"), "functions, view, policies and triggers exactly as before the migration")
   assert.equal((await run(db, `select (select count(*) from fuel.adblue_purchases) || '/' || (select count(*) from fuel.adblue_entries) || '/' || (select count(*) from audit.events) as c`))[0].c, rowsBefore, "every purchase, entry and audit event kept")
   assert.deepEqual(await stops(db), [], "the preflight reports no STOP again")
-  await assert.rejects(postStops(db), /vendor_id|before_vendor_tracking|adblue_vendors/, "…and the post-apply check can't run")
+  await assert.rejects(postStops(db), /vendor_id|before_vendor_tracking|adblue_vendors|tyre_masters/, "…and the post-apply check can't run")
   await assert.rejects(db.exec(`select set_config('vt.confirm_adblue_vendors_rollback', 'dqnoducqiootfvkzskhu', false); ${step2}`), /not installed/, "a second rollback stops")
 
   console.log("AdBlue vendors deploy: reviewed migration, preflight, guards (atomic), migration, historical reconciliation, delete = Owner / Dev in the database, cutover report and rollback: all checks passed")

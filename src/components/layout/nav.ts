@@ -4,6 +4,7 @@ import {
   Container,
   Droplets,
   Bus,
+  CircleDot,
   FileText,
   Fuel,
   LayoutDashboard,
@@ -21,7 +22,7 @@ import type { Role } from "@/lib/types"
  * Sidebar sections, in display order. Add a section here (e.g. a future "Fleet") and tag its items
  * with it — the sidebar renders every section with the same header style.
  */
-export const NAV_GROUPS = ["Overview", "Operations", "Fuel", "Finance", "System"] as const
+export const NAV_GROUPS = ["Overview", "Operations", "Fuel", "Tyre Data", "Finance", "System"] as const
 export type NavGroup = (typeof NAV_GROUPS)[number]
 
 export interface NavItem {
@@ -45,6 +46,8 @@ export const NAV_ITEMS: NavItem[] = [
   { title: "Diesel", href: "/diesel", icon: Fuel, resource: "diesel", group: "Fuel", mobile: true },
   { title: "Diesel Tankers", short: "Tankers", href: "/tanker", icon: Container, resource: "diesel", group: "Fuel" },
   { title: "AdBlue", href: "/adblue", icon: Droplets, resource: "adblue", group: "Fuel" },
+  // Tyre Data (owner, 17 Nov 2026): tyre / repair invoices.
+  { title: "Tyre", href: "/tyre", icon: CircleDot, resource: "tyres", group: "Tyre Data" },
   { title: "Invoices", href: "/invoices", icon: FileText, resource: "invoices", group: "Finance", mobile: true },
   { title: "Payments", href: "/payments", icon: ArrowLeftRight, resource: "payments", group: "Finance" },
   { title: "Reports", href: "/reports", icon: BarChart3, resource: "reports", group: "Finance" },
@@ -55,12 +58,18 @@ export const NAV_ITEMS: NavItem[] = [
 
 /**
  * Sidebar visibility only — not a permission (owner, 4 Nov 2026). Dev sees every item its role can use, unchanged.
- * The Owner and the Employee see only the Fuel section and the Audit Log (Settings and every other section hidden);
+ * The Owner and the Employee see only the Fuel and Tyre Data sections and the Audit Log (Settings and every other
+ * section hidden; Tyre Data added 17 Nov 2026) — plus, for the Owner only, Finance → Payments (owner, 18 Nov 2026);
  * the Audit Log needs the `audit` permission (`navFor`); Settings needs `settings`, which the Employee doesn't have. Hidden modules keep
  * their routes, permissions and API access (src/lib/permissions.ts).
  */
 export const showInNav = (role: Role, item: NavItem) =>
-  isAdBlueProfile(role) ? PROFILE_NAV.includes(item.href) : role === "DEV" || item.group === "Fuel" || item.href === "/audit"
+  isAdBlueProfile(role)
+    ? PROFILE_NAV.includes(item.href)
+    : role === "DEV" || item.group === "Fuel" || item.group === "Tyre Data" || item.href === "/audit" || (role === "OWNER" && OWNER_EXTRA_NAV.includes(item.href))
+
+/** Finance pages the Owner sees in the sidebar besides Fuel / Tyre Data / Audit Log (owner, 18 Nov 2026): Payments only. */
+const OWNER_EXTRA_NAV = ["/payments"]
 
 /** Tata Adblue and Adblue (owner, 11 Nov 2026): AdBlue, then Diesel — nothing else, in the sidebar or on the phone. */
 const PROFILE_NAV = ["/adblue", "/diesel"]

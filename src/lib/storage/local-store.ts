@@ -11,6 +11,7 @@ import { CONFIRMED_TANKERS, DEFAULT_TANKER_ID, isTankerFill, normReg } from "@/d
 import { buildEvent } from "@/domain/audit"
 import { todayISO } from "@/lib/format"
 import { NeedData, requestScope } from "@/lib/request-scope"
+import { defaultRepairTypes } from "@/domain/tyre"
 import type { AuditEvent, AuditReview, CollectionKey, CollectionMap, Settings, Tanker } from "@/lib/types"
 
 export const STORAGE_PREFIX = "vt:"
@@ -41,6 +42,10 @@ const STORAGE_NAME: Record<CollectionKey, string> = {
   tanker_transfers: "tankerTransfers",
   tanker_adjustments: "tankerAdjustments",
   industrial_supplies: "industrialSupplies",
+  tyre_masters: "tyreMasters",
+  tyre_invoices: "tyreInvoices",
+  tyre_payments: "tyrePayments",
+  adblue_payments: "adBluePayments",
   invoices: "invoices",
   payments: "payments",
 }
@@ -63,6 +68,10 @@ export const COLLECTION_KEYS: CollectionKey[] = [
   "tanker_transfers",
   "tanker_adjustments",
   "industrial_supplies",
+  "tyre_masters",
+  "tyre_invoices",
+  "tyre_payments",
+  "adblue_payments",
   "invoices",
   "payments",
 ]
@@ -410,6 +419,7 @@ export function migrateStorage(force = false) {
   stamp("diesel_entries", isTankerFill)
   ensureConfirmedTankers()
   linkAdBlueVendors()
+  ensureTyreRepairTypes()
   const fills = readCollection("diesel_entries")
   if (fills.some((e) => "fuelType" in e))
     writeCollection(
@@ -490,6 +500,22 @@ function linkAdBlueVendors() {
   writeCollection("adblue_vendors", vendors)
   writeCollection("adblue_purchases", next)
   for (const e of events) appendAuditEvent(e)
+}
+
+/**
+ * Tyre Data (owner, 17 Nov 2026): the repair types of the 2026–27 tyre register, once, in a store that has none yet —
+ * as migration 20261117000000 does on the shared database. SYSTEM events; never re-adds a type the user archived.
+ */
+function ensureTyreRepairTypes() {
+  // A brand-new browser has no meta yet: it gets them with the clean workspace (an existing store looking empty is how
+  // ensureSeeded recognises a first visit, so nothing may be written before it).
+  if (!readMeta()) return
+  const masters = readCollection("tyre_masters")
+  if (masters.some((m) => m.kind === "REPAIR_TYPE")) return
+  const now = new Date().toISOString()
+  const added = defaultRepairTypes(now).filter((m) => !masters.some((x) => x.id === m.id))
+  writeCollection("tyre_masters", [...masters, ...added])
+  for (const m of added) appendAuditEvent(systemEvent({ action: "CREATED", module: "Tyre", recordType: "Repair type", recordId: m.id, label: m.name, after: m, note: "Starting repair types from the 2026–27 tyre register (17 Nov 2026)" }, now))
 }
 
 const systemEvent = (input: Parameters<typeof buildEvent>[0], at: string) =>

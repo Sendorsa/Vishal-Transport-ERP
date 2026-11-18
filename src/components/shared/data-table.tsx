@@ -40,6 +40,12 @@ export interface DataTableProps<T> {
    * column stays available under "More details" — nothing is dropped.
    */
   mobileColumns?: string[]
+  /**
+   * Where the row cards give way to the table: "md" (default, every existing table) or "xl" — for a wide table whose
+   * money columns would otherwise sit off-screen on a tablet (Tyre → Monthly Sheet), or "2xl" for one wider still (Tyre →
+   * Payments: its actions would sit off-screen beside the sidebar below 1536 px).
+   */
+  cardsBelow?: "md" | "xl" | "2xl"
 }
 
 const MOBILE_MAIN = 4
@@ -58,6 +64,7 @@ export function DataTable<T>({
   showFooter,
   dense,
   mobileColumns,
+  cardsBelow = "md",
 }: DataTableProps<T>) {
   const router = useRouter()
   const sortId = useId()
@@ -102,8 +109,9 @@ export function DataTable<T>({
   const detailCols = others.filter((c) => !mainCols.includes(c))
   const sortable = columns.filter((c) => c.sortValue)
   const footerCols = showFooter ? columns.filter((c) => c !== titleCol && c !== actionCol && c.footer !== undefined && c.footer !== null && c.footer !== "") : []
+  // lg:grid-cols-4 only ever applies to cardsBelow="xl" / "2xl" (default tables show no cards from md up).
   const pairs = (cols: Column<T>[], row: T) => (
-    <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+    <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 lg:grid-cols-4">
       {cols.map((col) => (
         <div key={col.id} className="min-w-0">
           <dt className="text-[11px] leading-tight text-muted-foreground">{col.header}</dt>
@@ -115,7 +123,7 @@ export function DataTable<T>({
 
   return (
     <div className={cn("overflow-hidden rounded-xl border bg-card", className)}>
-      <div className="md:hidden">
+      <div className={{ md: "md:hidden", xl: "xl:hidden", "2xl": "2xl:hidden" }[cardsBelow]}>
         {sortable.length > 0 && !isLoading && sorted.length > 1 && (
           <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
             <label htmlFor={sortId} className="shrink-0">
@@ -200,7 +208,7 @@ export function DataTable<T>({
         {footerCols.length > 0 && !isLoading && rows.length > 0 && (
           <div className="border-t bg-muted/40 px-3 py-2.5">
             <p className="mb-1.5 text-xs font-semibold">Totals</p>
-            <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+            <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 lg:grid-cols-4">
               {footerCols.map((col) => (
                 <div key={col.id} className="min-w-0">
                   <dt className="text-[11px] leading-tight text-muted-foreground">{col.header}</dt>
@@ -211,7 +219,7 @@ export function DataTable<T>({
           </div>
         )}
       </div>
-      <div className="max-md:hidden">
+      <div className={{ md: "max-md:hidden", xl: "max-xl:hidden", "2xl": "max-2xl:hidden" }[cardsBelow]}>
         <Table>
           <TableHeader>
             <TableRow className="bg-muted/50 hover:bg-muted/50">

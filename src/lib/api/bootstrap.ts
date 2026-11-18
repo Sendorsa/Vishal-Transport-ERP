@@ -16,6 +16,7 @@ import {
 } from "@/lib/storage/local-store"
 import type { CollectionKey, CollectionMap, Settings } from "@/lib/types"
 import { requestScope } from "@/lib/request-scope"
+import { defaultRepairTypes } from "@/domain/tyre"
 import { DEFAULT_SETTINGS, cleanWorkspace, generateSeedData } from "@/lib/storage/seed"
 
 /** Seeds demo data on first use (or after a schema change). Idempotent and synchronous. */
@@ -74,6 +75,7 @@ export function loadEmptyWorkspace() {
   writeCollection("fuel_stations", clean.fuel_stations)
   writeCollection("vehicles", clean.vehicles)
   writeCollection("tankers", clean.tankers)
+  writeCollection("tyre_masters", defaultRepairTypes(new Date().toISOString())) // Tyre Data's starting repair types
   writeMeta({ version: SCHEMA_VERSION, seededAt: new Date().toISOString(), source: "EMPTY" })
 }
 
@@ -151,6 +153,19 @@ export function parseBackup(raw: unknown): BackupFile {
     for (const a of x.allocations ?? []) missing(`industrial supply ${x.id}`, ids.tankers, a.tankerId)
   }
   for (const x of [...(c.adblue_purchases ?? []), ...(c.adblue_entries ?? [])]) missing(`AdBlue record ${x.id}`, ids.adblue_vendors, x.adblueVendorId)
+  for (const x of c.tyre_invoices ?? []) {
+    missing(`tyre invoice ${x.id}`, ids.vehicles, x.vehicleId)
+    missing(`tyre invoice ${x.id}`, ids.customers, x.customerId)
+    for (const m of [x.supplierId, ...(x.items ?? []).flatMap((i) => [i.repairTypeId, i.brandId, i.sizeId])]) missing(`tyre invoice ${x.id}`, ids.tyre_masters, m)
+  }
+  for (const p of c.tyre_payments ?? []) {
+    missing(`tyre payment ${p.id}`, ids.tyre_masters, p.supplierId)
+    for (const a of p.allocations ?? []) missing(`tyre payment ${p.id}`, ids.tyre_invoices, a.invoiceId)
+  }
+  for (const p of c.adblue_payments ?? []) {
+    missing(`AdBlue payment ${p.id}`, ids.adblue_vendors, p.vendorId)
+    for (const a of p.allocations ?? []) missing(`AdBlue payment ${p.id}`, ids.adblue_purchases, a.purchaseId)
+  }
   for (const a of c.vehicle_assignments ?? []) {
     missing(`assignment ${a.id}`, ids.vehicles, a.vehicleId)
     missing(`assignment ${a.id}`, ids.customers, a.customerId)

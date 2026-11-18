@@ -12,6 +12,7 @@ export const RESOURCES = [
   "trips",
   "diesel",
   "adblue", // AdBlue inventory and vehicle AdBlue entries (owner, 11 Nov 2026: its own resource, out of "diesel")
+  "tyres", // Tyre Data → Tyre: tyre / repair invoices and their masters (owner, 17 Nov 2026)
   "invoices",
   "payments",
   "reports",
@@ -92,6 +93,12 @@ export const isAdBlueProfile = (role: Role) => role === "TATA_ADBLUE" || role ==
  * with the `adblue` permission). The AdBlue profiles add purchases but never change them (owner, 11 Nov 2026).
  */
 export const canChangeAdBluePurchases = (role: Role, action: "edit" | "delete") => can(role, "adblue", action) && hasOwnerAuthority(role)
+/**
+ * AdBlue supplier payments (owner, 18 Nov 2026): money owed to and paid to AdBlue vendors — the Owner, Dev and Employee
+ * (view / record / edit), never the AdBlue profiles (they hold adblue:* for stock only); delete: the Owner / Dev (can()).
+ * The database: private.can('adblue', …) and private.is_owner_or_dev().
+ */
+export const canManageAdBluePayments = (role: Role, action: "view" | "create" | "edit" | "delete") => can(role, "adblue", action) && hasOwnerAuthority(role)
 
 /** Removed roles (31 Oct 2026), named only where history shows them: audit events and the audit log's role filter. */
 export const LEGACY_ROLES: { value: LegacyRole; label: string }[] = [

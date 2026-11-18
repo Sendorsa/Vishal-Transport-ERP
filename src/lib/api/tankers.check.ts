@@ -192,6 +192,114 @@ async function main() {
   assert.equal((await ledSep()).tds, Math.ceil(due))
   await assert.rejects(api.fuelStationPayments.update(tds.id, { paymentDate: "2026-09-29", amount: 5, paymentMode: "TDS", notes: "" }), /last day of its month/)
 
+  /* ---------------------------------------------------------------- 9b. "Deduct TDS?" on a station payment (owner, 17 Nov 2026) */
+  {
+    const { tdsSplit, tdsPaymentProblem, stationPaymentHistory } = await import("@/domain/station-ledger")
+    const purchases = async () => [...(await api.diesel.list()), ...loadsAsStationPurchases(await api.tankerLoads.list())]
+    const led = async (m = "2026-10") => ledgerFor(stationLedger(station, await purchases(), await api.payments.list(), "2026-10"), [m])
+    const moneyOut = async () => round2((await api.payments.list()).filter((p) => p.direction === "OUT").reduce((t, p) => t + p.amount, 0))
+    const history = JSON.stringify(await api.payments.list()) // 11. every payment recorded before stays exactly as it was
+    const pay = (amount: number, extra: Record<string, unknown> = {}) => api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-10-01", amount, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-10", ...extra })
+    const step = async (fn: () => Promise<unknown>) => {
+      const [l0, o0] = [await led(), await moneyOut()]
+      const r = await fn()
+      const [l1, o1] = [await led(), await moneyOut()]
+      return { r, settled: round2(l1.paid - l0.paid), tds: round2(l1.tds - l0.tds), vouchers: round2(l1.vouchers - l0.vouchers), closingDown: round2(l0.closing - l1.closing), out: round2(o1 - o0) }
+    }
+
+    // 1. TDS off (absent or null): exactly as before — the whole amount is paid and settled.
+    const off = await step(() => pay(50000))
+    const offP = off.r as Awaited<ReturnType<typeof pay>>
+    assert.deepEqual([offP.amount, offP.tdsAmount, "tdsRate" in offP && offP.tdsRate !== undefined], [50000, 0, false], "TDS off: amount paid, no TDS, no rate")
+    assert.deepEqual([off.settled, off.tds, off.closingDown, off.out], [50000, 0, 50000, 50000])
+    const offNull = await step(() => pay(1234.5, { tdsPercent: null }))
+    assert.deepEqual([offNull.settled, offNull.tds, offNull.out], [1234.5, 0, 1234.5], "tdsPercent null = off")
+
+    // 2. ₹1,00,000 at 0.1%: ₹100 TDS, ₹99,900 paid — the balance falls by the full ₹1,00,000 (9), money out ₹99,900 only (10).
+    const t01 = await step(() => pay(100000, { tdsPercent: 0.1, reference: "SBIN1234567", notes: "October settlement" }))
+    const p01 = t01.r as Awaited<ReturnType<typeof pay>>
+    assert.deepEqual([p01.amount, p01.tdsAmount, p01.tdsRate, p01.reference, p01.mode], [99900, 100, 0.1, "SBIN1234567", "NEFT"], "stored: paid, TDS, %, UTR")
+    assert.deepEqual([t01.settled, t01.vouchers, t01.tds, t01.closingDown, t01.out], [100000, 99900, 100, 100000, 99900], "settled ₹1,00,000 = ₹99,900 paid + ₹100 TDS; cash flow ₹99,900 — TDS never on top")
+    const listed = (await api.fuelStationPayments.list()).find((p) => p.id === p01.id)!
+    assert.deepEqual([listed.amount, listed.paidAmount, listed.tdsAmount, listed.tdsRate, listed.tds], [100000, 99900, 100, 0.1, false], "the station's payment list: total settled, paid, TDS, % — not a TDS entry")
+    const row = stationPaymentHistory(station, await api.payments.list(), await purchases()).find((r) => r.id === p01.id)!
+    assert.deepEqual([row.amount, row.paid, row.tds, row.tdsRate, row.kind, row.utr], [100000, 99900, 100, 0.1, "VOUCHER", "SBIN1234567"], "payment history: one row, total = paid + TDS")
+    // 3. 1%; 4. custom rates; 5. zero; 6. paise and rounding (half away from zero, as the database's round()).
+    assert.deepEqual(tdsSplit(100000, 1), { settled: 100000, tds: 1000, paid: 99000 })
+    const t1 = await step(() => pay(100000, { tdsPercent: 1 }))
+    assert.deepEqual([t1.settled, t1.tds, t1.out], [100000, 1000, 99000])
+    assert.deepEqual(tdsSplit(40000, 2.5), { settled: 40000, tds: 1000, paid: 39000 })
+    assert.deepEqual(tdsSplit(12345.67, 0.075), { settled: 12345.67, tds: 9.26, paid: 12336.41 })
+    const t0 = await step(() => pay(25000, { tdsPercent: 0 }))
+    assert.deepEqual([t0.settled, t0.tds, t0.out, (t0.r as { tdsRate: number }).tdsRate], [25000, 0, 25000, 0], "0%: no TDS, recorded as 0%")
+    assert.deepEqual(tdsSplit(1234.56, 0.1), { settled: 1234.56, tds: 1.23, paid: 1233.33 })
+    assert.deepEqual(tdsSplit(1005, 0.1), { settled: 1005, tds: 1.01, paid: 1003.99 }, "₹1.005 rounds half away from zero")
+    const tDec = await step(() => pay(1234.56, { tdsPercent: 0.1 }))
+    assert.deepEqual([tDec.settled, tDec.tds, tDec.out], [1234.56, 1.23, 1233.33])
+    // 7. negative %; 8. TDS the whole payment or more; no total — refused with nothing saved.
+    const n0 = (await api.payments.list()).length
+    await assert.rejects(pay(1000, { tdsPercent: -0.1 }), /can't be negative/)
+    await assert.rejects(pay(1000, { tdsPercent: 100 }), /whole payment/)
+    await assert.rejects(pay(1000, { tdsPercent: 150 }), /whole payment/)
+    await assert.rejects(pay(0, { tdsPercent: 0.1 }), /greater than zero/)
+    await assert.rejects(pay(1000, { tdsPercent: 0.12345 }), /up to 4 decimals/)
+    await assert.rejects(pay(1000, { tdsPercent: 0.1, paymentMode: "TDS" }), /Choose how the payment was made/)
+    assert.equal((await api.payments.list()).length, n0, "refused: nothing saved")
+    assert.equal(tdsPaymentProblem(0.01, 99), "Nothing would be paid to the station after TDS") // ₹0.0099 TDS rounds to ₹0.01: nothing left
+
+    // Editing: the total and % are recalculated on the server; undefined keeps the %, null removes the TDS.
+    const e1 = await step(() => api.fuelStationPayments.update(p01.id, { paymentDate: "2026-10-01", amount: 100000, paymentMode: "NEFT", notes: "", forMonth: "2026-10", tdsPercent: 1 }, "1% applies"))
+    assert.deepEqual([(e1.r as { amount: number }).amount, (e1.r as { tdsAmount: number }).tdsAmount, e1.settled, e1.tds, e1.out], [99000, 1000, 0, 900, -900], "still ₹1,00,000 settled; ₹900 more TDS, ₹900 less paid")
+    const kept = await api.fuelStationPayments.update(p01.id, { paymentDate: "2026-10-01", amount: 80000, paymentMode: "NEFT", notes: "", forMonth: "2026-10" }, "Part")
+    assert.deepEqual([kept.amount, kept.tdsAmount, kept.tdsRate], [79200, 800, 1], "% kept when not sent")
+    const gone = await api.fuelStationPayments.update(p01.id, { paymentDate: "2026-10-01", amount: 80000, paymentMode: "NEFT", notes: "", forMonth: "2026-10", tdsPercent: null }, "No TDS")
+    assert.deepEqual([gone.amount, gone.tdsAmount, gone.tdsRate ?? null], [80000, 0, null], "TDS removed")
+    const ev = (await api.audit.history(p01.id)).at(-1)!
+    assert.ok(ev.changes.some((c) => c.field === "tdsAmount") && ev.reason === "No TDS", "edits audited with the TDS fields")
+    await assert.rejects(api.fuelStationPayments.update(tds.id, { paymentDate: "2026-09-30", amount: 5, paymentMode: "TDS", notes: "", tdsPercent: 1 }), /TDS entry is TDS already/)
+
+    // No double TDS on the same purchases (owner's decision, 17 Nov 2026): per-payment TDS is the normal method; the
+    // monthly entry stays for adjustments. Either way round, the second kind needs an explicit confirmation — nothing
+    // existing is changed. The purchases = the month paid against.
+    const count = async () => (await api.payments.list()).length
+    const c0 = await count()
+    // a) September already has the monthly TDS entry (section 9): TDS on a payment against September is refused…
+    await assert.rejects(pay(5000, { forMonth: "2026-09", tdsPercent: 0.1 }), /TDS for September 2026 purchases is already recorded as a monthly TDS entry .* tax the same purchases twice/)
+    assert.equal(await count(), c0, "refused: nothing saved, the monthly entry untouched")
+    // …a payment against September without TDS (or at 0%) is unaffected…
+    await pay(5000, { forMonth: "2026-09" })
+    await pay(5000, { forMonth: "2026-09", tdsPercent: 0 })
+    // …and with the confirmation it is saved, as separate TDS.
+    const sepPay = await pay(5000, { forMonth: "2026-09", tdsPercent: 0.1, confirmSeparateTds: true })
+    assert.deepEqual([sepPay.amount, sepPay.tdsAmount], [4995, 5])
+    // Editing a payment onto a month with a monthly entry asks too.
+    await assert.rejects(api.fuelStationPayments.update(p01.id, { paymentDate: "2026-10-01", amount: 80000, paymentMode: "NEFT", notes: "", forMonth: "2026-09", tdsPercent: 0.1 }, "Moved"), /already recorded as a monthly TDS entry/)
+    assert.equal((await api.payments.list()).find((x) => x.id === tds.id)!.tdsAmount, Math.ceil(due), "the monthly entry is never changed by any of this")
+    // b) The other way: TDS deducted on payments against a month → a monthly entry for that month needs the confirmation.
+    const other = (await api.fuelStations.list()).find((x) => x.id !== station && !x.isTanker && x.status === "ACTIVE")!
+    const deducted = await api.fuelStationPayments.create({ stationId: other.id, paymentDate: "2026-09-15", amount: 10000, paymentMode: "UPI", notes: "", companyCode: "VT", forMonth: "2026-09", tdsPercent: 0.1 })
+    const c1 = await count()
+    await assert.rejects(api.fuelStationPayments.recordTds({ stationId: other.id, month: "2026-09", amount: 5, companyCode: "VT", notes: "" }), new RegExp(`₹10.00 of TDS was already deducted on 1 payment against September 2026 purchases \\(${deducted.paymentNo}\\)`))
+    assert.equal(await count(), c1, "refused: nothing saved")
+    const sepTds = await api.fuelStationPayments.recordTds({ stationId: other.id, month: "2026-09", amount: 5, companyCode: "VT", notes: "Separate adjustment", confirmSeparateTds: true })
+    assert.equal(sepTds.mode, "TDS", "confirmed: recorded as the month's TDS entry")
+    assert.equal((await api.payments.list()).find((x) => x.id === deducted.id)!.tdsAmount, 10, "the payment's TDS is untouched")
+    // A month with neither: a monthly entry needs no confirmation (historical adjustments as before).
+    const quiet = await api.fuelStationPayments.recordTds({ stationId: other.id, month: "2026-08", amount: 3, companyCode: "VT", notes: "" })
+    assert.equal(quiet.forMonth, "2026-08")
+    // Month lock as before: the Employee can't record a TDS-deducted payment dated in a locked month.
+    setRole("EMPLOYEE")
+    await assert.rejects(api.fuelStationPayments.create({ stationId: station, paymentDate: "2026-09-20", amount: 1000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: "2026-09", tdsPercent: 0.1 }), /September 2026 is locked/)
+    setRole("OWNER")
+
+    // 11. Historical payments unchanged (same records, same fields).
+    // (The browser store keeps records as columns: a field new to the collection reads back as null on older rows.)
+    const same = (p: Record<string, unknown>) => Object.fromEntries(Object.entries(p).filter(([k, x]) => !(k === "tdsRate" && x == null)))
+    const now = await api.payments.list()
+    assert.deepEqual(JSON.parse(history).map((p: { id: string }) => same(now.find((x) => x.id === p.id) as never)), JSON.parse(history), "every earlier payment is exactly as it was")
+    assert.ok(now.filter((x) => JSON.parse(history).some((p: { id: string }) => p.id === x.id)).every((x) => x.tdsRate == null), "…none of them has a TDS %")
+  }
+
   /* ---------------------------------------------------------------- 10. Migration: single-tanker data gets one default tanker, nothing lost */
   {
     const { readCollection, writeCollection, migrateStorage } = await import("@/lib/storage/local-store")
@@ -283,7 +391,7 @@ async function main() {
   assert.ok(storage.getItem("vt:tankers"))
   void la
   void lb
-  console.log("tankers, tanker costing, AdBlue direct purchases and fuel TDS: all checks passed")
+  console.log("tankers, tanker costing, AdBlue direct purchases, fuel TDS and TDS deducted on station payments (off / 0.1% / 1% / custom / 0% / paise / invalid / edit / ledger settles the full total / never counted twice / history unchanged): all checks passed")
 }
 
 main().catch((e) => {

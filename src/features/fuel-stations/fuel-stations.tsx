@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
+import { Checkbox } from "@/components/ui/checkbox"
 import { DataTable } from "@/components/shared/data-table"
 import { EditedBadge, HistoryButton, ReasonField } from "@/components/shared/audit"
 import { FormModal } from "@/components/shared/form-modal"
@@ -21,14 +23,14 @@ import { monthLabel } from "@/domain/diesel"
 import { stationCard, stationSummary, stationTransactions, type StationKind, type StationTxn } from "@/domain/fuel-stations"
 import { QUARTERS, inQuarter } from "@/domain/quarters"
 import { QuarterComparison } from "@/components/shared/quarter-comparison"
-import { balanceType, ledgerFor, openingOf, stationPaymentHistory, stationLedger, tdsDate, tdsDue } from "@/domain/station-ledger"
+import { balanceType, FUEL_TDS_PERCENT, isStationPayment, ledgerFor, tdsTakenOn, openingOf, stationPaymentHistory, stationLedger, tdsDate, tdsDue, tdsPaymentProblem, tdsSplit } from "@/domain/station-ledger"
 import { cn } from "@/lib/utils"
 import { format, parseISO } from "date-fns"
 import { useAddFuelStationPayment, useDeleteFuelStationPayment, useUpdateFuelStationPayment, useArchiveFuelStation, useCreateFuelStation, useFuelStations, useMonthLocks, useRecordStationTds, useSetStationOpeningBalance, useTankerLoads, useUpdateFuelStation } from "@/lib/api/hooks"
 import { useCan, useRole } from "@/lib/app-state"
 import { canEditMonth } from "@/domain/month-lock"
 import { DeleteDialog, RowActions, monthLockedReason } from "@/components/shared/row-actions"
-import { formatINR, formatDate, formatNumber, monthKey, previousMonthEnd, todayISO } from "@/lib/format"
+import { formatINR, formatDate, formatNumber, monthKey, previousMonthEnd, round2, todayISO } from "@/lib/format"
 import type { CompanyCode, FuelStation, Payment, PaymentMode } from "@/lib/types"
 import { useDieselIndex } from "../diesel/parts"
 import { isTankerLoadId, loadsAsStationPurchases } from "@/domain/tanker"
@@ -122,6 +124,7 @@ export function FuelStations() {
   const tot = {
     purchased: ledgers.reduce((t, x) => t + x.l.purchased, 0),
     paid: ledgers.reduce((t, x) => t + x.l.paid, 0),
+    tds: ledgers.reduce((t, x) => t + x.l.tds, 0),
     outstanding: ledgers.reduce((t, x) => t + Math.max(0, x.l.closing), 0),
     credit: ledgers.reduce((t, x) => t + Math.max(0, -x.l.closing), 0),
   }
@@ -156,7 +159,7 @@ export function FuelStations() {
         <h2 className="mb-2 text-sm font-semibold">Fuel station ledger · {period.label}</h2>
         <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-4">
           <StatsCard label="Fuel Purchased" icon={Fuel} value={formatINR(tot.purchased)} hint={`${period.label} · fuel fills, credit & cash`} info="Σ every fuel fill at all stations in the period (credit and cash) — equals their transaction history. AdBlue is stock (AdBlue Inventory), not a station purchase." />
-          <StatsCard label="Payments Made" icon={IndianRupee} value={formatINR(tot.paid)} hint={`${period.label} · vouchers + manual cash + cash at pump`} info="Σ voucher payments + manual cash payments to the stations + cash fills paid at the pump, in the period." />
+          <StatsCard label="Payments Made" icon={IndianRupee} value={formatINR(tot.paid)} hint={`${period.label} · vouchers + manual cash + cash at pump${tot.tds ? ` + ${formatINR(round2(tot.tds))} TDS` : ""}`} info={`Σ voucher payments + manual cash payments to the stations + cash fills paid at the pump + TDS deducted, in the period — the total settled. Paid by bank / cash ${formatINR(round2(tot.paid - tot.tds))}; TDS deducted ${formatINR(round2(tot.tds))} (withheld, not paid to the stations).`} />
           <StatsCard label="Outstanding Balance" icon={Sigma} value={<span className="text-red-600 dark:text-red-400">{formatINR(tot.outstanding)}</span>} hint="We owe — Σ debit closing balances" info="Σ closing balances that are Debit (Opening + Purchased − Paid > 0)." />
           <StatsCard label="Credit Balance" icon={Sigma} value={<span className="text-emerald-600 dark:text-emerald-400">{formatINR(tot.credit)}</span>} hint="Paid in advance — Σ credit closing balances" info="Σ closing balances that are Credit (paid more than purchased so far)." />
         </div>
@@ -261,7 +264,7 @@ export function FuelStations() {
               ),
             },
             { id: "bought", header: "Fuel Purchased", align: "right", cell: (x) => <span className="num">{formatINR(x.l.purchased)}</span>, footer: formatINR(tot.purchased) },
-            { id: "paid", header: "Payments Made", align: "right", cell: (x) => <PaidCell paid={x.l.paid} manual={x.l.manualCash} cash={x.l.cashAtPump} />, footer: formatINR(tot.paid) },
+            { id: "paid", header: "Payments Made", align: "right", cell: (x) => <PaidCell paid={x.l.paid} manual={x.l.manualCash} cash={x.l.cashAtPump} tds={x.l.tds} />, footer: formatINR(tot.paid) },
             { id: "close", header: "Closing Balance", align: "right", cell: (x) => <BalanceBadge amount={x.l.closing} strong /> },
           ]}
         />
@@ -397,7 +400,7 @@ export function FuelStationDetail({ id }: { id: string }) {
   // Payment dialog: {} = add, { payment } = edit; forMonth = the "Paid against" month to suggest.
   const [paying, setPaying] = useState<{ payment?: Payment; forMonth?: string } | null>(null)
   const [deleting, setDeleting] = useState<Payment | null>(null)
-  const [tdsFor, setTdsFor] = useState<{ month: string; due: number } | null>(null)
+  const [tdsFor, setTdsFor] = useState<{ month: string; due: number; onPayments: number } | null>(null)
   const [openingOpen, setOpeningOpen] = useState(false)
   const del = useDeleteFuelStationPayment()
   const [role] = useRole()
@@ -415,6 +418,15 @@ export function FuelStationDetail({ id }: { id: string }) {
   // Payment history for the period: vouchers, manual cash and auto "Cash at Pump" rows — Σ = Payments Made.
   const stationPayments = inEntryOrder(stationPaymentHistory(v.id, data.ds.payments, data.ds.diesel)).filter(period.match)
   const voucherById = new Map(data.ds.payments.map((x) => [x.id, x]))
+  // TDS per month: the month's TDS entry (mode TDS) vs TDS deducted on payments ("Deduct TDS?") — the ledger counts both once.
+  const ownVouchers = data.ds.payments.filter((x) => isStationPayment(x, v.id))
+  const tdsEntryMonths = new Set(ownVouchers.filter((x) => x.mode === "TDS").map((x) => x.date.slice(0, 7)))
+  const tdsOnPayments = (month: string) => round2(ownVouchers.filter((x) => x.mode !== "TDS" && x.tdsAmount > 0 && x.date.startsWith(month)).reduce((t, x) => t + x.tdsAmount, 0))
+  const settledTotals = {
+    settled: round2(stationPayments.reduce((t, x) => t + x.amount, 0)),
+    paid: round2(stationPayments.reduce((t, x) => t + x.paid, 0)),
+    tds: round2(stationPayments.reduce((t, x) => t + x.tds, 0)),
+  }
   const allTxns = data.txnsOf(v.id)
   const txns = allTxns.filter(period.match)
   const s = stationSummary(txns)
@@ -512,13 +524,15 @@ export function FuelStationDetail({ id }: { id: string }) {
               // Uncle's answer 14: 0.1% of the month's Fuel Purchased, dated the month's last day — one per month.
               cell: (r) => {
                 const due = tdsDue(r.purchased)
-                const canRecord = !r.tds && due > 0 && tdsDate(r.month) <= todayISO() && !paymentLock(tdsDate(r.month)) && can("payments", "create") && v.status !== "ARCHIVED"
+                const onPayments = tdsOnPayments(r.month)
+                const canRecord = !tdsEntryMonths.has(r.month) && due > 0 && tdsDate(r.month) <= todayISO() && !paymentLock(tdsDate(r.month)) && can("payments", "create") && v.status !== "ARCHIVED"
                 return (
                   <div className="flex flex-col items-end">
                     <span className="num">{r.tds ? formatINR(r.tds) : "—"}</span>
+                    {onPayments > 0 && <span className="text-xs text-muted-foreground">incl. {formatINR(onPayments)} on payments</span>}
                     <span className="text-xs text-muted-foreground">0.1% = {formatINR(due)}</span>
                     {canRecord && (
-                      <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => setTdsFor({ month: r.month, due })}>
+                      <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => setTdsFor({ month: r.month, due, onPayments: tdsTakenOn(data.ds.payments, v.id, r.month).onPayments })}>
                         Record TDS
                       </Button>
                     )}
@@ -532,7 +546,14 @@ export function FuelStationDetail({ id }: { id: string }) {
       </section>
 
       <section>
-        <h2 className="mb-2 text-sm font-semibold">Payments to {v.name} · {p}</h2>
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+          <h2 className="text-sm font-semibold">Payments to {v.name} · {p}</h2>
+          {settledTotals.tds > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Total settled <span className="num font-medium text-foreground">{formatINR(settledTotals.settled)}</span> = paid by bank / cash <span className="num font-medium text-foreground">{formatINR(settledTotals.paid)}</span> + TDS deducted <span className="num font-medium text-foreground">{formatINR(settledTotals.tds)}</span>
+            </p>
+          )}
+        </div>
         <DataTable
           data={stationPayments}
           getRowId={(x) => x.id}
@@ -551,7 +572,16 @@ export function FuelStationDetail({ id }: { id: string }) {
               ),
             },
             { id: "for", header: "Paid against", cell: (x) => (x.forMonth ? monthLabel(x.forMonth) : <span className="text-muted-foreground">—</span>) },
-            { id: "no", header: "Reference", cell: (x) => <span className="font-mono text-xs text-muted-foreground">{x.reference}</span> },
+            {
+              id: "no",
+              header: "Reference",
+              cell: (x) => (
+                <div className="text-xs">
+                  <span className="font-mono text-muted-foreground">{x.reference}</span>
+                  {x.utr && <div className="break-all text-muted-foreground">UTR {x.utr}</div>}
+                </div>
+              ),
+            },
             {
               id: "type",
               header: "Type",
@@ -566,7 +596,10 @@ export function FuelStationDetail({ id }: { id: string }) {
                 ) : x.kind === "TDS" ? (
                   <StatusBadge status="TDS" label="TDS deducted" tone="gray" />
                 ) : (
-                  <StatusBadge status="NEFT" label={`Voucher · ${x.mode}`} tone="blue" />
+                  <span className="inline-flex flex-wrap gap-1">
+                    <StatusBadge status="NEFT" label={`Voucher · ${x.mode}`} tone="blue" />
+                    {x.tds > 0 && <StatusBadge status="TDS" label={`TDS ${formatNumber(x.tdsRate ?? 0, 4)}%`} tone="gray" />}
+                  </span>
                 ),
             },
             {
@@ -583,7 +616,21 @@ export function FuelStationDetail({ id }: { id: string }) {
                 ),
             },
             { id: "notes", header: "Notes", cell: (x) => <span className="text-muted-foreground">{x.notes || "—"}</span> },
-            { id: "amt", header: "Amount", align: "right", cell: (x) => <span className="num font-medium">{formatINR(x.amount)}</span> },
+            {
+              id: "amt",
+              header: "Amount Settled",
+              align: "right",
+              cell: (x) => (
+                <div className="flex flex-col items-end">
+                  <span className="num font-medium">{formatINR(x.amount)}</span>
+                  {x.kind !== "TDS" && x.tds > 0 && (
+                    <span className="num max-w-32 text-right text-xs whitespace-normal text-muted-foreground">
+                      {formatINR(x.paid)} paid + {formatINR(x.tds)} TDS
+                    </span>
+                  )}
+                </div>
+              ),
+            },
             {
               id: "act",
               header: "",
@@ -645,6 +692,7 @@ export function FuelStationDetail({ id }: { id: string }) {
           initialSort={{ id: "date", desc: true }}
           pageSize={50}
           emptyMessage={`No fuel transactions at this station in ${p.toLowerCase() === "all time" ? "any period" : p}.`}
+          mobileColumns={["veh", "bill", "cust", "kind", "qty"]}
           columns={[
             {
               id: "date",
@@ -657,6 +705,7 @@ export function FuelStationDetail({ id }: { id: string }) {
                 </span>
               ),
             },
+            { id: "bill", header: "Indent / Bill No.", cell: (t) => (t.billNo?.trim() ? <span className="num inline-block max-w-40 [overflow-wrap:anywhere] whitespace-normal">{t.billNo.trim()}</span> : <span className="text-muted-foreground">—</span>) },
             { id: "veh", header: "Vehicle", sortValue: (t) => data.idx.vehicles.get(t.vehicleId)?.regNo ?? "", cell: (t) => <span className="font-medium">{isTankerLoadId(t.id) ? `Diesel Tanker load${data.idx.vehicles.get(t.vehicleId) ? ` · ${data.idx.vehicles.get(t.vehicleId)!.regNo}` : ""}` : (data.idx.vehicles.get(t.vehicleId)?.regNo ?? "Unknown")}</span> },
             { id: "cust", header: "Customer", sortValue: (t) => customers.get(t.customerId ?? "") ?? "", cell: (t) => <span className="text-muted-foreground">{isTankerLoadId(t.id) ? "Tanker stock" : t.customerId ? (customers.get(t.customerId) ?? "Unknown") : "Unallocated"}</span> },
             { id: "kind", header: "Fuel Type", sortValue: (t) => t.kind, cell: (t) => KIND_LABEL[t.kind] },
@@ -667,13 +716,13 @@ export function FuelStationDetail({ id }: { id: string }) {
         />
       </section>
       {openingOpen && <OpeningBalanceDialog station={v} onOpenChange={setOpeningOpen} />}
-      {paying && <PaymentDialog key={paying.payment?.id ?? "new"} station={v} payment={paying.payment} forMonth={paying.forMonth} onOpenChange={(o) => !o && setPaying(null)} />}
-      {tdsFor && <TdsDialog station={v} month={tdsFor.month} due={tdsFor.due} onOpenChange={(o) => !o && setTdsFor(null)} />}
+      {paying && <PaymentDialog key={paying.payment?.id ?? "new"} station={v} payment={paying.payment} forMonth={paying.forMonth} payments={data.ds.payments} onOpenChange={(o) => !o && setPaying(null)} />}
+      {tdsFor && <TdsDialog station={v} month={tdsFor.month} due={tdsFor.due} onPayments={tdsFor.onPayments} onOpenChange={(o) => !o && setTdsFor(null)} />}
       {deleting && (
         <DeleteDialog
           title="Delete this payment?"
           submitLabel="Delete Payment"
-          record={`${deleting.paymentNo} · ${formatINR(deleting.amount + deleting.tdsAmount)} to ${v.name} · ${formatDate(deleting.date)} · ${deleting.mode}`}
+          record={`${deleting.paymentNo} · ${formatINR(round2(deleting.amount + deleting.tdsAmount))} settled with ${v.name}${deleting.amount && deleting.tdsAmount ? ` (${formatINR(deleting.amount)} paid + ${formatINR(deleting.tdsAmount)} TDS)` : ""} · ${formatDate(deleting.date)} · ${deleting.mode}`}
           impact="The station's Payments Made, closing balance and every later month's opening balance go back up by this amount; it also leaves Payments."
           pending={del.isPending}
           onConfirm={async (reason) => {
@@ -736,8 +785,13 @@ function OpeningBalanceDialog({ station, onOpenChange }: { station: FuelStation;
   )
 }
 
-/** Fuel Stations → station → Add Payment. Saved as a “Diesel vendor payment” voucher (also in Payments). */
-function PaymentDialog({ station, payment, forMonth, onOpenChange }: { station: FuelStation; payment?: Payment; forMonth?: string; onOpenChange: (o: boolean) => void }) {
+/**
+ * Fuel Stations → station → Add Payment. Saved as a “Diesel vendor payment” voucher (also in Payments).
+ * "Deduct TDS?" (off by default; owner, 17 Nov 2026): the amount entered is the total settled; TDS (0.1% suggested,
+ * editable) is withheld and the station receives the rest. The ledger reduces the balance by the full total; the API
+ * recalculates the split (tdsSplit) and the database checks it. Off: exactly as before.
+ */
+function PaymentDialog({ station, payment, forMonth, payments, onOpenChange }: { station: FuelStation; payment?: Payment; forMonth?: string; payments: Payment[]; onOpenChange: (o: boolean) => void }) {
   const add = useAddFuelStationPayment()
   const update = useUpdateFuelStationPayment()
   const today = todayISO()
@@ -747,23 +801,36 @@ function PaymentDialog({ station, payment, forMonth, onOpenChange }: { station: 
     date: payment?.date ?? today,
     // Paid against: the month's purchases this settles — never moves the payment off its payment date in the ledger.
     forMonth: payment ? (payment.forMonth ?? "") : (forMonth ?? today.slice(0, 7)),
-    amount: payment ? String(payment.amount || payment.tdsAmount) : "",
+    // The total settled (for a TDS-deducted payment: paid + TDS); a TDS entry: its TDS.
+    amount: payment ? String(isTds ? payment.tdsAmount : round2(payment.amount + payment.tdsAmount)) : "",
     mode: (payment?.mode ?? "NEFT") as PaymentMode,
     company: (payment?.companyCode ?? "VT") as CompanyCode,
+    reference: payment?.reference ?? "",
     notes: payment?.notes ?? "",
+    tdsOn: payment?.tdsRate != null && !isTds, // the browser store reads a missing % back as null
+    tdsPercent: String(payment?.tdsRate ?? FUEL_TDS_PERCENT),
   })
   const [error, setError] = useState<string | null>(null)
   const [reason, setReason] = useState("")
+  const total = Number(f.amount)
+  const percent = f.tdsPercent.trim() === "" ? NaN : Number(f.tdsPercent)
+  const tdsProblem = f.tdsOn && f.amount.trim() !== "" ? tdsPaymentProblem(total, percent) : null
+  const split = f.tdsOn && total > 0 && !tdsProblem ? tdsSplit(total, percent) : null
+  // A monthly TDS entry already covers the month paid against: deducting again here would deduct twice.
+  const monthlyTds = f.tdsOn && f.forMonth && (split?.tds ?? 0) > 0 ? tdsTakenOn(payments, station.id, f.forMonth).monthly : undefined
+  const [confirmSeparate, setConfirmSeparate] = useState(false)
   const submit = async () => {
-    const amount = Number(f.amount)
-    if (!(amount > 0)) return setError("Enter the amount paid")
+    if (!(total > 0)) return setError(f.tdsOn ? "Enter the total payment amount" : "Enter the amount paid")
+    if (f.tdsOn && tdsProblem) return setError(tdsProblem)
     if (!f.date || f.date > today) return setError("Pick a payment date up to today")
     if (!isTds && !f.forMonth) return setError("Choose the month this payment is against")
     if (!isTds && f.forMonth > f.date.slice(0, 7)) return setError("The month paid against can't be after the payment date")
+    if (monthlyTds && !confirmSeparate) return setError(`TDS for ${monthLabel(f.forMonth)} is already recorded monthly — confirm below that this is separate TDS, or switch off "Deduct TDS?"`)
     const forMonth = isTds ? undefined : f.forMonth
-    if (payment) await update.mutateAsync({ id: payment.id, version: payment.updatedAt, patch: { paymentDate: f.date, amount, paymentMode: f.mode, notes: f.notes.trim(), forMonth }, reason })
-    else await add.mutateAsync({ stationId: station.id, paymentDate: f.date, amount, paymentMode: f.mode, notes: f.notes.trim(), companyCode: f.company, forMonth })
-    toast.success(payment ? `${payment.paymentNo} updated` : `Payment of ${formatINR(amount)} to ${station.name} recorded`)
+    const tdsPercent = isTds ? undefined : f.tdsOn ? percent : null
+    if (payment) await update.mutateAsync({ id: payment.id, version: payment.updatedAt, patch: { paymentDate: f.date, amount: total, paymentMode: f.mode, notes: f.notes.trim(), forMonth, ...(isTds ? {} : { reference: f.reference, tdsPercent, confirmSeparateTds: !!monthlyTds && confirmSeparate }) }, reason })
+    else await add.mutateAsync({ stationId: station.id, paymentDate: f.date, amount: total, paymentMode: f.mode, notes: f.notes.trim(), companyCode: f.company, forMonth, reference: f.reference, tdsPercent, confirmSeparateTds: !!monthlyTds && confirmSeparate })
+    toast.success(payment ? `${payment.paymentNo} updated` : split ? `${formatINR(split.settled)} settled with ${station.name}: ${formatINR(split.paid)} paid + ${formatINR(split.tds)} TDS` : `Payment of ${formatINR(total)} to ${station.name} recorded`)
     onOpenChange(false)
   }
   return (
@@ -785,7 +852,7 @@ function PaymentDialog({ station, payment, forMonth, onOpenChange }: { station: 
             <Input type="month" value={f.forMonth} max={f.date.slice(0, 7)} onChange={(e) => setF({ ...f, forMonth: e.target.value })} />
           </Field>
         )}
-        <Field label="Amount (₹)" required error={error ?? undefined}>
+        <Field label={f.tdsOn ? "Total payment amount (₹)" : "Amount (₹)"} required error={error ?? undefined} hint={f.tdsOn ? "The bill amount being settled, before TDS" : undefined}>
           <Input type="number" min={0} step="0.01" value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} autoFocus />
         </Field>
         {!isTds && (
@@ -793,11 +860,60 @@ function PaymentDialog({ station, payment, forMonth, onOpenChange }: { station: 
             <SimpleSelect value={f.mode} onChange={(v) => setF({ ...f, mode: v as PaymentMode })} options={(["NEFT", "UPI", "CHEQUE", "CASH"] as const).map((m) => ({ value: m, label: m }))} />
           </Field>
         )}
+        {!isTds && (
+          <div className="rounded-lg border p-3 sm:col-span-2">
+            <label className="flex items-center justify-between gap-3">
+              <span>
+                <span className="text-sm font-medium">Deduct TDS?</span>
+                <span className="block text-xs text-muted-foreground">Withhold TDS from this payment — the station is paid the rest; the full amount is settled.</span>
+              </span>
+              <Switch checked={f.tdsOn} onCheckedChange={(on) => setF({ ...f, tdsOn: on })} aria-label="Deduct TDS" />
+            </label>
+            {f.tdsOn && (
+              <div className="mt-3 grid gap-3">
+                <Field label="TDS percentage (%)" className="sm:max-w-56" required error={tdsProblem && f.tdsPercent.trim() !== "" && /percentage|whole payment/.test(tdsProblem) ? tdsProblem : undefined} hint={`Default ${FUEL_TDS_PERCENT}% — change it if a different rate applies`}>
+                  <Input type="number" min={0} max={99.9999} step="0.0001" inputMode="decimal" value={f.tdsPercent} onChange={(e) => setF({ ...f, tdsPercent: e.target.value })} className="num" />
+                </Field>
+                <dl className="grid content-start gap-1.5 rounded-md bg-muted/40 p-3 text-sm">
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">Total payment amount</dt>
+                    <dd className="num">{formatINR(split?.settled ?? 0)}</dd>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">TDS deducted{Number.isFinite(percent) ? ` (${formatNumber(percent, 4)}%)` : ""}</dt>
+                    <dd className="num">− {formatINR(split?.tds ?? 0)}</dd>
+                  </div>
+                  <div className="flex justify-between gap-3 border-t pt-1.5">
+                    <dt className="font-semibold">Net payable to {station.name}</dt>
+                    <dd className="num text-base font-semibold text-emerald-700 dark:text-emerald-400">{formatINR(split?.paid ?? 0)}</dd>
+                  </div>
+                </dl>
+                {monthlyTds && (
+                  <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/40" role="alert">
+                    <p className="font-medium text-amber-900 dark:text-amber-200">TDS for {monthLabel(f.forMonth)} purchases is already recorded</p>
+                    <p className="mt-1 text-xs text-amber-900/80 dark:text-amber-200/80">
+                      A monthly TDS entry ({monthlyTds.paymentNo}, {formatINR(monthlyTds.tdsAmount)}) covers {station.name}&apos;s {monthLabel(f.forMonth)} purchases. Deducting TDS on this payment as well would tax the same purchases twice. Nothing existing is changed either way.
+                    </p>
+                    <label className="mt-2 flex items-start gap-2 text-xs">
+                      <Checkbox checked={confirmSeparate} onCheckedChange={(c) => setConfirmSeparate(c === true)} className="mt-0.5" />
+                      <span>This is separate TDS, not on the purchases the monthly entry already covers — deduct it.</span>
+                    </label>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+        {!isTds && (
+          <Field label="Transaction reference / UTR" hint="Optional">
+            <Input value={f.reference} onChange={(e) => setF({ ...f, reference: e.target.value })} autoComplete="off" />
+          </Field>
+        )}
         <Field label="Paid by" hint={payment ? "Fixed — the voucher number belongs to this company" : "The company that made the payment (VT / VTHPL)"}>
           <SimpleSelect disabled={!!payment} value={f.company} onChange={(v) => setF({ ...f, company: v as CompanyCode })} options={[{ value: "VT", label: "Vishal Transport (VT)" }, { value: "VTHPL", label: "VTHPL" }]} />
         </Field>
         <Field label="Notes" className="sm:col-span-2">
-          <Input value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} placeholder="e.g. September settlement, UTR 1234" />
+          <Input value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} placeholder="e.g. September settlement" />
         </Field>
         {payment && <ReasonField value={reason} onChange={setReason} className="sm:col-span-2" />}
       </div>
@@ -809,14 +925,16 @@ function PaymentDialog({ station, payment, forMonth, onOpenChange }: { station: 
  * TDS on this station's fuel bills for one month (uncle's answer 14): dated the month's last day, suggested
  * at 0.1% of that month's Fuel Purchased. Settles that much of the balance; no money leaves the bank.
  */
-function TdsDialog({ station, month, due, onOpenChange }: { station: FuelStation; month: string; due: number; onOpenChange: (o: boolean) => void }) {
+function TdsDialog({ station, month, due, onPayments, onOpenChange }: { station: FuelStation; month: string; due: number; onPayments: number; onOpenChange: (o: boolean) => void }) {
   const record = useRecordStationTds()
   const [f, setF] = useState({ amount: String(due), company: "VT" as CompanyCode, notes: "" })
   const [error, setError] = useState<string | null>(null)
+  const [confirmSeparate, setConfirmSeparate] = useState(false)
   const submit = async () => {
     const amount = Number(f.amount)
     if (!(amount > 0)) return setError("Enter the TDS amount")
-    await record.mutateAsync({ stationId: station.id, month, amount, companyCode: f.company, notes: f.notes })
+    if (onPayments > 0 && !confirmSeparate) return setError("TDS was already deducted on payments for this month — confirm below that this is separate TDS")
+    await record.mutateAsync({ stationId: station.id, month, amount, companyCode: f.company, notes: f.notes, confirmSeparateTds: onPayments > 0 && confirmSeparate })
     toast.success(`TDS of ${formatINR(amount)} recorded for ${monthLabel(month)}`)
     onOpenChange(false)
   }
@@ -832,6 +950,21 @@ function TdsDialog({ station, month, due, onOpenChange }: { station: FuelStation
         <Field label="Notes" className="sm:col-span-2">
           <Input value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} placeholder="e.g. Challan no." />
         </Field>
+        <p className="text-xs text-muted-foreground sm:col-span-2">
+          TDS is normally deducted on each payment (Add Payment → Deduct TDS?). Use a monthly entry for historical adjustments or a month whose TDS is managed separately.
+        </p>
+        {onPayments > 0 && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm sm:col-span-2 dark:border-amber-800 dark:bg-amber-950/40" role="alert">
+            <p className="font-medium text-amber-900 dark:text-amber-200">TDS already deducted on payments for {monthLabel(month)}</p>
+            <p className="mt-1 text-xs text-amber-900/80 dark:text-amber-200/80">
+              {formatINR(onPayments)} of TDS was deducted on payments to {station.name} against {monthLabel(month)} purchases. A monthly entry as well would tax the same purchases twice. Nothing existing is changed either way.
+            </p>
+            <label className="mt-2 flex items-start gap-2 text-xs">
+              <Checkbox checked={confirmSeparate} onCheckedChange={(c) => setConfirmSeparate(c === true)} className="mt-0.5" />
+              <span>This is separate TDS, not on the purchases already taxed on those payments — record it.</span>
+            </label>
+          </div>
+        )}
       </div>
     </FormModal>
   )

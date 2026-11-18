@@ -16,9 +16,9 @@ with t(name) as (values
   ('core.drivers'), ('core.vehicles'), ('core.vehicle_status_periods'), ('core.vehicle_assignments'), ('core.month_locks'),
   ('core.companies'), ('core.vehicle_types'), ('core.app_settings'),
   ('fuel.fuel_stations'), ('fuel.tankers'), ('fuel.diesel_entries'), ('fuel.tanker_loads'), ('fuel.tanker_transfers'),
-  ('fuel.tanker_adjustments'), ('fuel.adblue_purchases'), ('fuel.adblue_entries'), ('fuel.adblue_vendors'), ('fuel.industrial_supplies'), ('fuel.industrial_supply_allocations'),
+  ('fuel.tanker_adjustments'), ('fuel.adblue_purchases'), ('fuel.adblue_entries'), ('fuel.adblue_vendors'), ('fuel.adblue_payments'), ('fuel.adblue_payment_allocations'), ('fuel.industrial_supplies'), ('fuel.industrial_supply_allocations'),
   ('finance.payment_categories'), ('finance.payments'), ('finance.payment_allocations'),
-  ('ops.trips'), ('billing.invoices'), ('billing.invoice_lines'), ('billing.invoice_line_trips'),
+  ('ops.trips'), ('ops.tyre_masters'), ('ops.tyre_invoices'), ('ops.tyre_invoice_items'), ('ops.tyre_payments'), ('ops.tyre_payment_allocations'), ('billing.invoices'), ('billing.invoice_lines'), ('billing.invoice_line_trips'),
   -- the audit trail and role permissions too (4 Nov 2026: the clean reset can clear the audit trail)
   ('audit.events'), ('audit.reviews'), ('core.role_permissions')
 )

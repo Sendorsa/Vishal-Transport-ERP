@@ -12,17 +12,19 @@ import { allocationProblem, industrialAmount, industrialProblem, sortedAllocatio
 import { odometerConflict } from "@/domain/diesel"
 import { dayBefore, statusOn, withStatus } from "@/domain/status-history"
 import { canEditMonth } from "@/domain/month-lock"
+import { ADBLUE_PAYMENT_MODES, CREDIT as AB_CREDIT, isPayable, paidByPurchase, paymentProblem as abPaymentProblem, purchaseValue, referenceNoun as abReferenceNoun, refKey, settledOf as abSettled, tdsProblem as abTdsProblem, tdsSplit as abTdsSplit, unallocated as abUnallocated, type PurchasePaymentType } from "@/domain/adblue-payments"
 import { adBlueTotals, isDirectAdBlue, NO_VENDOR_LABEL, adBlueShortfallMessage, stockDraws, valueInventory } from "@/domain/adblue-inventory"
 import { availabilityMessage, fillAmount, fitsTanker, isStockPool, isTankerFill, normReg, shortfallMessage, tankerAvailability, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
-import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate } from "@/domain/station-ledger"
+import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate, tdsPaymentProblem, tdsSplit, tdsTakenOn } from "@/domain/station-ledger"
 import { currentActor, currentRole, customerScope } from "@/lib/identity"
-import { can, canChangeAdBluePurchases, canSetMonthLock, hasOwnerAuthority, isAdBlueProfile, type Resource } from "@/lib/permissions"
+import { can, canChangeAdBluePurchases, canManageAdBluePayments, canSetMonthLock, hasOwnerAuthority, isAdBlueProfile, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
 import { addMonths, format, parseISO } from "date-fns"
+import { cleanName, CREDIT, financialChanges, itemProblem, lineAmounts, masterKey, OFFICE_LABEL, paidByInvoice, paymentProblem, referenceNoun, settledOf, tdsProblem, TYRE_MASTER_LABEL, TYRE_PAYMENT_MODES, tyreTdsSplit, tyreTotals, unallocated, utrKey } from "@/domain/tyre"
 import { assignmentIndex, assignmentOn, correctedPeriods, handedOverBy, inferAssignments, isCalendarDate, movedRecords, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type AttributedRecords, type MovedRecord, type StartDateProblem } from "@/domain/assignments"
 import { formatDate, formatINR, formatNumber, round2, todayISO, formatLitres } from "@/lib/format"
 import { appendAuditEvent, appendAuditReviews, readAuditEvents, readAuditReviews, readCollection, readSettings, runInTransaction, writeCollection, writeSettings } from "@/lib/storage/local-store"
-import type { AdBlueEntry, AdBluePurchase, AdBlueVendor, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, IndustrialSupply, Invoice, NewEntity, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
+import type { AdBlueEntry, AdBluePayment, AdBluePurchase, AdBlueVendor, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, IndustrialSupply, Invoice, NewEntity, TyreInvoice, TyreInvoiceItem, TyreMaster, TyreMasterKind, TyrePayment, TyreTaxType, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
 import { ensureSeeded, exportBackup, loadDemoData, loadEmptyWorkspace, parseBackup, restoreBackup, type BackupFile } from "./bootstrap"
 import { createLocalRepository, latency, newId, NotFoundError } from "./repository"
 import { ConflictError, pendingVersions, runWithVersions } from "@/lib/versions"
@@ -41,7 +43,16 @@ export interface FuelStationPayment {
   paymentDate: string
   /** "yyyy-MM" the payment was paid against; null = not recorded (paid before 31 Oct 2026). */
   forMonth: string | null
+  /** Total settled (= paid + TDS) — what the ledger counts. */
   amount: number
+  /** What reached the station (bank / cash). */
+  paidAmount: number
+  /** TDS deducted on it (0 when none). */
+  tdsAmount: number
+  /** "Deduct TDS?": the % applied; null when TDS wasn't deducted on this payment. */
+  tdsRate: number | null
+  /** UTR / transaction reference. */
+  reference: string
   paymentMode: PaymentMode
   notes: string
   paymentNo: string
@@ -63,12 +74,16 @@ const monthLocks = createLocalRepository("month_locks", "mlk") // /api/month-loc
 const fuelStations = createLocalRepository("fuel_stations", "dv") // /api/fuel-stations
 const adbluePurchases = createLocalRepository("adblue_purchases", "adp") // /api/adblue-purchases
 const adblueVendors = createLocalRepository("adblue_vendors", "adv") // /api/adblue-vendors
+const adbluePayments = createLocalRepository("adblue_payments", "abp") // /api/adblue-payments
 const tankerLoads = createLocalRepository("tanker_loads", "tkl") // /api/tanker-loads
 const tankerDispenses = createLocalRepository("tanker_dispenses", "tkd") // /api/tanker-dispenses
 const tankers = createLocalRepository("tankers", "tnk") // /api/tankers
 const tankerTransfers = createLocalRepository("tanker_transfers", "tkt") // /api/tanker-transfers
 const tankerAdjustments = createLocalRepository("tanker_adjustments", "tka") // /api/tanker-adjustments
 const industrialSupplies = createLocalRepository("industrial_supplies", "ind") // /api/industrial-supplies
+const tyreMasters = createLocalRepository("tyre_masters", "tym") // /api/tyre-masters
+const tyreInvoices = createLocalRepository("tyre_invoices", "tyr") // /api/tyre-invoices
+const tyrePayments = createLocalRepository("tyre_payments", "tpy") // /api/tyre-payments
 const invoices = createLocalRepository("invoices", "inv") // /api/invoices
 const payments = createLocalRepository("payments", "pay") // /api/payments
 
@@ -167,7 +182,34 @@ function checkExternal(input: TankerDispenseInput, existing?: TankerDispense) {
 }
 
 /** The vendor: `adblueVendorId` (the picker), or — older callers — an existing vendor's name (a new name creates the vendor when the role may). */
-export type AdBluePurchaseInput = Pick<AdBluePurchase, "date" | "product" | "buckets" | "litresPerBucket" | "pricePerBucket" | "invoiceNo" | "notes"> & { adblueVendorId?: string | null; vendorName?: string }
+export type AdBluePurchaseInput = Pick<AdBluePurchase, "date" | "product" | "buckets" | "litresPerBucket" | "pricePerBucket" | "invoiceNo" | "notes"> & {
+  adblueVendorId?: string | null
+  vendorName?: string
+  /** GST % on the Total Cost (0 / absent = none). */
+  gstRate?: number
+  /**
+   * Purchase Payment Details (the Owner, Dev and Employee): a NEW payment saved with the purchase in one transaction.
+   * CREDIT / absent = nothing paid now (no payment). FULL = what the purchase still owes (its value when new; value − Σ
+   * existing payments on an edit — more only with `acceptAdvance`); PARTIAL = less than that. Existing payments are
+   * never changed by a purchase edit (Payments → Edit / Delete corrects them).
+   */
+  payment?: { type: PurchasePaymentType; amount?: number; mode?: string; utr?: string; date?: string; tdsPercent?: number | null; companyCode?: CompanyCode | null; notes?: string; acceptAdvance?: boolean }
+}
+/** A payment to an AdBlue vendor, allocated to its purchases; the rest (explicitly) advance credit. */
+export interface AdBluePaymentInput {
+  date: string
+  vendorId: string
+  /** The total settled (with "Deduct TDS?": before TDS; the vendor receives the rest). */
+  amount: number
+  /** "Deduct TDS?": the TDS %; absent / null = off. */
+  tdsPercent?: number | null
+  mode: string
+  utr: string
+  companyCode?: CompanyCode | null
+  notes?: string
+  allocations: { purchaseId: string; amount: number }[]
+  acceptAdvance?: boolean
+}
 
 export interface AdBlueVendorInput {
   name: string
@@ -398,6 +440,30 @@ function assertMonthEditable(date: string) {
  * the future. Back-dating into a locked month is the Monthly Sheet Lock's call (assertMonthEditable: Owner only).
  * "Paid against" (`forMonth`) is a "yyyy-MM" no later than the payment's own month; it never moves it in the ledger.
  */
+/**
+ * A station voucher's money fields from the total settled and "Deduct TDS?" (null / undefined = off: as before).
+ * On: amount = paid to the station, tdsAmount = the TDS, tdsRate = the % — the ledger counts amount + tdsAmount.
+ */
+function stationTds(total: number, percent: number | null | undefined, mode: PaymentMode): Pick<Payment, "amount" | "tdsAmount" | "tdsRate"> {
+  if (percent === null || percent === undefined) return { amount: round2(total), tdsAmount: 0, tdsRate: undefined }
+  if (mode === "TDS") throw new Error("Choose how the payment was made (NEFT, UPI, cheque or cash)")
+  const problem = tdsPaymentProblem(Number(total), Number(percent))
+  if (problem) throw new Error(problem)
+  const { tds, paid } = tdsSplit(Number(total), Number(percent))
+  return { amount: paid, tdsAmount: tds, tdsRate: Number(percent) }
+}
+
+/**
+ * Per-payment TDS on purchases whose month already has a monthly TDS entry = the same purchases taxed twice: refused
+ * unless the user confirmed it is separate (`confirmSeparateTds`). A payment with no TDS (or 0%) is never affected.
+ */
+function assertNoDoubleTds(stationId: string, forMonth: string | undefined, tdsAmount: number, confirmed: boolean | undefined) {
+  if (!(tdsAmount > 0) || !forMonth || confirmed) return
+  const { monthly } = tdsTakenOn(readCollection("payments"), stationId, forMonth)
+  if (monthly)
+    throw new Error(`TDS for ${format(parseISO(`${forMonth}-01`), "MMMM yyyy")} purchases is already recorded as a monthly TDS entry (${monthly.paymentNo}, ${formatINR(monthly.tdsAmount)}). Deducting TDS on this payment too would tax the same purchases twice. Confirm it is separate TDS to save it, or switch off "Deduct TDS?".`)
+}
+
 function assertStationPaymentDate(p: { date: string; amount: number; vendorId: string | null; direction: "IN" | "OUT"; categoryCode: string | null; forMonth?: string }) {
   if (!p.vendorId || !isStationPayment(p, p.vendorId)) return
   if (p.date > todayISO()) throw new Error("A payment can't be dated in the future.")
@@ -509,6 +575,246 @@ function assertDrawVendor(input: AdBlueInput) {
 async function directVendor(input: AdBlueInput, before?: AdBlueEntry) {
   const v = await resolveVendor(input, before?.adblueVendorId, false)
   return v ? { adblueVendorId: v.id, vendorName: before?.adblueVendorId === v.id && before.vendorName ? before.vendorName : v.name } : { adblueVendorId: null }
+}
+
+/* ------------------------------------------------------------------ Tyre Data (owner, 17 Nov 2026) */
+
+export interface TyreMasterInput {
+  kind: TyreMasterKind
+  name: string
+}
+export interface TyreItemInput {
+  /** An existing line's id (edit); omitted for a new line. */
+  id?: string
+  repairTypeId: string
+  brandId?: string | null
+  sizeId?: string | null
+  tyreNumber?: string
+  openingKm?: number | null
+  closingKm?: number | null
+  quantity: number
+  rate: number
+  gstRate: number
+  taxType: TyreTaxType
+  removingNumber?: string
+  remarks?: string
+}
+/**
+ * The company is never sent: it is the vehicle's customer on the invoice date. `office`: "Office / No Customer", chosen
+ * explicitly — allowed only for a vehicle with no customer on that date (never a default, never instead of a customer).
+ */
+export interface TyreInvoiceInput {
+  date: string
+  vehicleId: string
+  office?: boolean
+  supplierId: string
+  billNo?: string
+  purchaseMode?: string
+  paymentMode?: string
+  paymentDetails?: string
+  remarks?: string
+  items: TyreItemInput[]
+  /**
+   * Add Invoice only: what was paid with the bill. Payment Type (`paymentMode`) Credit or empty = nothing paid, no
+   * payment. Any other type needs an amount and a UTR; the payment is saved with the invoice (one transaction) and
+   * allocated to it — an amount above the invoice total only when the extra is explicitly advance credit.
+   */
+  payment?: TyreInitialPaymentInput
+}
+export interface TyreInitialPaymentInput {
+  /** The total settled (with "Deduct TDS?": before TDS). */
+  amount: number
+  /** "Deduct TDS?": the TDS %; absent / null = off. */
+  tdsPercent?: number | null
+  utr: string
+  date: string
+  notes?: string
+  acceptAdvance?: boolean
+}
+/** A payment to a tyre supplier, allocated to its invoices; the rest (explicitly) advance credit. */
+export interface TyrePaymentInput {
+  date: string
+  supplierId: string
+  /** The total settled (with "Deduct TDS?": before TDS; the vendor receives the rest). */
+  amount: number
+  /** "Deduct TDS?": the TDS %; absent / null = off. */
+  tdsPercent?: number | null
+  mode: string
+  utr: string
+  reference?: string
+  companyCode?: CompanyCode | null
+  notes?: string
+  allocations: { invoiceId: string; amount: number }[]
+  acceptAdvance?: boolean
+}
+
+const TYRE_KINDS: TyreMasterKind[] = ["SUPPLIER", "REPAIR_TYPE", "BRAND", "SIZE"]
+const tyreMasterName = (id: string | null | undefined) => (id ? (readCollection("tyre_masters").find((m) => m.id === id)?.name ?? "Unknown") : "")
+
+/** Name unique within its list (spaces / case ignored, archived values included). */
+function checkTyreMaster(kind: TyreMasterKind, name: string, id?: string) {
+  if (!TYRE_KINDS.includes(kind)) throw new Error("Unknown tyre list")
+  const clean = cleanName(name ?? "")
+  if (!clean) throw new Error(`Enter the ${TYRE_MASTER_LABEL[kind].one.toLowerCase()} name`)
+  if (clean.length > 120) throw new Error("The name is too long (120 characters at most)")
+  const dup = readCollection("tyre_masters").find((m) => m.kind === kind && m.id !== id && masterKey(m.name) === masterKey(clean))
+  if (dup) throw new Error(`${dup.name} already exists${dup.status === "ARCHIVED" ? " (archived) — restore it instead" : ""}.`)
+  return clean
+}
+
+/** A master value an invoice may use: of the right list, and active — unless the record already used it (`keep`). */
+function tyreMasterOk(kind: TyreMasterKind, id: string | null | undefined, keep: (string | null)[], required: boolean) {
+  if (!id) {
+    if (required) throw new Error(`Choose the ${TYRE_MASTER_LABEL[kind].one.toLowerCase()}`)
+    return null
+  }
+  const m = readCollection("tyre_masters").find((x) => x.id === id && x.kind === kind)
+  if (!m) throw new NotFoundError(TYRE_MASTER_LABEL[kind].one, id)
+  if (m.status === "ARCHIVED" && !keep.includes(id)) throw new Error(`${m.name} is archived. Restore it to use it again.`)
+  return id
+}
+
+/**
+ * The invoice's company: the vehicle's customer on the invoice date. Never guessed. A vehicle with no customer on that
+ * date takes an invoice only when it is explicitly recorded as Office / No Customer; a vehicle with a customer never is.
+ */
+function tyreAttribution(vehicleId: string, date: string, office: boolean): { customerId: string | null; office: boolean } {
+  const v = readCollection("vehicles").find((x) => x.id === vehicleId)
+  if (!v) throw new NotFoundError("Vehicle", vehicleId)
+  const customerId = assignmentOn(assignmentIndex(periodsOf(vehicleId)), vehicleId, date)?.customerId ?? null
+  if (customerId && office) throw new Error(`${v.regNo} is assigned to ${customerName(customerId)} on ${formatDate(date)}, so the invoice belongs to ${customerName(customerId)} — it can't be recorded as ${OFFICE_LABEL}.`)
+  if (!customerId && !office)
+    throw new Error(`${v.regNo} has no customer assignment on ${formatDate(date)}, so its company can't be set. Assign the vehicle to its customer for that date (Diesel → customer → vehicle ⋮ → Transfer / Edit Assignment), check the invoice date, or record it explicitly as ${OFFICE_LABEL}.`)
+  return { customerId, office: !customerId }
+}
+
+/** Validated invoice with calculated line amounts. `before`: the invoice being edited (its lines keep their ids). */
+function checkTyreInvoice(input: TyreInvoiceInput, before?: TyreInvoice): NewEntity<TyreInvoice> {
+  if (!isCalendarDate(input.date ?? "")) throw new Error("Enter the invoice date")
+  if (input.date > todayISO()) throw new Error("An invoice can't be dated in the future.")
+  const { customerId, office } = tyreAttribution(input.vehicleId, input.date, input.office === true)
+  assertOpen(input.vehicleId, customerId, input.date)
+  const keep = before ? [before.supplierId, ...before.items.flatMap((i) => [i.repairTypeId, i.brandId, i.sizeId])] : []
+  const supplierId = tyreMasterOk("SUPPLIER", input.supplierId, keep, true)!
+  if (!input.items?.length) throw new Error("Add at least one repair line")
+  const ownIds = new Set(before?.items.map((i) => i.id) ?? [])
+  const items = input.items.map((raw, n): TyreInvoiceItem => {
+    const km = (x: number | null | undefined) => (x === null || x === undefined || (x as unknown) === "" ? null : Number(x))
+    const item = { repairTypeId: raw.repairTypeId, quantity: Number(raw.quantity), rate: Number(raw.rate), gstRate: Number(raw.gstRate), openingKm: km(raw.openingKm), closingKm: km(raw.closingKm) }
+    const problem = itemProblem(item)
+    if (problem) throw new Error(`Line ${n + 1}: ${problem}`)
+    if (raw.taxType !== "CGST_SGST" && raw.taxType !== "IGST") throw new Error(`Line ${n + 1}: choose CGST + SGST or IGST`)
+    return {
+      id: raw.id && ownIds.has(raw.id) ? raw.id : newId("tyi"),
+      repairTypeId: tyreMasterOk("REPAIR_TYPE", raw.repairTypeId, keep, true)!,
+      brandId: tyreMasterOk("BRAND", raw.brandId, keep, false),
+      sizeId: tyreMasterOk("SIZE", raw.sizeId, keep, false),
+      tyreNumber: (raw.tyreNumber ?? "").trim(),
+      openingKm: item.openingKm,
+      closingKm: item.closingKm,
+      quantity: item.quantity,
+      rate: item.rate,
+      gstRate: item.gstRate,
+      taxType: raw.taxType,
+      ...lineAmounts(item.quantity, item.rate, item.gstRate, raw.taxType),
+      removingNumber: (raw.removingNumber ?? "").trim(),
+      remarks: (raw.remarks ?? "").trim(),
+    }
+  })
+  const text = (x: string | undefined) => (x ?? "").trim()
+  return { date: input.date, vehicleId: input.vehicleId, customerId, office, supplierId, billNo: text(input.billNo), purchaseMode: text(input.purchaseMode), paymentMode: text(input.paymentMode), paymentDetails: text(input.paymentDetails), remarks: text(input.remarks), items }
+}
+
+/* ------------------------------------------------------------------ Tyre vendor payments (owner, 17 Nov 2026) */
+
+const tyreInvoiceLabel = (x: Pick<TyreInvoice, "billNo" | "date">) => `Bill ${x.billNo || "—"} (${formatDate(x.date)})`
+/** What each invoice of the supplier still owes (an edited payment's own allocations left out), by id. */
+function tyreOutstanding(supplierId: string, exceptPaymentId?: string): Map<string, { invoice: TyreInvoice; left: number }> {
+  const paid = paidByInvoice(readCollection("tyre_payments").filter((p) => p.id !== exceptPaymentId))
+  return new Map(readCollection("tyre_invoices").filter((x) => x.supplierId === supplierId).map((x) => [x.id, { invoice: x, left: Math.max(0, round2(tyreTotals(x.items).grandTotal - (paid.get(x.id) ?? 0))) }]))
+}
+/** A reference (UTR, cheque or receipt number) is on one payment only (spaces / case ignored; the database's unique index too). */
+function assertUtrFree(utr: string, exceptPaymentId?: string) {
+  const dup = readCollection("tyre_payments").find((p) => p.id !== exceptPaymentId && utrKey(p.utr) === utrKey(utr))
+  if (dup) throw new Error(`Reference ${utr.trim()} is already recorded — ${tyreMasterName(dup.supplierId)}, ${dup.mode}, ${formatDate(dup.date)}, ${formatINR(settledOf(dup))}. If it was entered twice, keep that payment; otherwise check the number.`)
+}
+/** The money fields from the total settled and "Deduct TDS?" (null / undefined = off: amount = total, no TDS). */
+function tyreTds(total: number, percent: number | null | undefined): Pick<TyrePayment, "amount" | "tdsAmount" | "tdsRate"> {
+  if (percent === null || percent === undefined) return { amount: round2(total), tdsAmount: 0, tdsRate: null }
+  const problem = tdsProblem(Number(total), Number(percent))
+  if (problem) throw new Error(problem)
+  const { tds, paid } = tyreTdsSplit(Number(total), Number(percent))
+  return { amount: paid, tdsAmount: tds, tdsRate: Number(percent) }
+}
+const cleanAllocations = (list: { invoiceId: string; amount: number }[] | undefined) => (list ?? []).filter((a) => Number(a.amount) !== 0).map((a) => ({ invoiceId: a.invoiceId, amount: Number(a.amount) }))
+/** Allocations per invoice (an applied advance may have added a second allocation to the same invoice). */
+const perInvoice = (list: { invoiceId: string; amount: number }[]) => {
+  const m = new Map<string, number>()
+  for (const a of list) m.set(a.invoiceId, round2((m.get(a.invoiceId) ?? 0) + a.amount))
+  return m
+}
+/**
+ * Validated payment ready to store: amount = paid to the vendor, tdsAmount / tdsRate from "Deduct TDS?", allocations to
+ * invoices of its supplier, each within what the invoice owes — for an edit (`before`), without its own allocations.
+ */
+function checkTyrePayment(input: TyrePaymentInput, before?: TyrePayment): NewEntity<TyrePayment> {
+  const supplierId = before ? before.supplierId : tyreMasterOk("SUPPLIER", input.supplierId, [], true)!
+  if (before && input.supplierId && input.supplierId !== before.supplierId) throw new Error("A payment's vendor can't be changed — delete it and record it again for the right vendor.")
+  const owed = tyreOutstanding(supplierId, before?.id)
+  const allocations = cleanAllocations(input.allocations)
+  const draft = { date: input.date, amount: Number(input.amount), mode: input.mode, utr: input.utr ?? "", allocations, acceptAdvance: input.acceptAdvance === true }
+  const problem = paymentProblem(draft, todayISO(), (id) => owed.get(id)?.left, (id) => (owed.has(id) ? tyreInvoiceLabel(owed.get(id)!.invoice) : `Invoice ${id}`))
+  if (problem) throw new Error(problem)
+  if (input.companyCode && !settingsOrThrow().companies.some((c) => c.code === input.companyCode)) throw new Error("Choose the company that paid")
+  assertUtrFree(draft.utr, before?.id)
+  return {
+    date: draft.date, supplierId, ...tyreTds(draft.amount, input.tdsPercent), mode: draft.mode, utr: draft.utr.trim(), reference: (input.reference ?? "").trim(), companyCode: input.companyCode || null,
+    notes: (input.notes ?? "").trim(), allocations: allocations.map((a) => ({ invoiceId: a.invoiceId, amount: round2(a.amount) })),
+  }
+}
+/**
+ * Add Invoice's Payment Details → the payment to save with it, or null (Credit / no type: nothing paid, no TDS). The
+ * reference (UTR / cheque / receipt number) is required for every type but Credit; more than the invoice total only as
+ * explicit advance credit. With "Deduct TDS?" the amount is the total settled and the vendor receives the rest.
+ */
+function initialTyrePayment(input: TyreInvoiceInput, data: NewEntity<TyreInvoice>): NewEntity<TyrePayment> | null {
+  const type = data.paymentMode
+  const p = input.payment
+  const amount = p ? Number(p.amount) : 0
+  if (amount < 0) throw new Error("Amount Paid can't be negative")
+  if (!type || type === CREDIT) {
+    if (amount > 0) throw new Error("Payment Type is Credit, so nothing is paid now. Choose how it was paid (Cash, UPI, NEFT, RTGS, IMPS or Cheque) to record an amount.")
+    if (p && p.tdsPercent !== null && p.tdsPercent !== undefined) throw new Error("TDS is deducted only from a payment — Credit pays nothing now, so there is no TDS to deduct.")
+    return null
+  }
+  if (!(TYRE_PAYMENT_MODES as readonly string[]).includes(type)) throw new Error(`Choose the Payment Type: ${[CREDIT, ...TYRE_PAYMENT_MODES].join(", ")}`)
+  if (!p || !(amount > 0)) throw new Error(`Enter the Amount Paid by ${type} — or choose Credit if nothing was paid`)
+  if (!(p.utr ?? "").trim()) throw new Error(`Enter the ${referenceNoun(type)} — it is required when the Payment Type is ${type}.`)
+  const total = tyreTotals(data.items).grandTotal
+  if (amount > total && !p.acceptAdvance) throw new Error(`Amount Paid (${formatINR(amount)}) is more than the invoice total (${formatINR(total)}). Record the extra ${formatINR(round2(amount - total))} as advance credit with the vendor, or correct the amount.`)
+  const allocations = total > 0 ? [{ invoiceId: "new", amount: Math.min(round2(amount), total) }] : []
+  const problem = paymentProblem({ date: p.date, amount, mode: type, utr: p.utr, allocations, acceptAdvance: p.acceptAdvance === true }, todayISO(), () => total, () => "This invoice")
+  if (problem) throw new Error(problem)
+  assertUtrFree(p.utr)
+  assertMonthEditable(p.date)
+  return { date: p.date, supplierId: data.supplierId, ...tyreTds(amount, p.tdsPercent), mode: type, utr: p.utr.trim(), reference: data.billNo, companyCode: null, notes: (p.notes ?? "").trim(), allocations }
+}
+
+/** Allocating changes what the invoice owes: its month must be open too (as the payment's). */
+function assertAllocationMonths(allocations: { invoiceId: string }[]) {
+  for (const a of allocations) assertMonthEditable(readCollection("tyre_invoices").find((x) => x.id === a.invoiceId)!.date)
+}
+
+async function setTyreMasterStatus(id: string, status: TyreMaster["status"]) {
+  return tx(async () => {
+    assertCan("tyres", "edit")
+    const before = await tyreMasters.get(id)
+    if (!before) throw new NotFoundError("Tyre list value", id)
+    if (before.status === status) return before
+    const after = await tyreMasters.update(id, { status })
+    audit({ action: status === "ARCHIVED" ? "ARCHIVED" : "RESTORED", ...meta.tyreMaster(after), before, after })
+    return after
+  })
 }
 
 /* ------------------------------------------------------------------ Diesel tanker */
@@ -636,15 +942,120 @@ function purchaseTotals(input: AdBluePurchaseInput, vendor: AdBlueVendor, before
   if (!(input.litresPerBucket > 0)) throw new Error("Litres per bucket must be greater than 0")
   if (!(input.pricePerBucket >= 0)) throw new Error("Price per bucket can't be negative")
   if (input.date > todayISO()) throw new Error("A purchase can't be dated in the future.")
+  const gstRate = Number(input.gstRate ?? 0)
+  if (!(Number.isFinite(gstRate) && gstRate >= 0 && gstRate <= 100) || (String(gstRate).split(".")[1] ?? "").length > 2) throw new Error("GST %: between 0 and 100, up to 2 decimals")
+  const { payment: _payment, ...rest } = input // the payment is its own record (adbluePayments), never stored on the purchase
+  void _payment
   return {
-    ...input,
+    ...rest,
     adblueVendorId: vendor.id,
     vendorName: before?.adblueVendorId === vendor.id ? before.vendorName : vendor.name, // a renamed vendor never rewrites past purchases
     product: input.product.trim(),
     totalLitres: round2(input.buckets * input.litresPerBucket),
     totalCost: round2(input.buckets * input.pricePerBucket),
+    gstRate,
   }
 }
+
+/* ------------------------------------------------------------------ AdBlue supplier payments (owner, 18 Nov 2026) */
+
+/** The Owner, Dev and Employee manage AdBlue supplier money; the AdBlue profiles never (stock only). */
+function assertAdBluePayments(action: "view" | "create" | "edit" | "delete") {
+  if (!canManageAdBluePayments(currentRole(), action)) throw new PermissionError(action === "delete" ? "Only the Owner and Dev can delete records — your role can't delete AdBlue supplier payments." : `Your role can't ${action === "view" ? "see" : action === "create" ? "record" : "edit"} AdBlue supplier payments.`)
+}
+const abPurchaseLabel = (x: Pick<AdBluePurchase, "invoiceNo" | "date">) => `Bill ${x.invoiceNo || "—"} (${formatDate(x.date)})`
+/** What each payable purchase of the vendor still owes (an edited payment's own allocations left out), by id. */
+function adblueOutstanding(vendorId: string, exceptPaymentId?: string): Map<string, { purchase: AdBluePurchase; left: number }> {
+  const paid = paidByPurchase(readCollection("adblue_payments").filter((p) => p.id !== exceptPaymentId))
+  return new Map(
+    readCollection("adblue_purchases")
+      .filter((x) => isPayable(x) && x.adblueVendorId === vendorId)
+      .map((x) => [x.id, { purchase: x, left: Math.max(0, round2(purchaseValue(x) - (paid.get(x.id) ?? 0))) }])
+  )
+}
+/** A reference (UTR, cheque or receipt number) is on one AdBlue payment only (spaces / case ignored; the database's unique index too). */
+function assertAdBlueRefFree(utr: string, exceptPaymentId?: string) {
+  const dup = readCollection("adblue_payments").find((p) => p.id !== exceptPaymentId && refKey(p.utr) === refKey(utr))
+  if (dup) throw new Error(`Reference ${utr.trim()} is already recorded — ${vendorName(dup.vendorId)}, ${dup.mode}, ${formatDate(dup.date)}, ${formatINR(abSettled(dup))}. If it was entered twice, keep that payment; otherwise check the number.`)
+}
+/** The money fields from the total settled and "Deduct TDS?" (null / undefined = off: amount = total, no TDS). */
+function adblueTds(total: number, percent: number | null | undefined): Pick<AdBluePayment, "amount" | "tdsAmount" | "tdsRate"> {
+  if (percent === null || percent === undefined) return { amount: round2(total), tdsAmount: 0, tdsRate: null }
+  const problem = abTdsProblem(Number(total), Number(percent))
+  if (problem) throw new Error(problem)
+  const { tds, paid } = abTdsSplit(Number(total), Number(percent))
+  return { amount: paid, tdsAmount: tds, tdsRate: Number(percent) }
+}
+const cleanAbAllocations = (list: { purchaseId: string; amount: number }[] | undefined) => (list ?? []).filter((a) => Number(a.amount) !== 0).map((a) => ({ purchaseId: a.purchaseId, amount: Number(a.amount) }))
+const abPerPurchase = (list: { purchaseId: string; amount: number }[]) => {
+  const m = new Map<string, number>()
+  for (const a of list) m.set(a.purchaseId, round2((m.get(a.purchaseId) ?? 0) + a.amount))
+  return m
+}
+/** Allocating changes what a purchase owes: its month must be open too (as the payment's). */
+function assertAbAllocationMonths(allocations: { purchaseId: string }[]) {
+  for (const a of allocations) assertMonthEditable(readCollection("adblue_purchases").find((x) => x.id === a.purchaseId)!.date)
+}
+/**
+ * Validated payment ready to store: amount = paid to the vendor, tdsAmount / tdsRate from "Deduct TDS?", allocations to
+ * payable purchases of its vendor, each within what the purchase owes — for an edit (`before`), without its own allocations.
+ */
+function checkAdBluePayment(input: AdBluePaymentInput, before?: AdBluePayment): NewEntity<AdBluePayment> {
+  const vendorId = before ? before.vendorId : input.vendorId
+  if (!before) {
+    const v = readCollection("adblue_vendors").find((x) => x.id === vendorId)
+    if (!v) throw new Error("Choose the AdBlue vendor")
+  }
+  const owed = adblueOutstanding(vendorId, before?.id)
+  const allocations = cleanAbAllocations(input.allocations)
+  const draft = { date: input.date, amount: Number(input.amount), mode: input.mode, utr: input.utr ?? "", allocations, acceptAdvance: input.acceptAdvance === true }
+  const problem = abPaymentProblem(draft, todayISO(), (id) => owed.get(id)?.left, (id) => (owed.has(id) ? abPurchaseLabel(owed.get(id)!.purchase) : `Purchase ${id}`))
+  if (problem) throw new Error(problem)
+  if (input.companyCode && !settingsOrThrow().companies.some((c) => c.code === input.companyCode)) throw new Error("Choose the company that paid")
+  assertAdBlueRefFree(draft.utr, before?.id)
+  return {
+    date: draft.date, vendorId, ...adblueTds(draft.amount, input.tdsPercent), mode: draft.mode, utr: draft.utr.trim(), companyCode: input.companyCode || null,
+    notes: (input.notes ?? "").trim(), allocations: allocations.map((a) => ({ purchaseId: a.purchaseId, amount: round2(a.amount) })),
+  }
+}
+/**
+ * Purchase Payment Details (Add Bulk Purchase, and Edit Purchase — owner, 18 Nov 2026): the NEW payment to save with the
+ * purchase, or null (Credit: nothing paid now — no payment, no TDS). `outstanding` = what the purchase still owes before
+ * it (its value on a new purchase; value − Σ existing payments on an edit — existing payments are never touched).
+ * Fully Paid settles all of it (more only as explicitly accepted advance credit); Partially Paid settles less than it.
+ * The reference is required by mode; TDS as on any payment (the amount entered is the total settled).
+ */
+function purchasePayment(input: AdBluePurchaseInput, outstanding: number, vendorId: string, editing: boolean): NewEntity<AdBluePayment> | null {
+  const p = input.payment
+  const type = p?.type ?? "CREDIT"
+  const amount = Number(p?.amount ?? 0)
+  if (type === "CREDIT") {
+    if (amount !== 0) throw new Error("Payment Type is Credit, so nothing is paid now. Choose Fully Paid or Partially Paid to record an amount.")
+    if (p && p.tdsPercent !== null && p.tdsPercent !== undefined) throw new Error("TDS is deducted only from a payment — Credit pays nothing now, so there is no TDS to deduct.")
+    return null
+  }
+  if (type !== "FULL" && type !== "PARTIAL") throw new Error("Choose the Payment Type: Credit, Fully Paid or Partially Paid")
+  assertAdBluePayments("create")
+  const what = editing ? `the outstanding amount (${formatINR(outstanding)})` : `the purchase value (${formatINR(outstanding)})`
+  if (outstanding <= 0) throw new Error("This purchase is already fully paid — there is nothing left to settle. Record advance credit from the vendor's account (Add Payment), or correct a payment in Payments.")
+  if (type === "FULL" && amount < outstanding) throw new Error(`Fully Paid settles ${editing ? what : `the whole purchase value (${formatINR(outstanding)})`} — enter that amount, or choose Partially Paid.`)
+  if (type === "FULL" && amount > outstanding && !p!.acceptAdvance) throw new Error(`${formatINR(round2(amount - outstanding))} is more than this purchase owes (${formatINR(outstanding)}). Keep the extra as advance credit with the vendor, or correct the amount.`)
+  if (type === "PARTIAL" && !(amount > 0 && amount < outstanding)) throw new Error(`Partially Paid: enter an amount more than ₹0 and less than ${what}.`)
+  const mode = p!.mode ?? ""
+  if (mode === AB_CREDIT || !(ADBLUE_PAYMENT_MODES as readonly string[]).includes(mode)) throw new Error("Choose the Payment Mode (Cash, UPI, NEFT, RTGS, IMPS or Cheque)")
+  if (!(p!.utr ?? "").trim()) throw new Error(`Enter the ${abReferenceNoun(mode)} — it is required for a ${mode} payment.`)
+  const date = p!.date || todayISO()
+  const allocated = Math.min(round2(amount), outstanding)
+  const problem = abPaymentProblem({ date, amount, mode, utr: p!.utr ?? "", allocations: [{ purchaseId: "new", amount: allocated }], acceptAdvance: amount > allocated }, todayISO(), () => outstanding, () => "This purchase")
+  if (problem) throw new Error(problem)
+  if (date < input.date) throw new Error("The payment can't be dated before the purchase it pays.")
+  if (p!.companyCode && !settingsOrThrow().companies.some((c) => c.code === p!.companyCode)) throw new Error("Choose the company that paid")
+  assertAdBlueRefFree(p!.utr!)
+  assertMonthEditable(date)
+  return { date, vendorId, ...adblueTds(amount, p!.tdsPercent), mode, utr: p!.utr!.trim(), companyCode: p!.companyCode || null, notes: (p!.notes ?? "").trim(), allocations: [{ purchaseId: "new", amount: allocated }] }
+}
+/** The purchase's own fields (what an edit may change in stock / value): a payment-only edit changes none of them. */
+const PURCHASE_FIELDS = ["date", "adblueVendorId", "vendorName", "product", "buckets", "litresPerBucket", "pricePerBucket", "totalLitres", "totalCost", "gstRate", "invoiceNo", "notes"] as const
 
 export type TripInput = Omit<
   NewEntity<Trip>,
@@ -701,11 +1112,15 @@ const meta = {
   diesel: (e: DieselEntry) => ({ module: "Diesel", recordType: isTankerFill(e) ? "Diesel entry (from tanker)" : "Diesel entry", recordId: e.id, label: `${regNo(e.vehicleId)} · ${formatDate(e.date)} · ${L(e.litres)}`, recordDate: e.date }),
   adblue: (e: AdBlueEntry) => ({ module: "AdBlue", recordType: "AdBlue entry", recordId: e.id, label: `${regNo(e.vehicleId)} · ${formatDate(e.date)} · ${L(e.quantityLitres)}${isDirectAdBlue(e) ? ` · direct from ${e.vendorName}` : e.adblueVendorId ? ` · from ${vendorName(e.adblueVendorId)} stock` : ""}`, recordDate: e.date }),
   adblueVendor: (v: AdBlueVendor) => ({ module: "AdBlue", recordType: "AdBlue vendor", recordId: v.id, label: v.name, recordDate: null }),
-  adbluePurchase: (p: AdBluePurchase) => ({ module: "AdBlue", recordType: "AdBlue purchase", recordId: p.id, label: `${p.opening ? "Opening stock" : p.vendorName} · ${formatDate(p.date)} · ${L(p.totalLitres)}`, recordDate: p.date }),
+  adbluePurchase: (p: AdBluePurchase) => ({ module: "AdBlue", recordType: "AdBlue purchase", recordId: p.id, label: `${p.opening ? "Opening stock" : p.vendorName} · ${formatDate(p.date)} · ${L(p.totalLitres)}${p.opening ? "" : ` · ${formatINR(purchaseValue(p))}${p.invoiceNo ? ` · bill ${p.invoiceNo}` : ""}`}`, recordDate: p.date }),
+  adbluePayment: (p: AdBluePayment) => ({ module: "AdBlue", recordType: "AdBlue payment", recordId: p.id, label: `${readCollection("adblue_vendors").find((v) => v.id === p.vendorId)?.name ?? "Unknown vendor"} · ${p.mode} · ref ${p.utr} · ${formatDate(p.date)} · ${formatINR(abSettled(p))}${p.tdsAmount ? ` (${formatINR(p.amount)} paid + ${formatINR(p.tdsAmount)} TDS)` : ""}`, recordDate: p.date }),
   load: (l: TankerLoad) => ({ module: "Diesel Tanker", recordType: "Tanker load", recordId: l.id, label: `${tankerName(tankerOf(l))} · ${l.opening ? "Opening stock" : stationName(l.stationId)} · ${formatDate(l.date)} · ${L(l.litres)} loaded`, recordDate: l.date }),
   dispense: (d: TankerDispense) => ({ module: "Diesel Tanker", recordType: "Tanker dispense (external vehicle)", recordId: d.id, label: `${tankerName(tankerOf(d))} · ${d.vehicleNo} · ${formatDate(d.date)} · ${L(d.litres)}`, recordDate: d.date }),
   tanker: (t: Tanker) => ({ module: "Diesel Tanker", recordType: "Tanker", recordId: t.id, label: t.regNo && !t.name.includes(t.regNo) ? `${t.name} (${t.regNo})` : t.name, recordDate: null }),
   transfer: (t: TankerTransfer) => ({ module: "Diesel Tanker", recordType: "Tanker transfer", recordId: t.id, label: `${tankerName(t.fromTankerId)} → ${tankerName(t.toTankerId)} · ${formatDate(t.date)} · ${L(t.litres)}`, recordDate: t.date }),
+  tyrePayment: (p: TyrePayment) => ({ module: "Tyre", recordType: "Tyre payment", recordId: p.id, label: `${tyreMasterName(p.supplierId)} · ${p.mode} · ref ${p.utr} · ${formatDate(p.date)} · ${formatINR(settledOf(p))}${p.tdsAmount ? ` (${formatINR(p.amount)} paid + ${formatINR(p.tdsAmount)} TDS)` : ""}`, recordDate: p.date }),
+  tyreInvoice: (x: TyreInvoice) => ({ module: "Tyre", recordType: "Tyre invoice", recordId: x.id, label: `${tyreMasterName(x.supplierId)} · bill ${x.billNo || "—"} · ${regNo(x.vehicleId)} · ${formatDate(x.date)} · ${formatINR(tyreTotals(x.items).grandTotal)}`, recordDate: x.date }),
+  tyreMaster: (m: TyreMaster) => ({ module: "Tyre", recordType: TYRE_MASTER_LABEL[m.kind].one, recordId: m.id, label: m.name, recordDate: null }),
   industrial: (x: IndustrialSupply) => ({ module: "Diesel", recordType: "Industrial supply", recordId: x.id, label: `${customerName(x.customerId)} · ${formatDate(x.date)} · ${L(x.litres)} @ ${formatINR(x.rate)} · ${x.purpose} · from ${(x.allocations ?? []).map((a) => `${tankerName(a.tankerId)} ${L(a.litres)}`).join(" + ")}`, recordDate: x.date }),
   adjustment: (a: TankerAdjustment) => ({ module: "Diesel Tanker", recordType: "Tanker stock adjustment", recordId: a.id, label: `${tankerName(a.tankerId)} · ${formatDate(a.date)} · ${a.litres > 0 ? "+" : "−"}${L(Math.abs(a.litres))}`, recordDate: a.date }),
   payment: (p: Payment) => {
@@ -732,12 +1147,19 @@ const RECORD_COLLECTION: Record<string, Parameters<typeof readCollection>[0]> = 
   "AdBlue entry": "adblue_entries",
   "AdBlue purchase": "adblue_purchases",
   "AdBlue vendor": "adblue_vendors",
+  "AdBlue payment": "adblue_payments",
   "Tanker load": "tanker_loads",
   "Tanker dispense (external vehicle)": "tanker_dispenses",
   Tanker: "tankers",
   "Tanker transfer": "tanker_transfers",
   "Tanker stock adjustment": "tanker_adjustments",
   "Industrial supply": "industrial_supplies",
+  "Tyre invoice": "tyre_invoices",
+  "Tyre payment": "tyre_payments",
+  Supplier: "tyre_masters",
+  "Repair type": "tyre_masters",
+  "Tyre brand": "tyre_masters",
+  "Tyre size": "tyre_masters",
   "Fuel station payment": "payments",
   Receipt: "payments",
   "Payment voucher": "payments",
@@ -763,6 +1185,7 @@ const MODULE_RESOURCE: Record<string, Resource> = {
   Trips: "trips",
   Invoices: "invoices",
   Settings: "settings",
+  Tyre: "tyres",
 }
 
 export interface AuditLogRow extends AuditEvent {
@@ -923,7 +1346,7 @@ async function removePayment(id: string, reason: string) {
 /* ------------------------------------------------------------------ Restore a deleted record */
 
 /** Record types a DELETED event can be restored for (masters and invoices are never deleted — archive / cancel). */
-const RESTORABLE: Record<string, "diesel_entries" | "adblue_entries" | "adblue_purchases" | "tanker_loads" | "tanker_dispenses" | "tanker_transfers" | "tanker_adjustments" | "industrial_supplies" | "payments" | "trips"> = {
+const RESTORABLE: Record<string, "diesel_entries" | "adblue_entries" | "adblue_purchases" | "tanker_loads" | "tanker_dispenses" | "tanker_transfers" | "tanker_adjustments" | "industrial_supplies" | "tyre_invoices" | "payments" | "trips"> = {
   "Diesel entry": "diesel_entries",
   "Diesel entry (from tanker)": "diesel_entries",
   "AdBlue entry": "adblue_entries",
@@ -937,6 +1360,7 @@ const RESTORABLE: Record<string, "diesel_entries" | "adblue_entries" | "adblue_p
   "Payment voucher": "payments",
   Trip: "trips",
   "Industrial supply": "industrial_supplies",
+  "Tyre invoice": "tyre_invoices",
 }
 
 /** Thrown when restoring might double-count: another record looks like the same transaction. */
@@ -1134,6 +1558,20 @@ function planRestore(eventId: string): RestorePlan {
         duplicate: similar(readCollection("industrial_supplies"), (y) => y.customerId === x.customerId && y.date === x.date && y.litres === x.litres && y.rate === x.rate, (y) => `${customerName(y.customerId)} · ${formatDate(y.date)} · ${L(y.litres)}`),
       }
     }
+    case "tyre_invoices": {
+      const x = r as unknown as TyreInvoice
+      vehicleOk(x.vehicleId)
+      assertOpen(x.vehicleId, x.customerId, x.date)
+      const exists = (id: string | null) => !id || readCollection("tyre_masters").some((m) => m.id === id)
+      if (![x.supplierId, ...(x.items ?? []).flatMap((i) => [i.repairTypeId, i.brandId, i.sizeId])].every(exists) || !x.items?.length) throw new Error("Its supplier or repair lines are no longer on record, so it can't be restored.")
+      r.items = x.items.map((i) => ({ ...i, ...lineAmounts(i.quantity, i.rate, i.gstRate, i.taxType) })) // stored exactly as calculated
+      return {
+        key,
+        record: r,
+        note: `Adds ${formatINR(tyreTotals(x.items).grandTotal)} of tyre work on ${regNo(x.vehicleId)} back to ${x.office ? `the ${OFFICE_LABEL}` : `${customerName(x.customerId)}'s`} tyre totals.`,
+        duplicate: similar(readCollection("tyre_invoices"), (y) => y.supplierId === x.supplierId && y.date === x.date && y.vehicleId === x.vehicleId && (!!x.billNo ? y.billNo === x.billNo : tyreTotals(y.items).grandTotal === tyreTotals(x.items).grandTotal), (y) => `${tyreMasterName(y.supplierId)} · bill ${y.billNo || "—"} · ${regNo(y.vehicleId)} · ${formatDate(y.date)}`),
+      }
+    }
     case "trips": {
       const t = r as unknown as Trip
       vehicleOk(t.vehicleId)
@@ -1293,14 +1731,22 @@ export const api = {
     async list(): Promise<FuelStationPayment[]> {
       return (await payments.list())
         .filter((p) => p.direction === "OUT" && p.vendorId && p.categoryCode === STATION_PAYMENT_CATEGORY)
-        .map((p) => ({ id: p.id, stationId: p.vendorId!, paymentDate: p.date, forMonth: p.forMonth ?? null, amount: round2(p.amount + p.tdsAmount), paymentMode: p.mode, notes: p.notes, paymentNo: p.paymentNo, companyCode: p.companyCode, tds: !p.amount && p.tdsAmount > 0, updatedAt: p.updatedAt }))
+        .map((p) => ({ id: p.id, stationId: p.vendorId!, paymentDate: p.date, forMonth: p.forMonth ?? null, amount: round2(p.amount + p.tdsAmount), paidAmount: p.amount, tdsAmount: p.tdsAmount, tdsRate: p.tdsRate ?? null, reference: p.reference, paymentMode: p.mode, notes: p.notes, paymentNo: p.paymentNo, companyCode: p.companyCode, tds: !p.amount && p.tdsAmount > 0, updatedAt: p.updatedAt }))
     },
-    create: (input: { stationId: string; paymentDate: string; amount: number; paymentMode: PaymentMode; notes: string; companyCode: CompanyCode; reference?: string; forMonth?: string }) =>
+    /**
+     * `amount` = the total settled. `tdsPercent` ("Deduct TDS?", off = absent / null): TDS = amount × % / 100 is
+     * withheld — the voucher stores the net paid to the station, the TDS and the % (tdsSplit); the ledger reduces the
+     * balance by the full total. Without it: exactly as before.
+     */
+    create: (input: { stationId: string; paymentDate: string; amount: number; paymentMode: PaymentMode; notes: string; companyCode: CompanyCode; reference?: string; forMonth?: string; tdsPercent?: number | null; confirmSeparateTds?: boolean }) =>
       tx(async () => {
         assertCan("payments", "create")
         const station = readCollection("fuel_stations").find((v) => v.id === input.stationId)
         if (!station) throw new NotFoundError("Fuel station", input.stationId)
         if (!(input.amount > 0)) throw new Error("Amount must be greater than zero")
+        const split = stationTds(input.amount, input.tdsPercent, input.paymentMode)
+        assertMonthEditable(input.paymentDate) // the lock answers first (createPayment checks it again)
+        assertNoDoubleTds(station.id, input.forMonth, split.tdsAmount, input.confirmSeparateTds)
         return createPayment({
           companyCode: input.companyCode,
           direction: "OUT",
@@ -1311,17 +1757,17 @@ export const api = {
           vehicleId: null,
           partyName: station.name,
           categoryCode: STATION_PAYMENT_CATEGORY,
-          amount: round2(input.amount),
-          tdsAmount: 0,
+          ...split,
           mode: input.paymentMode,
-          reference: input.reference ?? "",
+          reference: (input.reference ?? "").trim(),
           allocations: [],
           notes: input.notes,
           ...(input.forMonth ? { forMonth: input.forMonth } : {}),
         })
       }),
     /** PATCH — date, amount, mode, notes, paid-against month. Both the old and the new date follow the Monthly Sheet Lock. */
-    update: (id: string, patch: { paymentDate: string; amount: number; paymentMode: PaymentMode; notes: string; forMonth?: string }, reason?: string) =>
+    /** `tdsPercent`: a number = deduct TDS at that %; null = no TDS; undefined = keep the payment's own setting. */
+    update: (id: string, patch: { paymentDate: string; amount: number; paymentMode: PaymentMode; notes: string; forMonth?: string; reference?: string; tdsPercent?: number | null; confirmSeparateTds?: boolean }, reason?: string) =>
       tx(async () => {
         const existing = await payments.get(id)
         assertCan("payments", "edit")
@@ -1334,7 +1780,15 @@ export const api = {
         // A TDS entry stays a TDS entry on its month's last day: only its amount and notes change.
         const isTds = !existing.amount && existing.tdsAmount > 0
         if (isTds && patch.paymentDate !== existing.date) throw new Error("A TDS entry is always dated the last day of its month.")
-        const after = await payments.update(id, isTds ? { tdsAmount: round2(patch.amount), notes: patch.notes } : { date: patch.paymentDate, amount: round2(patch.amount), mode: patch.paymentMode, notes: patch.notes, ...(patch.forMonth ? { forMonth: patch.forMonth } : {}) })
+        if (isTds && patch.tdsPercent != null) throw new Error("A TDS entry is TDS already — no TDS is deducted from it.")
+        const split = isTds ? null : stationTds(patch.amount, patch.tdsPercent === undefined ? (existing.tdsRate ?? null) : patch.tdsPercent, patch.paymentMode)
+        if (split) assertNoDoubleTds(existing.vendorId, patch.forMonth ?? existing.forMonth, split.tdsAmount, patch.confirmSeparateTds)
+        const after = await payments.update(
+          id,
+          isTds
+            ? { tdsAmount: round2(patch.amount), notes: patch.notes }
+            : { date: patch.paymentDate, ...split!, mode: patch.paymentMode, notes: patch.notes, ...(patch.reference !== undefined ? { reference: patch.reference.trim() } : {}), ...(patch.forMonth ? { forMonth: patch.forMonth } : {}) }
+        )
         audit({ action: "UPDATED", ...meta.payment(after), before: existing, after, reason })
         return after
       }),
@@ -1345,7 +1799,7 @@ export const api = {
      * month's last day; suggested amount 0.1% of that month's Fuel Purchased (tdsDue). One per station per month.
      * Settles that much of what we owe the station; never touches the bank. Same payment lock as any station payment.
      */
-    recordTds: (input: { stationId: string; month: string; amount: number; companyCode: CompanyCode; notes: string }) =>
+    recordTds: (input: { stationId: string; month: string; amount: number; companyCode: CompanyCode; notes: string; confirmSeparateTds?: boolean }) =>
       tx(async () => {
         assertCan("payments", "create")
         const station = readCollection("fuel_stations").find((v) => v.id === input.stationId)
@@ -1354,8 +1808,14 @@ export const api = {
         const date = tdsDate(input.month)
         const label = format(parseISO(`${input.month}-01`), "MMMM yyyy")
         if (date > todayISO()) throw new Error(`TDS for ${label} is dated ${formatDate(date)} — record it on or after that day.`)
-        const dup = readCollection("payments").find((p) => isStationPayment(p, station.id) && p.tdsAmount > 0 && p.date.startsWith(input.month))
+        // The month's TDS entry (mode TDS) — TDS deducted on a payment ("Deduct TDS?") is not one.
+        const dup = readCollection("payments").find((p) => isStationPayment(p, station.id) && p.mode === "TDS" && p.date.startsWith(input.month))
         if (dup) throw new Error(`TDS for ${label} is already recorded for ${station.name} (${dup.paymentNo}). Edit that entry instead.`)
+        // Per-payment TDS is the normal method (17 Nov 2026): a monthly entry for purchases already taxed on payments
+        // needs an explicit confirmation that it is separate TDS.
+        const taken = tdsTakenOn(readCollection("payments"), station.id, input.month)
+        if (taken.onPayments > 0 && !input.confirmSeparateTds)
+          throw new Error(`${formatINR(taken.onPayments)} of TDS was already deducted on ${taken.deducted.length} payment${taken.deducted.length === 1 ? "" : "s"} against ${label} purchases (${taken.deducted.map((p) => p.paymentNo).join(", ")}). A monthly TDS entry too would tax the same purchases twice. Confirm it is separate TDS to record it.`)
         return createPayment({
           companyCode: input.companyCode,
           direction: "OUT",
@@ -1749,6 +2209,177 @@ export const api = {
       }),
   },
 
+  /** Tyre Data → Tyre masters: suppliers, repair types, tyre brands and sizes. Never deleted — archived and restored. */
+  tyreMasters: {
+    list: tyreMasters.list,
+    create: (input: TyreMasterInput) =>
+      tx(async () => {
+        assertCan("tyres", "create")
+        const name = checkTyreMaster(input.kind, input.name)
+        const after = await tyreMasters.create({ kind: input.kind, name, status: "ACTIVE" })
+        audit({ action: "CREATED", ...meta.tyreMaster(after), after })
+        return after
+      }),
+    /** Rename. Past invoices show the new name (they point at the value, not at its text). */
+    update: (id: string, input: { name: string }) =>
+      tx(async () => {
+        assertCan("tyres", "edit")
+        const before = await tyreMasters.get(id)
+        if (!before) throw new NotFoundError("Tyre list value", id)
+        const after = await tyreMasters.update(id, { name: checkTyreMaster(before.kind, input.name, id) })
+        audit({ action: "UPDATED", ...meta.tyreMaster(after), before, after })
+        return after
+      }),
+    archive: (id: string) => setTyreMasterStatus(id, "ARCHIVED"),
+    restore: (id: string) => setTyreMasterStatus(id, "ACTIVE"),
+  },
+
+  /** Tyre invoices: one supplier bill for one vehicle, with its repair lines — saved together or not at all. */
+  tyreInvoices: {
+    list: tyreInvoices.list,
+    create: (input: TyreInvoiceInput) =>
+      tx(async () => {
+        assertCan("tyres", "create")
+        const data = checkTyreInvoice(input)
+        assertMonthEditable(data.date)
+        const pay = initialTyrePayment(input, data)
+        const after = await tyreInvoices.create(data)
+        audit({ action: "CREATED", ...meta.tyreInvoice(after), after })
+        if (pay) {
+          // Saved with the invoice (same transaction): allocated to it up to its total, the rest explicitly advance.
+          const p = await tyrePayments.create({ ...pay, allocations: pay.allocations.map((a) => ({ ...a, invoiceId: after.id })) })
+          audit({ action: "PAYMENT_RECORDED", ...meta.tyrePayment(p), after: p, note: `Paid with ${tyreInvoiceLabel(after)}` })
+        }
+        return after
+      }),
+    update: (id: string, input: TyreInvoiceInput, reason?: string) =>
+      tx(async () => {
+        assertCan("tyres", "edit")
+        const before = await tyreInvoices.get(id)
+        if (!before) throw new NotFoundError("Tyre invoice", id)
+        assertMonthEditable(before.date)
+        const data = checkTyreInvoice(input, before)
+        assertMonthEditable(data.date)
+        // A financial change (date, vehicle, attribution, supplier, bill number, repair lines) needs a reason (17 Nov 2026).
+        const changed = financialChanges(before, data)
+        if (changed.length && deletionReasonError(reason, "correcting")) throw new Error(`Enter the reason for changing the ${changed.join(", ")} (at least 3 characters).`)
+        if (input.payment) throw new Error("Payments are recorded on the vendor's page (Tyre → Vendor Purchases), not by editing the invoice.")
+        // Payments already allocated stay as they were (never re-allocated by an edit): the invoice keeps its supplier and
+        // its total never goes below what was paid against it.
+        const pays = readCollection("tyre_payments").filter((p) => p.allocations.some((a) => a.invoiceId === id))
+        if (pays.length && data.supplierId !== before.supplierId) throw new Error(`Payments to ${tyreMasterName(before.supplierId)} are recorded against this invoice, so its supplier can't be changed. Record the bill again under the right supplier instead.`)
+        const paid = paidByInvoice(pays).get(id) ?? 0
+        if (tyreTotals(data.items).grandTotal < paid) throw new Error(`${formatINR(paid)} has already been paid against this invoice, so its total can't go below that (new total ${formatINR(tyreTotals(data.items).grandTotal)}). Correct or delete the payment (Tyre → Payments) first if it was wrong.`)
+        const after = await tyreInvoices.update(id, data)
+        audit({ action: "UPDATED", ...meta.tyreInvoice(after), before, after, reason: reason?.trim() || undefined })
+        return after
+      }),
+    /** The Owner and Dev only (delete), with a reason; the lines go with it. Restorable from the Audit Log. */
+    remove: (id: string, reason: string) =>
+      tx(async () => {
+        assertCan("tyres", "delete")
+        assertReason(reason)
+        const before = await tyreInvoices.get(id)
+        if (!before) return
+        assertMonthEditable(before.date)
+        // An invoice that payments point at stays: delete (or correct) those payments first.
+        const pays = readCollection("tyre_payments").filter((p) => p.allocations.some((a) => a.invoiceId === id))
+        if (pays.length) throw new Error(`Payments are recorded against this invoice (${pays.map((p) => `${formatDate(p.date)} ${formatINR(settledOf(p))}`).join("; ")}), so it can't be deleted. Correct it with Edit, or delete those payments first (Tyre → Payments).`)
+        await tyreInvoices.remove(id)
+        audit({ action: "DELETED", ...meta.tyreInvoice(before), before, reason: reason.trim() })
+      }),
+  },
+
+  /**
+   * Payments to tyre suppliers: allocated to the supplier's invoices, the rest explicitly advance credit; advance is
+   * applied later with `allocate`. Edited with `update`; deleted permanently with `remove` (Owner / Dev, with a reason).
+   */
+  tyrePayments: {
+    list: tyrePayments.list,
+    create: (input: TyrePaymentInput) =>
+      tx(async () => {
+        assertCan("tyres", "create")
+        const data = checkTyrePayment(input)
+        assertMonthEditable(data.date)
+        assertAllocationMonths(data.allocations)
+        const after = await tyrePayments.create(data)
+        audit({ action: "PAYMENT_RECORDED", ...meta.tyrePayment(after), after })
+        return after
+      }),
+    /**
+     * Edit (tyres:edit; owner, 17 Nov 2026): date, total settled, mode, "Deduct TDS?" / %, reference, paid by, notes and
+     * — only when sent — the allocations (explicit: never re-allocated by the API; unchanged when the same per invoice).
+     * TDS and the amount paid are recalculated; the vendor, invoices and advance follow from the records. A financial
+     * change (date, amount, mode, TDS, allocations) needs a reason. Month lock: the old and new date, and every invoice
+     * whose allocation changes.
+     */
+    update: (id: string, input: Omit<TyrePaymentInput, "supplierId" | "allocations"> & { supplierId?: string; allocations?: { invoiceId: string; amount: number }[] }, reason?: string) =>
+      tx(async () => {
+        assertCan("tyres", "edit")
+        const before = await tyrePayments.get(id)
+        if (!before) throw new NotFoundError("Tyre payment", id)
+        if (input.supplierId && input.supplierId !== before.supplierId) throw new Error("A payment's vendor can't be changed — delete it and record it again for the right vendor.")
+        assertMonthEditable(before.date)
+        const sent = input.allocations !== undefined
+        const old = perInvoice(before.allocations)
+        const next = sent ? perInvoice(cleanAllocations(input.allocations)) : old
+        const same = next.size === old.size && [...next].every(([k, v]) => old.get(k) === v)
+        const data = checkTyrePayment({ ...input, supplierId: before.supplierId, allocations: [...next].map(([invoiceId, amount]) => ({ invoiceId, amount })) }, before)
+        if (same) data.allocations = before.allocations // unchanged: kept exactly as recorded
+        assertMonthEditable(data.date)
+        const touched = [...new Set([...old.keys(), ...next.keys()])].filter((k) => old.get(k) !== next.get(k))
+        assertAllocationMonths(touched.map((invoiceId) => ({ invoiceId })))
+        const changed = [
+          data.date !== before.date && "date",
+          settledOf(data) !== settledOf(before) && "amount",
+          data.mode !== before.mode && "payment mode",
+          (data.tdsRate ?? null) !== (before.tdsRate ?? null) && "TDS",
+          !same && "allocations",
+        ].filter(Boolean) as string[]
+        if (changed.length && deletionReasonError(reason, "correcting")) throw new Error(`Enter the reason for changing the ${changed.join(", ")} (at least 3 characters).`)
+        const after = await tyrePayments.update(id, data)
+        audit({ action: "UPDATED", ...meta.tyrePayment(after), before, after, reason: reason?.trim() || undefined, note: changed.length ? `Payment corrected: ${changed.join(", ")}` : undefined })
+        return after
+      }),
+    /** Apply a payment's advance credit to invoices of its supplier. Adds allocations; never changes existing ones. */
+    allocate: (id: string, allocations: { invoiceId: string; amount: number }[]) =>
+      tx(async () => {
+        assertCan("tyres", "edit")
+        const before = await tyrePayments.get(id)
+        if (!before) throw new NotFoundError("Tyre payment", id)
+        const add = (allocations ?? []).filter((a) => Number(a.amount) !== 0).map((a) => ({ invoiceId: a.invoiceId, amount: round2(Number(a.amount)) }))
+        if (!add.length) throw new Error("Enter the amount to apply to at least one invoice")
+        const owed = tyreOutstanding(before.supplierId)
+        const left = unallocated(before)
+        // Checked as a payment of the advance left (its own rules: amounts, invoices of this vendor, each within what it owes).
+        const problem = paymentProblem({ date: before.date, amount: left, mode: before.mode, utr: before.utr, allocations: add, acceptAdvance: true }, todayISO(), (x) => owed.get(x)?.left, (x) => (owed.has(x) ? tyreInvoiceLabel(owed.get(x)!.invoice) : `Invoice ${x}`))
+        if (problem) throw new Error(left <= 0 ? "This payment has no advance credit left to allocate." : problem.replace("are more than the payment", "are more than the advance left"))
+        assertMonthEditable(before.date)
+        assertAllocationMonths(add)
+        const after = await tyrePayments.update(id, { allocations: [...before.allocations, ...add] })
+        audit({ action: "UPDATED", ...meta.tyrePayment(after), before, after, note: `Advance applied: ${add.map((a) => `${formatINR(a.amount)} to ${tyreInvoiceLabel(owed.get(a.invoiceId)!.invoice)}`).join("; ")}` })
+        return after
+      }),
+    /**
+     * Delete permanently (owner, 17 Nov 2026 — replaces voiding): the Owner / Dev only, with a reason; month lock on the
+     * payment's date and every bill it paid. The payment and its allocations go in one transaction with its DELETED
+     * event (the full payment: allocations, TDS, reference) — the bills are owed again, its advance and TDS count
+     * nowhere; every figure is calculated, so nothing else changes. A repeated delete finds nothing and records nothing.
+     */
+    remove: (id: string, reason: string) =>
+      tx(async () => {
+        assertCan("tyres", "delete")
+        assertReason(reason)
+        const before = await tyrePayments.get(id)
+        if (!before) return
+        assertMonthEditable(before.date)
+        assertAllocationMonths(before.allocations)
+        await tyrePayments.remove(id)
+        const bills = [...new Set(before.allocations.map((a) => a.invoiceId))].map((x) => readCollection("tyre_invoices").find((v) => v.id === x)).filter((v) => !!v).map((v) => tyreInvoiceLabel(v!))
+        audit({ action: "DELETED", ...meta.tyrePayment(before), before, reason: reason.trim(), note: bills.length ? `Allocations removed: ${bills.join(", ")} owed again` : "No bill allocated: its advance credit is removed" })
+      }),
+  },
+
   adblueVehicles: {
     list: async () => {
       const ids = new Set((await adblue.list()).map((e) => e.vehicleId))
@@ -2017,8 +2648,15 @@ export const api = {
         ensureSeeded()
         assertMonthEditable(input.date)
         const vendor = (await resolveVendor(input, null))!
-        const after = await adbluePurchases.create(purchaseTotals(input, vendor))
+        const data = purchaseTotals(input, vendor)
+        const pay = purchasePayment({ ...input, payment: input.payment && { ...input.payment, date: input.payment.date || input.date } }, purchaseValue(data), vendor.id, false) // checked before anything is saved
+        const after = await adbluePurchases.create(data)
         audit({ action: "CREATED", ...meta.adbluePurchase(after), after })
+        if (pay) {
+          // Saved with the purchase (same transaction): allocated to it — Fully or Partially Paid.
+          const p = await adbluePayments.create({ ...pay, allocations: pay.allocations.map((a) => ({ ...a, purchaseId: after.id })) })
+          audit({ action: "PAYMENT_RECORDED", ...meta.adbluePayment(p), after: p, note: `Paid with ${abPurchaseLabel(after)}` })
+        }
         return after
       }),
     update: (id: string, input: AdBluePurchaseInput, reason?: string) =>
@@ -2031,9 +2669,26 @@ export const api = {
         assertMonthEditable(before.date)
         assertMonthEditable(input.date)
         const next = purchaseTotals(input, (await resolveVendor(input, before.adblueVendorId))!, before)
+        // Payments already allocated stay as they were: the purchase keeps its vendor and its value never goes below what was paid.
+        const paid = paidByPurchase(readCollection("adblue_payments")).get(id) ?? 0
+        if (paid > 0 && next.adblueVendorId !== before.adblueVendorId) throw new Error(`Payments to ${before.vendorName} are allocated to this purchase, so its vendor can't be changed. Delete or re-allocate those payments first.`)
+        if (purchaseValue(next) < paid) throw new Error(`${formatINR(paid)} has already been paid against this purchase, so its value can't go below that (new value ${formatINR(purchaseValue(next))}). Correct or delete the payment first.`)
         assertStock(readCollection("adblue_purchases").map((p) => (p.id === id ? { ...p, ...next } : p)), readCollection("adblue_entries"))
-        const after = await adbluePurchases.update(id, next)
-        audit({ action: "UPDATED", ...meta.adbluePurchase(after), before, after, reason })
+        // A new payment for what is still owed (checked before anything is saved). Existing payments stay as they are.
+        const pay = purchasePayment(input, Math.max(0, round2(purchaseValue(next) - paid)), next.adblueVendorId, true)
+        if (pay) assertAbAllocationMonths([{ purchaseId: id }])
+        // The purchase (the stock batch) is rewritten only when its own fields change — never for a payment alone.
+        const changed = PURCHASE_FIELDS.some((k) => JSON.stringify(next[k] ?? null) !== JSON.stringify((before as unknown as Record<string, unknown>)[k] ?? (k === "gstRate" ? 0 : null)))
+        let after = before
+        if (changed) {
+          after = await adbluePurchases.update(id, next)
+          audit({ action: "UPDATED", ...meta.adbluePurchase(after), before, after, reason })
+        }
+        if (pay) {
+          const p = await adbluePayments.create({ ...pay, allocations: pay.allocations.map((a) => ({ ...a, purchaseId: id })) })
+          audit({ action: "PAYMENT_RECORDED", ...meta.adbluePayment(p), after: p, note: `Paid from Edit Purchase · ${abPurchaseLabel(after)}${p.allocations[0].amount < abSettled(p) ? ` · ${formatINR(round2(abSettled(p) - p.allocations[0].amount))} advance credit` : ""}` })
+        }
+        if (!changed && !pay) return before
         return after
       }),
     remove: (id: string, reason: string) =>
@@ -2044,9 +2699,146 @@ export const api = {
         const before = await adbluePurchases.get(id)
         if (!before) return
         assertMonthEditable(before.date)
+        const pays = readCollection("adblue_payments").filter((p) => p.allocations.some((a) => a.purchaseId === id))
+        if (pays.length) throw new Error(`Payments are allocated to this purchase (${pays.map((p) => `${formatDate(p.date)} ${formatINR(abSettled(p))}`).join("; ")}), so it can't be deleted. Delete or re-allocate those payments first.`)
         assertStock(readCollection("adblue_purchases").filter((p) => p.id !== id), readCollection("adblue_entries"))
         await adbluePurchases.remove(id)
         audit({ action: "DELETED", ...meta.adbluePurchase(before), before, reason })
+      }),
+  },
+
+  /**
+   * Payments to AdBlue vendors (owner, 18 Nov 2026): allocated to the vendor's bulk purchases, the rest explicitly advance
+   * credit (applied later with `allocate`). The Owner, Dev and Employee; delete (permanent) the Owner / Dev. Never touches
+   * stock. Calculations: domain/adblue-payments.ts.
+   */
+  adbluePayments: {
+    list: async () => {
+      assertAdBluePayments("view")
+      return adbluePayments.list()
+    },
+    create: (input: AdBluePaymentInput) =>
+      tx(async () => {
+        assertAdBluePayments("create")
+        const data = checkAdBluePayment(input)
+        assertMonthEditable(data.date)
+        assertAbAllocationMonths(data.allocations)
+        const after = await adbluePayments.create(data)
+        audit({ action: "PAYMENT_RECORDED", ...meta.adbluePayment(after), after })
+        return after
+      }),
+    /**
+     * Edit: date, total settled, mode, "Deduct TDS?" / %, reference, paid by, notes and — only when sent — the
+     * allocations (never re-allocated by the API; unchanged per purchase = kept as recorded). A financial change (date,
+     * amount, mode, TDS, allocations) needs a reason. Month lock: old and new date, and every purchase whose allocation
+     * changes. The vendor never changes.
+     */
+    update: (id: string, input: Omit<AdBluePaymentInput, "vendorId" | "allocations"> & { vendorId?: string; allocations?: { purchaseId: string; amount: number }[] }, reason?: string) =>
+      tx(async () => {
+        assertAdBluePayments("edit")
+        const before = await adbluePayments.get(id)
+        if (!before) throw new NotFoundError("AdBlue payment", id)
+        if (input.vendorId && input.vendorId !== before.vendorId) throw new Error("A payment's vendor can't be changed — delete it and record it again for the right vendor.")
+        assertMonthEditable(before.date)
+        const old = abPerPurchase(before.allocations)
+        const next = input.allocations !== undefined ? abPerPurchase(cleanAbAllocations(input.allocations)) : old
+        const same = next.size === old.size && [...next].every(([k, v]) => old.get(k) === v)
+        const data = checkAdBluePayment({ ...input, vendorId: before.vendorId, allocations: [...next].map(([purchaseId, amount]) => ({ purchaseId, amount })) }, before)
+        if (same) data.allocations = before.allocations // unchanged: kept exactly as recorded
+        assertMonthEditable(data.date)
+        assertAbAllocationMonths([...new Set([...old.keys(), ...next.keys()])].filter((k) => old.get(k) !== next.get(k)).map((purchaseId) => ({ purchaseId })))
+        const changed = [
+          data.date !== before.date && "date",
+          abSettled(data) !== abSettled(before) && "amount",
+          data.mode !== before.mode && "payment mode",
+          (data.tdsRate ?? null) !== (before.tdsRate ?? null) && "TDS",
+          !same && "allocations",
+        ].filter(Boolean) as string[]
+        if (changed.length && deletionReasonError(reason, "correcting")) throw new Error(`Enter the reason for changing the ${changed.join(", ")} (at least 3 characters).`)
+        const after = await adbluePayments.update(id, data)
+        audit({ action: "UPDATED", ...meta.adbluePayment(after), before, after, reason: reason?.trim() || undefined, note: changed.length ? `Payment corrected: ${changed.join(", ")}` : undefined })
+        return after
+      }),
+    /** Apply a payment's advance credit to purchases of its vendor. Adds allocations; never changes existing ones. */
+    allocate: (id: string, allocations: { purchaseId: string; amount: number }[]) =>
+      tx(async () => {
+        assertAdBluePayments("edit")
+        const before = await adbluePayments.get(id)
+        if (!before) throw new NotFoundError("AdBlue payment", id)
+        const add = cleanAbAllocations(allocations).map((a) => ({ purchaseId: a.purchaseId, amount: round2(a.amount) }))
+        if (!add.length) throw new Error("Enter the amount to apply to at least one purchase")
+        const owed = adblueOutstanding(before.vendorId)
+        const left = abUnallocated(before)
+        const problem = abPaymentProblem({ date: before.date, amount: left, mode: before.mode, utr: before.utr, allocations: add, acceptAdvance: true }, todayISO(), (x) => owed.get(x)?.left, (x) => (owed.has(x) ? abPurchaseLabel(owed.get(x)!.purchase) : `Purchase ${x}`))
+        if (problem) throw new Error(left <= 0 ? "This payment has no advance credit left to apply." : problem.replace("are more than the payment", "are more than the advance left"))
+        assertMonthEditable(before.date)
+        assertAbAllocationMonths(add)
+        const after = await adbluePayments.update(id, { allocations: [...before.allocations, ...add] })
+        audit({ action: "UPDATED", ...meta.adbluePayment(after), before, after, note: `Advance applied: ${add.map((a) => `${formatINR(a.amount)} to ${abPurchaseLabel(owed.get(a.purchaseId)!.purchase)}`).join("; ")}` })
+        return after
+      }),
+    /**
+     * Apply a vendor's advance credit (its payments' unallocated parts) to its outstanding purchases — the vendor page's
+     * Apply Advance. No payment is created: each requested amount is taken from the vendor's payments that hold advance,
+     * oldest first (payments in a month the role can't change are skipped), and appended to those payments as
+     * allocations — one transaction, one UPDATED audit event per payment used.
+     */
+    applyAdvance: (vendorId: string, allocations: { purchaseId: string; amount: number }[]) =>
+      tx(async () => {
+        assertAdBluePayments("edit")
+        const add = cleanAbAllocations(allocations).map((a) => ({ purchaseId: a.purchaseId, amount: round2(a.amount) }))
+        if (!add.length) throw new Error("Enter the amount to apply to at least one purchase")
+        // Never a try / catch around assertMonthEditable: on the server, reading month_locks may first ask for the data (NeedData).
+        const locks = readCollection("month_locks")
+        const open = (date: string) => canEditMonth(currentRole(), date.slice(0, 7), todayISO(), locks)
+        const sources = readCollection("adblue_payments")
+          .filter((p) => p.vendorId === vendorId && abUnallocated(p) > 0)
+          .sort((x, y) => x.date.localeCompare(y.date) || x.createdAt.localeCompare(y.createdAt))
+        const usable = sources.filter((p) => open(p.date))
+        const available = round2(usable.reduce((t, p) => t + abUnallocated(p), 0))
+        const owed = adblueOutstanding(vendorId)
+        const problem = abPaymentProblem({ date: todayISO(), amount: available, mode: "NEFT", utr: "advance", allocations: add, acceptAdvance: true }, todayISO(), (x) => owed.get(x)?.left, (x) => (owed.has(x) ? abPurchaseLabel(owed.get(x)!.purchase) : `Purchase ${x}`))
+        if (problem) throw new Error(available <= 0 ? (sources.length ? "The advance credit with this vendor is on payments in a locked month." : "This vendor has no advance credit to apply.") : problem.replace(/are more than the payment \(₹[\d.]+\)/, `are more than the advance credit available (₹${available.toFixed(2)})`))
+        assertAbAllocationMonths(add)
+        // Take each purchase's amount from the oldest payments holding advance.
+        const left = new Map(usable.map((p) => [p.id, abUnallocated(p)]))
+        const extra = new Map<string, { purchaseId: string; amount: number }[]>()
+        for (const a of add) {
+          let need = a.amount
+          for (const p of usable) {
+            if (need <= 0) break
+            const take = round2(Math.min(need, left.get(p.id)!))
+            if (take <= 0) continue
+            left.set(p.id, round2(left.get(p.id)! - take))
+            extra.set(p.id, [...(extra.get(p.id) ?? []), { purchaseId: a.purchaseId, amount: take }])
+            need = round2(need - take)
+          }
+        }
+        const updated: AdBluePayment[] = []
+        for (const p of usable.filter((x) => extra.has(x.id))) {
+          const more = extra.get(p.id)!
+          const after = await adbluePayments.update(p.id, { allocations: [...p.allocations, ...more] })
+          audit({ action: "UPDATED", ...meta.adbluePayment(after), before: p, after, note: `Advance applied: ${more.map((m) => `${formatINR(m.amount)} to ${abPurchaseLabel(owed.get(m.purchaseId)!.purchase)}`).join("; ")}` })
+          updated.push(after)
+        }
+        return updated
+      }),
+    /**
+     * Delete permanently: the Owner / Dev only, with a reason; month lock on the payment's date and every purchase it
+     * paid. The payment and its allocations go in one transaction with the DELETED event (the full payment: allocations,
+     * TDS, reference) — the purchases are owed again; nothing else is stored, so every figure recalculates.
+     */
+    remove: (id: string, reason: string) =>
+      tx(async () => {
+        assertAdBluePayments("delete")
+        assertReason(reason)
+        const before = await adbluePayments.get(id)
+        if (!before) return
+        assertMonthEditable(before.date)
+        assertAbAllocationMonths(before.allocations)
+        await adbluePayments.remove(id)
+        const bills = [...new Set(before.allocations.map((a) => a.purchaseId))].map((x) => readCollection("adblue_purchases").find((p) => p.id === x)).filter((p) => !!p).map((p) => abPurchaseLabel(p!))
+        audit({ action: "DELETED", ...meta.adbluePayment(before), before, reason: reason.trim(), note: bills.length ? `Allocations removed: ${bills.join(", ")} owed again` : "No purchase allocated: its advance credit is removed" })
       }),
   },
 

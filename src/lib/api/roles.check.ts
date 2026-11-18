@@ -65,10 +65,13 @@ async function main() {
   const shown = (role: (typeof ROLES)[number]["value"]) => NAV_ITEMS.filter((i) => can(role, i.resource) && showInNav(role, i)).map((i) => i.title)
   const fuel = NAV_ITEMS.filter((i) => i.group === "Fuel").map((i) => i.title)
   assert.deepEqual(shown("DEV"), NAV_ITEMS.map((i) => i.title))
-  assert.deepEqual(shown("OWNER"), [...fuel, "Audit Log"], "OWNER sidebar: Fuel + Audit Log; no Settings, no other section")
-  assert.deepEqual(shown("OWNER"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Audit Log"])
-  assert.deepEqual(shown("EMPLOYEE"), [...fuel, "Audit Log"], "EMPLOYEE sidebar: Fuel + Audit Log (read-only); no Settings, no other section")
-  assert.deepEqual(shown("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Audit Log"])
+  // Finance → Payments for the Owner (owner, 18 Nov 2026) — Invoices and Reports stay hidden; the Employee unchanged.
+  assert.deepEqual(shown("OWNER"), [...fuel, "Tyre", "Payments", "Audit Log"], "OWNER sidebar: Fuel + Tyre Data + Finance → Payments + Audit Log; no Settings, no other item")
+  assert.deepEqual(shown("OWNER"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Payments", "Audit Log"])
+  assert.ok(!shown("OWNER").includes("Invoices") && !shown("OWNER").includes("Reports"), "the Owner's other Finance pages stay out of the sidebar")
+  assert.ok(!shown("EMPLOYEE").includes("Payments"), "the Employee's sidebar has no Payments")
+  assert.deepEqual(shown("EMPLOYEE"), [...fuel, "Tyre", "Audit Log"], "EMPLOYEE sidebar: Fuel + Tyre Data + Audit Log (read-only); no Settings, no other section")
+  assert.deepEqual(shown("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Audit Log"])
   // Visibility only: the hidden modules keep every permission (direct URLs and the API behave as before).
   for (const r of ["dashboard", "customers", "vehicles", "trips", "invoices", "payments", "reports", "settings", "audit"] as const) assert.ok(can("OWNER", r), `OWNER keeps ${r}`)
   for (const r of ["dashboard", "customers", "vehicles", "trips", "invoices", "payments", "reports", "audit"] as const) assert.ok(can("EMPLOYEE", r), `EMPLOYEE has ${r}`)

@@ -31,13 +31,15 @@ export interface StationTxn {
   createdAt?: string
   /** Diesel fills only: CREDIT (owed) or CASH (paid at the pump). AdBlue is on account. */
   paymentMode?: "CREDIT" | "CASH"
+  /** Fills: the indent / bill number as saved (DieselEntry.billNo; a tanker load's invoice number). "" = none recorded. */
+  billNo?: string
 }
 
 export function stationTransactions(stationId: string, diesel: DieselEntry[], adblue: AdBlueEntry[], vehicles: Map<string, Vehicle>): StationTxn[] {
   return [
     ...diesel
       .filter((e) => e.vendorId === stationId)
-      .map((e): StationTxn => ({ id: e.id, date: e.date, vehicleId: e.vehicleId, customerId: e.customerId, kind: vehicles.get(e.vehicleId)?.fuelType ?? "DIESEL", qty: e.litres, rate: e.rate, amount: e.amount, paymentMode: e.paymentMode, createdAt: e.createdAt })),
+      .map((e): StationTxn => ({ id: e.id, date: e.date, vehicleId: e.vehicleId, customerId: e.customerId, kind: vehicles.get(e.vehicleId)?.fuelType ?? "DIESEL", qty: e.litres, rate: e.rate, amount: e.amount, paymentMode: e.paymentMode, billNo: e.billNo ?? "", createdAt: e.createdAt })),
     ...adblue
       .filter((e) => e.vendorId === stationId)
       .map((e): StationTxn => ({ id: e.id, date: e.date, vehicleId: e.vehicleId, customerId: e.customerId, kind: "ADBLUE", qty: e.quantityLitres, rate: e.quantityLitres ? round2(e.amount / e.quantityLitres) : null, amount: e.amount, createdAt: e.createdAt })),

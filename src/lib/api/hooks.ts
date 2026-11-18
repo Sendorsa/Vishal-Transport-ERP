@@ -17,7 +17,7 @@ import { scopeDataset, type Dataset } from "@/domain/analytics"
 import { withRuns } from "@/domain/adblue"
 import type { InvoiceDraftInput } from "@/domain/invoicing"
 import type { CollectionKey, Customer, Driver, EntityStatus, NewEntity, Payment, Settings, Vehicle } from "@/lib/types"
-import type { AdBlueInput, AdBluePurchaseInput, AdBlueVendorInput, IndustrialSupplyInput, TankerAdjustmentInput, TankerInput, TankerLoadInput, TankerTransferInput, TripInput } from "@/lib/api"
+import type { AdBlueInput, AdBluePaymentInput, AdBluePurchaseInput, AdBlueVendorInput, IndustrialSupplyInput, TyreInvoiceInput, TyreMasterInput, TyrePaymentInput, TankerAdjustmentInput, TankerInput, TankerLoadInput, TankerTransferInput, TripInput } from "@/lib/api"
 
 export const queryKeys = {
   customers: ["customers"] as const,
@@ -37,6 +37,10 @@ export const queryKeys = {
   tanker_transfers: ["tanker_transfers"] as const,
   tanker_adjustments: ["tanker_adjustments"] as const,
   industrial_supplies: ["industrial_supplies"] as const,
+  tyre_masters: ["tyre_masters"] as const,
+  tyre_invoices: ["tyre_invoices"] as const,
+  tyre_payments: ["tyre_payments"] as const,
+  adblue_payments: ["adblue_payments"] as const,
   invoices: ["invoices"] as const,
   payments: ["payments"] as const,
   settings: ["settings"] as const,
@@ -49,7 +53,7 @@ export const queryKeys = {
  */
 const MODULE_KEYS: Record<string, (keyof typeof queryKeys)[]> = {
   Diesel: ["diesel_entries", "vehicles", "industrial_supplies"],
-  AdBlue: ["adblue_entries", "adblue_purchases", "adblue_vendors"],
+  AdBlue: ["adblue_entries", "adblue_purchases", "adblue_vendors", "adblue_payments"],
   "Diesel Tanker": ["tankers", "tanker_loads", "tanker_transfers", "tanker_adjustments", "tanker_dispenses", "diesel_entries"],
   "Fuel Stations": ["fuel_stations", "payments"],
   Payments: ["payments", "invoices"],
@@ -60,6 +64,7 @@ const MODULE_KEYS: Record<string, (keyof typeof queryKeys)[]> = {
   Invoices: ["invoices", "trips"],
   Settings: ["settings"],
   "Month Lock": ["month_locks"],
+  Tyre: ["tyre_invoices", "tyre_masters", "tyre_payments"],
 }
 export function keysForModules(modules: string[]) {
   return [...new Set([...modules.flatMap((m) => MODULE_KEYS[m] ?? []), "audit" as const])]
@@ -565,7 +570,7 @@ export function useSaveAdBluePurchase() {
   const invalidate = useInvalidate()
   return useMutation({
     mutationFn: ({ id, data, reason, version }: { id?: string; data: AdBluePurchaseInput; reason?: string; version?: string }) => v(id, version, () => (id ? api.adbluePurchases.update(id, data, reason) : api.adbluePurchases.create(data))),
-    onSuccess: () => invalidate("adblue_purchases", "adblue_entries"),
+    onSuccess: () => invalidate("adblue_purchases", "adblue_entries", "adblue_payments"), // a new purchase may carry its first payment
     onError,
   })
 }
@@ -573,6 +578,39 @@ export function useSaveAdBluePurchase() {
 export function useDeleteAdBluePurchase() {
   const invalidate = useInvalidate()
   return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.adbluePurchases.remove(id, reason)), onSuccess: () => invalidate("adblue_purchases", "adblue_entries"), onError })
+}
+
+/** AdBlue supplier payments (the Owner, Dev and Employee — `enabled` false for anyone else: the API would refuse). */
+export const useAdBluePayments = (enabled = true) => useQuery({ queryKey: queryKeys.adblue_payments, queryFn: () => api.adbluePayments.list(), enabled })
+export function useCreateAdBluePayment() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: (data: AdBluePaymentInput) => api.adbluePayments.create(data), onSuccess: () => invalidate("adblue_payments"), onError })
+}
+export function useUpdateAdBluePayment() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, data, reason, version }: { id: string; data: Parameters<typeof api.adbluePayments.update>[1]; reason?: string; version?: string }) => v(id, version, () => api.adbluePayments.update(id, data, reason)),
+    onSuccess: () => invalidate("adblue_payments"),
+    onError,
+  })
+}
+export function useAllocateAdBluePayment() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, allocations, version }: { id: string; allocations: { purchaseId: string; amount: number }[]; version?: string }) => v(id, version, () => api.adbluePayments.allocate(id, allocations)),
+    onSuccess: () => invalidate("adblue_payments"),
+    onError,
+  })
+}
+/** Apply a vendor's advance credit to its purchases (no new payment: allocations added to the payments holding it). */
+export function useApplyAdBlueAdvance() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: ({ vendorId, allocations }: { vendorId: string; allocations: { purchaseId: string; amount: number }[] }) => api.adbluePayments.applyAdvance(vendorId, allocations), onSuccess: () => invalidate("adblue_payments"), onError })
+}
+/** Delete a payment permanently (Owner / Dev, with a reason): it and its allocations are removed; the audit event keeps it. */
+export function useDeleteAdBluePayment() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.adbluePayments.remove(id, reason)), onSuccess: () => invalidate("adblue_payments"), onError })
 }
 
 /** Archive (soft delete) or restore a fuel station. */
@@ -617,6 +655,85 @@ export function useSaveIndustrialSupply() {
 export function useDeleteIndustrialSupply() {
   const invalidate = useInvalidate()
   return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.industrialSupplies.remove(id, reason)), onSuccess: () => invalidate("industrial_supplies"), onError })
+}
+
+/* ------------------------------------------------------------------ Tyre Data (owner, 17 Nov 2026) */
+
+export const useTyreMasters = () => useQuery({ queryKey: queryKeys.tyre_masters, queryFn: () => api.tyreMasters.list() })
+export const useTyreInvoices = () => useQuery({ queryKey: queryKeys.tyre_invoices, queryFn: () => api.tyreInvoices.list() })
+
+/** Add (no id) or rename (id) a supplier, repair type, tyre brand or size. */
+export function useSaveTyreMaster() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, data, version }: { id?: string; data: TyreMasterInput; version?: string }) => v(id, version, () => (id ? api.tyreMasters.update(id, { name: data.name }) : api.tyreMasters.create(data))),
+    onSuccess: () => invalidate("tyre_masters"),
+    onError,
+  })
+}
+
+/** For a picker's "Create …": adds the value and returns its id. */
+export function useCreateTyreMaster(kind: TyreMasterInput["kind"]) {
+  const save = useSaveTyreMaster()
+  return async (name: string) => (await save.mutateAsync({ data: { kind, name } })).id
+}
+
+export function useArchiveTyreMaster() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, restore, version }: { id: string; restore?: boolean; version?: string }) => v(id, version, () => (restore ? api.tyreMasters.restore(id) : api.tyreMasters.archive(id))),
+    onSuccess: () => invalidate("tyre_masters"),
+    onError,
+  })
+}
+
+/** Add (no id) or edit (id, optional reason) a tyre invoice with its lines — one transaction. */
+export function useSaveTyreInvoice() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, data, reason, version }: { id?: string; data: TyreInvoiceInput; reason?: string; version?: string }) => v(id, version, () => (id ? api.tyreInvoices.update(id, data, reason) : api.tyreInvoices.create(data))),
+    onSuccess: () => invalidate("tyre_invoices", "tyre_payments"), // a new invoice may carry its first payment
+    onError,
+  })
+}
+
+export const useTyrePayments = () => useQuery({ queryKey: queryKeys.tyre_payments, queryFn: () => api.tyrePayments.list() })
+
+/** Record a payment to a tyre supplier (allocations + explicit advance). */
+export function useCreateTyrePayment() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: (data: TyrePaymentInput) => api.tyrePayments.create(data), onSuccess: () => invalidate("tyre_payments"), onError })
+}
+
+/** Correct a payment (tyres:edit): fields, TDS and — when sent — its allocations; reason for a financial change. */
+export function useUpdateTyrePayment() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, data, reason, version }: { id: string; data: Parameters<typeof api.tyrePayments.update>[1]; reason?: string; version?: string }) => v(id, version, () => api.tyrePayments.update(id, data, reason)),
+    onSuccess: () => invalidate("tyre_payments"),
+    onError,
+  })
+}
+
+/** Apply a payment's advance credit to invoices (adds allocations only). */
+export function useAllocateTyrePayment() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, allocations, version }: { id: string; allocations: { invoiceId: string; amount: number }[]; version?: string }) => v(id, version, () => api.tyrePayments.allocate(id, allocations)),
+    onSuccess: () => invalidate("tyre_payments"),
+    onError,
+  })
+}
+
+/** Delete a payment permanently (Owner / Dev, with a reason): it and its allocations are removed; the audit event keeps it. */
+export function useDeleteTyrePayment() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.tyrePayments.remove(id, reason)), onSuccess: () => invalidate("tyre_payments"), onError })
+}
+
+export function useDeleteTyreInvoice() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.tyreInvoices.remove(id, reason)), onSuccess: () => invalidate("tyre_invoices"), onError })
 }
 
 /* ------------------------------------------------------------------ Go-live openings (owner, 3 Nov 2026) — Owner / Dev */

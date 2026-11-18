@@ -54,10 +54,45 @@ async function main() {
     { id: "adv_field1", createdAt: at, updatedAt: at, name: "Field Vendor", defaultRate: 45.125, contactPerson: "Ravi", phone: "98450 00000", notes: "Bulk supplier", status: "ACTIVE" },
     { id: "adv_field2", createdAt: at, updatedAt: at, name: "Old Vendor", defaultRate: null, contactPerson: "", phone: "", notes: "", status: "ARCHIVED" },
   ])
-  writeCollection("adblue_purchases", [{ id: "adp_field1", createdAt: at, updatedAt: at, date: "2026-10-05", adblueVendorId: "adv_field1", vendorName: "Field Vendor", product: "AdBlue ISO 22241", buckets: 10, litresPerBucket: 20, totalLitres: 200, pricePerBucket: 900, totalCost: 9000, invoiceNo: "INV-1", notes: "Field check" }])
+  writeCollection("adblue_purchases", [{ id: "adp_field1", createdAt: at, updatedAt: at, date: "2026-10-05", adblueVendorId: "adv_field1", vendorName: "Field Vendor", product: "AdBlue ISO 22241", buckets: 10, litresPerBucket: 20, totalLitres: 200, pricePerBucket: 900, totalCost: 9000, invoiceNo: "INV-1", notes: "Field check", gstRate: 18 }])
+  // AdBlue supplier payments: ₹10,000 settled at 0.1% on the ₹10,620 purchase (every field set), and a cash advance with no allocation.
+  writeCollection("adblue_payments", [
+    { id: "abp_field1", createdAt: at, updatedAt: at, date: "2026-10-08", vendorId: "adv_field1", amount: 9990, tdsAmount: 10, tdsRate: 0.1, mode: "RTGS", utr: "UTR AB 77", companyCode: "VTHPL", notes: "Part paid", allocations: [{ purchaseId: "adp_field1", amount: 10000 }] },
+    { id: "abp_field2", createdAt: at, updatedAt: at, date: "2026-10-09", vendorId: "adv_field1", amount: 620.5, tdsAmount: 0, tdsRate: null, mode: "Cash", utr: "R-AB-1", companyCode: null, notes: "", allocations: [] },
+  ])
   writeCollection("adblue_entries", [
     { id: "adb_field1", createdAt: at, updatedAt: at, source: "STOCK", adblueVendorId: "adv_field1", beforeVendorTracking: false, vehicleId: abVehicle, customerId: null, vendorId: "", date: "2026-10-06", closingKm: 1000, quantityLitres: 15, amount: 0, invoiceNo: "JC-1", notes: "" },
     { id: "adb_field2", createdAt: at, updatedAt: at, beforeVendorTracking: true, source: "DIRECT", adblueVendorId: "adv_field1", vendorName: "Field Vendor", rate: 95.5, paymentMode: "CASH", vehicleId: abVehicle, customerId: null, vendorId: "", date: "2026-10-07", closingKm: 1100, quantityLitres: 10, amount: 955, invoiceNo: "R-1", notes: "Direct" },
+  ])
+  // Tyre Data (17 Nov 2026): the migration already holds the starting repair types (unique names), so the demo copies
+  // give way to one value of each list (one archived) and an invoice with every field set — CGST + SGST and IGST lines.
+  const { lineAmounts } = await import("@/domain/tyre")
+  writeCollection("tyre_masters", [
+    { id: "tym_f_sup", createdAt: at, updatedAt: at, kind: "SUPPLIER", name: "Field Tyres", status: "ACTIVE" },
+    { id: "tym_f_rep", createdAt: at, updatedAt: at, kind: "REPAIR_TYPE", name: "Field Repair", status: "ACTIVE" },
+    { id: "tym_f_brd", createdAt: at, updatedAt: at, kind: "BRAND", name: "Field Brand", status: "ARCHIVED" },
+    { id: "tym_f_siz", createdAt: at, updatedAt: at, kind: "SIZE", name: "235/75 R17.5", status: "ACTIVE" },
+  ])
+  const tyreLine = (id: string, quantity: number, rate: number, gstRate: number, taxType: "CGST_SGST" | "IGST", full: boolean) => ({
+    id, repairTypeId: "tym_f_rep", brandId: full ? "tym_f_brd" : null, sizeId: full ? "tym_f_siz" : null, tyreNumber: full ? "B0426 / B0427" : "", openingKm: full ? 73636 : null, closingKm: full ? 84210.5 : null,
+    quantity, rate, gstRate, taxType, ...lineAmounts(quantity, rate, gstRate, taxType), removingNumber: full ? "R-12" : "", remarks: full ? "Front axle" : "",
+  })
+  writeCollection("tyre_invoices", [
+    { id: "tyr_field2", createdAt: at, updatedAt: at, date: "2026-10-07", vehicleId: abVehicle, customerId: null, office: true, supplierId: "tym_f_sup", billNo: "", purchaseMode: "", paymentMode: "", paymentDetails: "", remarks: "", items: [tyreLine("tyi_field3", 1, 400, 0, "CGST_SGST", false)] },
+    { id: "tyr_field1", createdAt: at, updatedAt: at, date: "2026-10-06", vehicleId: abVehicle, customerId: readCollection("customers")[0].id, office: false, supplierId: "tym_f_sup", billNo: "003/26-27", purchaseMode: "Credit", paymentMode: "UPI", paymentDetails: "UTR 4455", remarks: "Two new tyres", items: [tyreLine("tyi_field1", 2, 14650, 18, "CGST_SGST", true), tyreLine("tyi_field2", 1.5, 333.33, 28, "IGST", false)] },
+  ])
+  // A fuel station payment with TDS deducted ("Deduct TDS?", 17 Nov 2026): total settled − 0.1% TDS = paid; tdsRate kept.
+  {
+    const { round2 } = await import("@/lib/format")
+    const pays = readCollection("payments")
+    const sp = pays.find((p) => p.categoryCode === "DIESEL_SETTLEMENT" && p.mode !== "TDS" && p.amount > 1000)!
+    const tds = round2((sp.amount * 0.1) / 100)
+    writeCollection("payments", pays.map((p) => (p === sp ? { ...p, amount: round2(sp.amount - tds), tdsAmount: tds, tdsRate: 0.1 } : p)))
+  }
+  // Tyre vendor payments: one allocated (part advance, every field set), one with no allocations and no TDS (all advance).
+  writeCollection("tyre_payments", [
+    { id: "tpy_field1", createdAt: at, updatedAt: at, date: "2026-10-08", supplierId: "tym_f_sup", amount: 1499, tdsAmount: 1.5, tdsRate: 0.1, mode: "IMPS", utr: "UTR 4455", reference: "003/26-27", companyCode: "VT", notes: "Part advance", allocations: [{ invoiceId: "tyr_field1", amount: 1000.25 }, { invoiceId: "tyr_field2", amount: 400 }] },
+    { id: "tpy_field2", createdAt: at, updatedAt: at, date: "2026-10-08", supplierId: "tym_f_sup", amount: 10, mode: "Cash", utr: "R-9", reference: "", companyCode: null, notes: "", allocations: [], tdsAmount: 0, tdsRate: null },
   ])
   const ctx = { extras: new Map(), identity: { profileId: "10000000-0000-0000-0000-0000000000f1", userId: "00000000-0000-0000-0000-0000000000f1", role: "DEV" as const, email: null, name: null } }
 

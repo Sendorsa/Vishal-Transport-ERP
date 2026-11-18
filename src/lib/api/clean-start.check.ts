@@ -24,18 +24,21 @@ async function main() {
   const { ensureSeeded, loadDemoData } = await import("./bootstrap")
   const { api } = await import("./index")
   const store = await import("@/lib/storage/local-store")
+  const { DEFAULT_REPAIR_TYPES } = await import("@/domain/tyre")
   const { valueTankers, CONFIRMED_TANKERS } = await import("@/domain/tanker")
   const { valueInventory } = await import("@/domain/adblue-inventory")
   const { buildEvent } = await import("@/domain/audit")
   const { readCollection, readMeta, writeMeta, readAuditEvents, appendAuditEvent, COLLECTION_KEYS, readSettings } = store
 
-  const EMPTY_COLLECTIONS = COLLECTION_KEYS.filter((k) => !["vehicles", "tankers", "fuel_stations"].includes(k))
+  const EMPTY_COLLECTIONS = COLLECTION_KEYS.filter((k) => !["vehicles", "tankers", "fuel_stations", "tyre_masters"].includes(k))
   const counts = () => Object.fromEntries(COLLECTION_KEYS.map((k) => [k, readCollection(k).length]))
 
   /** The clean go-live workspace, exactly. */
   function assertClean(label: string) {
     for (const k of EMPTY_COLLECTIONS) assert.equal(readCollection(k).length, 0, `${label}: no ${k}`)
     assert.deepEqual(readCollection("fuel_stations").map((s) => [s.id, !!s.isTanker]), [["dv_tanker", true]], `${label}: only the internal tanker source, no petrol pumps`)
+    // Tyre Data (17 Nov 2026): only the starting repair types of the 2026–27 register — no supplier, brand or size.
+    assert.deepEqual(readCollection("tyre_masters").map((m) => [m.kind, m.name]), DEFAULT_REPAIR_TYPES.map((n) => ["REPAIR_TYPE", n]), `${label}: only the starting repair types`)
     const tankers = readCollection("tankers")
     const vehicles = readCollection("vehicles")
     assert.deepEqual(tankers.map((t) => [t.id, t.name, t.regNo]), CONFIRMED_TANKERS.map((t) => [t.id, t.name, t.regNo]), `${label}: exactly JIO, Office and Mini`)

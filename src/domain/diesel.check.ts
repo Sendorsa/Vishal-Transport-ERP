@@ -208,6 +208,14 @@ assert.deepEqual([stAll.fuelSpend, stAll.adblueSpend, stAll.combinedSpend], [115
 assert.deepEqual([stAll.vehiclesServed, stAll.customersServed, stAll.fills], [3, 2, 3])
 assert.equal(stationSummary(stTx.filter(inStationPeriod("2026-10"))).fuelSpend, 11000) // month filter
 assert.equal(stTx.find((t) => t.kind === "ADBLUE")?.rate, 80)
+// Transaction history: each fill's saved indent / bill number, as stored — "" (shown "—") when none, never invented.
+const stBills = stationTransactions("p1", [
+  { id: "f1", vendorId: "p1", vehicleId: "v1", customerId: "c1", date: "2026-11-02", litres: 10, rate: 90, amount: 900, billNo: "IND-4417" },
+  { id: "f2", vendorId: "p1", vehicleId: "v1", customerId: "c1", date: "2026-11-03", litres: 10, rate: 90, amount: 900, billNo: "" },
+  { id: "f3", vendorId: "p1", vehicleId: "v1", customerId: "c1", date: "2026-04-12", litres: 10, rate: 90, amount: 900 }, // older record without the field
+] as never, [], stVehicles)
+assert.deepEqual(stBills.map((t) => [t.id, t.billNo]).sort(), [["f1", "IND-4417"], ["f2", ""], ["f3", ""]])
+assert.deepEqual(stationSummary(stBills).fuelSpend, 2700) // the bill number changes no figure
 
 // Quarters: Q1 Jan–Mar … Q4 Oct–Dec; calculated from the same entries and reconciling with months and the year.
 assert.deepEqual([quarterOf("2026-01-15"), quarterOf("2026-03-31"), quarterOf("2026-04-01"), quarterOf("2026-09-30"), quarterOf("2026-10-01"), quarterOf("2026-12-31")], [1, 1, 2, 3, 4, 4])
@@ -592,6 +600,9 @@ const recs = (r: Partial<TankerRecords>): TankerRecords => ({ loads: [], fills: 
   const purchases = [{ ...fill("pf1", 0, 50, 4650), vendorId: "s1" }, ...loadsAsStationPurchases(loads)]
   const vIdx = new Map([["v1", { ...ds.vehicles[0] }]]) as unknown as Parameters<typeof stationTransactions>[3]
   assert.equal(stationSummary(stationTransactions("s1", purchases as never, [], vIdx)).vehiclesServed, 1)
+  // A tanker load in a station's history shows its own saved invoice number as the bill number.
+  const invoiced = loadsAsStationPurchases([{ ...load("tkl_inv", "2026-09-26", 500, 95), invoiceNo: "LT-77" }, load("tkl_none", "2026-09-27", 100, 95)])
+  assert.deepEqual(stationTransactions("s1", invoiced as never, [], vIdx).map((t) => [t.id, t.billNo]).sort(), [["tkl_inv", "LT-77"], ["tkl_none", ""]])
 
   // Vendor table purchases include tanker loads, like the ledger's payable (dieselByVendor = stationLedger).
   const dsv = { settings: { tanker: undefined }, diesel: [purchases[0]], payments: [], tankerLoads: loads, fuelStations: [{ id: "s1", name: "S1", isTanker: false }, { id: "dv_tanker", name: "Diesel Tanker", isTanker: true }] } as unknown as Dataset

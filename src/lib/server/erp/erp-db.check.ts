@@ -153,6 +153,25 @@ async function main() {
   assert.ok((await read(OWNER, () => api.fuelStationPayments.list())).some((p) => p.id === empPay.id), "the Employee edits payments, but deletes none")
   await as(OWNER, () => api.fuelStationPayments.remove(empPay.id, "Entered on the wrong pump"))
   assert.ok(!(await read(OWNER, () => api.fuelStationPayments.list())).some((p) => p.id === empPay.id), "the Owner deletes it")
+  // "Deduct TDS?" (owner, 17 Nov 2026): ₹1,00,000 at 0.1% = ₹99,900 paid + ₹100 TDS, through the engine; the database
+  // checks the arithmetic itself (payments_station_tds_check) and keeps the monthly TDS entry's rules.
+  const tdsPay = await as(EMP, () => api.fuelStationPayments.create({ stationId: empPump.id, paymentDate: today, amount: 100000, paymentMode: "NEFT", notes: "", companyCode: "VT", forMonth: today.slice(0, 7), tdsPercent: 0.1, reference: "UTR-77" }))
+  const tdsRow = (await db.query<{ amount: string; tds: string; rate: string; reference: string }>(`select amount::text, tds_amount::text as tds, tds_rate::text as rate, reference from finance.payments where id = '${tdsPay.id}'`)).rows[0]
+  assert.deepEqual([Number(tdsRow.amount), Number(tdsRow.tds), Number(tdsRow.rate), tdsRow.reference], [99900, 100, 0.1, "UTR-77"], "stored: ₹99,900 paid, ₹100 TDS, 0.1%, the UTR")
+  const listedTds = (await read(OWNER, () => api.fuelStationPayments.list())).find((p) => p.id === tdsPay.id)!
+  assert.deepEqual([listedTds.amount, listedTds.paidAmount, listedTds.tdsAmount, listedTds.tdsRate], [100000, 99900, 100, 0.1], "read back: total settled ₹1,00,000")
+  const tdsPayNow = (await read(OWNER, () => api.payments.list())).find((p) => p.id === tdsPay.id)!
+  await as(EMP, () => api.fuelStationPayments.update(tdsPay.id, { paymentDate: today, amount: 100000, paymentMode: "NEFT", notes: "", tdsPercent: 1 }, "1% applies"), true, { [tdsPay.id]: tdsPayNow.updatedAt })
+  assert.deepEqual((await db.query<{ a: string; t: string }>(`select amount::text as a, tds_amount::text as t from finance.payments where id = '${tdsPay.id}'`)).rows[0], { a: "99000.00", t: "1000.00" }, "edited: ₹99,000 + ₹1,000")
+  const evPay = (id: string) => `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), 'PAYMENT_RECORDED', 'Fuel Stations', 'Fuel station payment', '${id}');`
+  const rawPay = (id: string, amount: number, tds: number, rate: string) => `insert into finance.payments (id, payment_no, company_code, direction, date, party_type, station_id, party_name, category_code, amount, tds_amount, tds_rate, mode, for_month) values ('${id}', '${id}', 'VT', 'OUT', '${today}', 'VENDOR', '${empPump.id}', 'P', 'DIESEL_SETTLEMENT', ${amount}, ${tds}, ${rate}, 'NEFT', '${today.slice(0, 7)}'); ${evPay(id)}`
+  await assert.rejects(sqlAs(OWNER, rawPay("pay_tdsbad1", 99950, 50, "0.1")), /payments_station_tds_check/, "the database refuses TDS that isn't total × % (₹50 on ₹1,00,000 at 0.1%)")
+  await assert.rejects(sqlAs(OWNER, rawPay("pay_tdsbad2", 99900, 100, "null")), /payments_station_tds_check/, "…and TDS on a payment without its %")
+  await assert.rejects(sqlAs(OWNER, rawPay("pay_tdsbad3", 1000, 0, "-1")), /check constraint/, "…and a negative %")
+  // ₹1,234.56 at 0.1% = ₹1.23 (round half away from zero, as the app): accepted by the CHECK (rolled back — nothing kept).
+  await db.exec("begin")
+  await db.exec(`set local role authenticated; select set_config('request.jwt.claim.sub', '${OWNER.userId}', true); ${rawPay("pay_tdsok", 1233.33, 1.23, "0.1")}`)
+  await db.exec("rollback")
   const st = (await read(OWNER, () => api.fuelStations.list())).find((s) => s.id === station.id)!
   const purchases = [...fills, ...loadsAsStationPurchases(loads)]
   const led = stationLedger(station.id, purchases, await read(OWNER, () => api.payments.list()), today.slice(0, 7), openingOf(st))
@@ -923,6 +942,202 @@ async function main() {
     for (const id of [OWNER, DEV])
       for (const t of childTables) assert.ok((await rowsAs(id, `delete from ${t} returning 1`)).length > 0, `${id.role} deletes ${t}`)
     assert.equal(await childState(), state0)
+    /* -------------------------------------------------------------- 12f. Tyre Data on the shared database (owner, 17 Nov 2026) */
+    {
+      const { lineAmounts, tyreTotals } = await import("@/domain/tyre")
+      type TI = import("@/lib/types").TyreInvoice
+      type TM = import("@/lib/types").TyreMaster
+      const masters = await call<TM[]>(EMP, "tyreMasters.list")
+      assert.equal(masters.filter((m) => m.kind === "REPAIR_TYPE").length, 12, "the migration's 12 starting repair types")
+      const rtId = (n: string) => masters.find((m) => m.kind === "REPAIR_TYPE" && m.name === n)!.id
+      const supplier = await call<TM>(EMP, "tyreMasters.create", { kind: "SUPPLIER", name: "Bhagyalakshmi Tyres" })
+      await assert.rejects(call(EMP, "tyreMasters.create", { kind: "SUPPLIER", name: " bhagyalakshmi  TYRES" }), /already exists/, "no duplicate supplier")
+      await assert.rejects(sqlAs(EMP, `insert into ops.tyre_masters (kind, name) values ('SUPPLIER', 'BHAGYALAKSHMI   tyres'); insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), 'CREATED', 'Tyre', 'Supplier', 'x')`), /tyre_masters_name_key/, "…and the database's unique name rule (spaces / case ignored)")
+      const brand = await call<TM>(EMP, "tyreMasters.create", { kind: "BRAND", name: "Apollo" })
+      const ln = (repairTypeId: string, quantity: number, rate: number, x: Record<string, unknown> = {}) => ({ repairTypeId, quantity, rate, gstRate: 18, taxType: "CGST_SGST", ...x })
+      const body = (items: unknown[], x: Record<string, unknown> = {}) => ({ date: today, vehicleId: vA.id, supplierId: supplier.id, billNo: "B-1", items, ...x })
+      const t1 = await call<TI>(EMP, "tyreInvoices.create", body([ln(rtId("New Tyre Purchased"), 2, 14650, { brandId: brand.id, openingKm: 100, closingKm: 900 }), ln(rtId("Wheel Alignment"), 4, 400), ln(rtId("Tyre Fitting"), 3, 33.33)]))
+      assert.equal(t1.customerId, alpha.id, "company from the assignment, on the server")
+      const dbLines = (await db.query<{ id: string; base: string; cgst: string; sgst: string; igst: string; total: string }>(`select id, base_value::text as base, cgst::text, sgst::text, igst::text, total_value::text as total from ops.tyre_invoice_items where invoice_id = '${t1.id}' order by line_no`)).rows
+      assert.deepEqual(dbLines.map((r) => [Number(r.base), Number(r.cgst), Number(r.sgst), Number(r.igst), Number(r.total)]), t1.items.map((i) => { const a = lineAmounts(i.quantity, i.rate, i.gstRate, i.taxType); return [a.baseValue, a.cgst, a.sgst, a.igst, a.totalValue] }), "the database generates the same amounts as the app, to the paisa (incl. 99.99 → CGST 9.00 + SGST 9.00)")
+      assert.equal(tyreTotals(t1.items).grandTotal, 36579.99) // ₹29,300 + ₹1,600 + ₹99.99, each + 18% (₹99.99 → ₹18.00 GST)
+      // The Employee edits: a line removed (inside the audited edit), one changed, one added — the guard lets it through.
+      const t2 = await call<TI>(EMP, "tyreInvoices.update", t1.id, body([{ ...t1.items[0], rate: 14500 }, ln(rtId("Wheel Balancing"), 1, 300)]), "Fitting free")
+      assert.deepEqual([t2.items.length, t2.items[0].id, (await db.query(`select 1 from ops.tyre_invoice_items where invoice_id = '${t1.id}'`)).rows.length], [2, t1.items[0].id, 2], "lines replaced; the kept line keeps its id")
+      await assert.rejects(call(EMP, "tyreInvoices.update", t1.id, body([{ ...t2.items[0], rate: 14000 }, t2.items[1]])), /Enter the reason for changing the repair lines/, "a financial edit needs a reason, on the server too")
+      // Office / No Customer: only for a vehicle without a customer on the date, only when chosen; never a customer record.
+      const { id: _vi, createdAt: _vc, updatedAt: _vu, statusHistory: _vs, ...vTpl } = vA
+      void [_vi, _vc, _vu, _vs]
+      const spare = await as(OWNER, () => api.vehicles.create({ ...vTpl, regNo: "TN70OF0001", assignedCustomerId: null, assignedSince: undefined, odometerKm: 0 } as never))
+      await assert.rejects(call(EMP, "tyreInvoices.create", body([ln(rtId("Tyre Fitting"), 1, 200)], { vehicleId: spare.id })), /no customer assignment .* Office \/ No Customer/)
+      await assert.rejects(call(EMP, "tyreInvoices.create", body([ln(rtId("Tyre Fitting"), 1, 200)], { office: true })), /can't be recorded as Office \/ No Customer/)
+      const off = await call<TI>(EMP, "tyreInvoices.create", body([ln(rtId("Tyre Fitting"), 1, 200)], { vehicleId: spare.id, office: true, billNo: "B-1" }))
+      assert.deepEqual((await db.query<{ office: boolean; customer_id: string | null }>(`select office, customer_id from ops.tyre_invoices where id = '${off.id}'`)).rows[0], { office: true, customer_id: null }, "stored as Office / No Customer, no customer")
+      await assert.rejects(sqlAs(OWNER, `update ops.tyre_invoices set customer_id = '${alpha.id}' where id = '${off.id}'; ${`insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), 'UPDATED', 'Tyre', 'Tyre invoice', '${off.id}');`}`), /tyre_invoices_check|check constraint/, "the database: office ⇔ no customer")
+      await call(OWNER, "tyreInvoices.remove", off.id, "Test invoice")
+      // Direct deletes: the Employee and the profiles change nothing; a line goes only inside an audited edit.
+      const tyreState = async () => JSON.stringify((await db.query(`select (select count(*) from ops.tyre_invoices) as i, (select count(*) from ops.tyre_invoice_items) as l, (select count(*) from ops.tyre_masters) as m`)).rows)
+      const s0 = await tyreState()
+      const evT = (rid: string, before: unknown) => `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id, before, after) values ('SESSION', private.current_profile_id(), private.erp_role(), 'UPDATED', 'Tyre', 'Tyre invoice', '${rid}', '${JSON.stringify(before)}'::jsonb, '{}'::jsonb);`
+      for (const id of [EMP, TATA, ADB])
+        for (const text of [`delete from ops.tyre_invoices`, `delete from ops.tyre_invoice_items`, `delete from ops.tyre_invoice_items where invoice_id = '${t1.id}'; ${evT(t1.id, {})}`, `delete from ops.tyre_masters`]) {
+          await sqlAs(id, text).catch(() => undefined)
+          assert.equal(await tyreState(), s0, `${id.role}: nothing deleted by ${text.slice(0, 60)}`)
+        }
+      await assert.rejects(sqlAs(EMP, `delete from ops.tyre_invoice_items where invoice_id = '${t1.id}'; ${evT(t1.id, {})}`), /Only the Owner and Dev can delete records/, "the Employee is told why")
+      await assert.rejects(sqlAs(OWNER, `delete from ops.tyre_masters`), /permission denied/, "masters: no delete for anyone (archive)")
+      // The profiles: no Tyre at all — the method list and RLS.
+      for (const id of [TATA, ADB]) {
+        await assert.rejects(call(id, "tyreInvoices.list"), /refused by the method list/)
+        assert.deepEqual(await rowsAs(id, `select id from ops.tyre_invoices`), [], `RLS: ${id.role} reads no tyre invoice`)
+      }
+      // The database's own rules past the API: an invoice needs a line; the month lock; no change without its event.
+      await assert.rejects(sqlAs(EMP, `insert into ops.tyre_invoices (id, date, vehicle_id, customer_id, supplier_id) values ('tyr_empty', '${today}', '${vA.id}', '${alpha.id}', '${supplier.id}'); insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), 'CREATED', 'Tyre', 'Tyre invoice', 'tyr_empty');`), /at least one repair line/)
+      await assert.rejects(sqlAs(EMP, `update ops.tyre_invoices set remarks = 'x' where id = '${t1.id}'`), /no audit event/)
+      await assert.rejects(sqlAs(EMP, `insert into ops.tyre_invoices (id, date, vehicle_id, customer_id, supplier_id) values ('tyr_oct', '2026-10-15', '${vA.id}', '${alpha.id}', '${supplier.id}')`), /row-level security/, "RLS: the Employee writes nothing into a locked month")
+      // The Owner deletes (the lines go with it) and restores.
+      await call(OWNER, "tyreInvoices.remove", t1.id, "Duplicate bill")
+      assert.deepEqual((await db.query(`select 1 from ops.tyre_invoice_items where invoice_id = '${t1.id}'`)).rows, [], "the lines went with the invoice")
+      const delEv = (await read(DEV, () => api.audit.list())).find((e) => e.action === "DELETED" && e.recordId === t1.id)!
+      await as(OWNER, () => api.audit.restoreDeleted(delEv.id, "Not a duplicate"))
+      assert.equal((await db.query(`select 1 from ops.tyre_invoice_items where invoice_id = '${t1.id}'`)).rows.length, 2, "restored with its lines")
+
+      // Vendor payments (owner, 17 Nov 2026): the invoice and its first payment in one transaction; allocations; permanent delete.
+      type TP = import("@/lib/types").TyrePayment
+      const paidOf = async (invoiceId: string) => Number((await db.query<{ s: string }>(`select coalesce(sum(a.amount), 0)::text as s from ops.tyre_payment_allocations a join ops.tyre_payments p on p.id = a.payment_id where a.invoice_id = '${invoiceId}'`)).rows[0].s)
+      const counts = async () => JSON.stringify((await db.query(`select (select count(*) from ops.tyre_invoices) as i, (select count(*) from ops.tyre_payments) as p, (select count(*) from ops.tyre_payment_allocations) as a`)).rows)
+      const c0 = await counts()
+      await assert.rejects(call(EMP, "tyreInvoices.create", body([ln(rtId("Wheel Alignment"), 1, 1000)], { billNo: "P-0", paymentMode: "NEFT", payment: { amount: 500, utr: " ", date: today } })), /UTR/, "no UTR, no invoice (server)")
+      assert.equal(await counts(), c0, "nothing saved")
+      const pi = await call<TI>(EMP, "tyreInvoices.create", body([ln(rtId("Wheel Alignment"), 1, 1000)], { billNo: "P-1", paymentMode: "NEFT", payment: { amount: 500, utr: "NEFT 001", date: today } })) // ₹1,180
+      const [first] = (await call<TP[]>(EMP, "tyrePayments.list")).filter((p) => p.allocations.some((a) => a.invoiceId === pi.id))
+      assert.deepEqual([await paidOf(pi.id), first.amount, first.mode, first.utr], [500, 500, "NEFT", "NEFT 001"], "invoice + payment + allocation, stored together")
+      const adv = await call<TP>(EMP, "tyrePayments.create", { date: today, supplierId: supplier.id, amount: 1000, mode: "UPI", utr: "UPI-ADV", allocations: [], acceptAdvance: true })
+      const used = await call<TP>(EMP, "tyrePayments.allocate", adv.id, [{ invoiceId: pi.id, amount: 680 }])
+      assert.deepEqual([await paidOf(pi.id), used.allocations, used.amount], [1180, [{ invoiceId: pi.id, amount: 680 }], 1000], "advance applied: paid in full, ₹320 advance left")
+      await assert.rejects(call(EMP, "tyrePayments.remove", adv.id, "Wrong cheque"), /can't/, "the Employee deletes no payment")
+      // The database's own rules, past the API.
+      const evP = (rid: string, action = "UPDATED") => `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), '${action}', 'Tyre', 'Tyre payment', '${rid}');`
+      const s1 = await counts()
+      await assert.rejects(sqlAs(OWNER, `update ops.tyre_payments set amount = 1 where id = '${adv.id}'; ${evP(adv.id)}`), /more than the payment settles/, "an edit can't leave the allocations above what the payment settles")
+      await assert.rejects(sqlAs(OWNER, `update ops.tyre_payments set supplier_id = 'tym_another' where id = '${adv.id}'; ${evP(adv.id)}`), /vendor never changes/, "a payment's vendor never changes")
+      await assert.rejects(sqlAs(OWNER, `delete from ops.tyre_payments where id = '${adv.id}'`), /no audit event/, "no payment deleted without its DELETED event")
+      await assert.rejects(sqlAs(OWNER, `delete from ops.tyre_payments where id = '${adv.id}'; ${evP(adv.id)}`), /no audit event/, "…an UPDATED event isn't one")
+      await sqlAs(EMP, `delete from ops.tyre_payments where id = '${adv.id}'`).catch(() => undefined)
+      await sqlAs(EMP, `delete from ops.tyre_payments where id = '${adv.id}'; ${evP(adv.id, "DELETED")}`).catch(() => undefined)
+      assert.equal((await db.query(`select 1 from ops.tyre_payments where id = '${adv.id}'`)).rows.length, 1, "RLS: the Employee deletes no payment, even with an event")
+      // Allocations are removed only inside an audited edit of their payment (17 Nov 2026 — corrections rewrite them).
+      await assert.rejects(sqlAs(OWNER, `delete from ops.tyre_payment_allocations where payment_id = '${adv.id}'`), /no audit event/, "no allocation removed without its payment's event")
+      await assert.rejects(sqlAs(EMP, `delete from ops.tyre_payment_allocations where payment_id = '${adv.id}'; ${evP(adv.id)}`), /Only the Owner and Dev can delete records: a tyre payment allocation/, "the Employee removes one only inside a real edit (its before snapshot)")
+      await assert.rejects(sqlAs(EMP, `insert into ops.tyre_payment_allocations (payment_id, line_no, invoice_id, amount) values ('${adv.id}', 9, '${pi.id}', 1); ${evP(adv.id)}`), /beyond its total/, "never beyond the invoice total")
+      await assert.rejects(sqlAs(EMP, `insert into ops.tyre_payment_allocations (payment_id, line_no, invoice_id, amount) values ('${adv.id}', 9, '${t1.id}', 321); ${evP(adv.id)}`), /more than the payment/, "never beyond the payment")
+      const other = await call<TM>(EMP, "tyreMasters.create", { kind: "SUPPLIER", name: "Other Tyres" })
+      const oi = await call<TI>(EMP, "tyreInvoices.create", body([ln(rtId("Wheel Alignment"), 1, 100)], { supplierId: other.id, billNo: "O-1" }))
+      await assert.rejects(sqlAs(EMP, `insert into ops.tyre_payment_allocations (payment_id, line_no, invoice_id, amount) values ('${adv.id}', 9, '${oi.id}', 10); ${evP(adv.id)}`), /another supplier/, "only the payment's own supplier")
+      await assert.rejects(sqlAs(EMP, `insert into ops.tyre_payments (date, supplier_id, amount, mode, utr) values ('${today}', '${supplier.id}', 10, 'Credit', 'C-1')`), /check constraint/, "Credit is never a payment")
+      await assert.rejects(sqlAs(EMP, `insert into ops.tyre_payments (date, supplier_id, amount, mode, utr) values ('${today}', '${supplier.id}', 10, 'Cash', '  ')`), /check constraint/, "a UTR on every payment")
+      await assert.rejects(sqlAs(EMP, `insert into ops.tyre_payments (id, date, supplier_id, amount, mode, utr) values ('tpy_dup', '${today}', '${supplier.id}', 10, 'Cash', 'upi-adv'); ${evP("tpy_dup", "PAYMENT_RECORDED")}`), /tyre_payments_utr_key/, "one UTR, one live payment (spaces / case ignored)")
+      await assert.rejects(sqlAs(EMP, `insert into ops.tyre_payments (id, date, supplier_id, amount, mode, utr) values ('tpy_oct', '2026-10-15', '${supplier.id}', 10, 'Cash', 'OCT-1'); ${evP("tpy_oct", "PAYMENT_RECORDED")}`), /row-level security/, "the month lock")
+      await assert.rejects(sqlAs(OWNER, `update ops.tyre_invoice_items set rate = 10 where invoice_id = '${pi.id}'; ${evT(pi.id, {})}`), /beyond its total/, "an invoice edit never goes below what was paid")
+      await assert.rejects(sqlAs(OWNER, `delete from ops.tyre_invoices where id = '${pi.id}'; ${evT(pi.id, {}).replace("'UPDATED'", "'DELETED'")}`), /foreign key/, "an invoice with payments is never deleted")
+      await assert.rejects(call(OWNER, "tyreInvoices.remove", pi.id, "Duplicate"), /delete those payments first/)
+      assert.equal(await counts(), JSON.stringify(JSON.parse(s1).map((r: Record<string, number | string>) => ({ ...r, i: Number(r.i) + 1 }))), "nothing else changed (only the other supplier's invoice was added)")
+      // The Owner deletes it through the engine: the payment row and its allocation go in one transaction with the DELETED event.
+      await call(OWNER, "tyrePayments.remove", adv.id, "Cheque bounced")
+      assert.deepEqual([(await db.query(`select 1 from ops.tyre_payments where id = '${adv.id}'`)).rows.length, (await db.query(`select 1 from ops.tyre_payment_allocations where payment_id = '${adv.id}'`)).rows.length, await paidOf(pi.id)], [0, 0, 500], "deleted: no payment, no orphan allocation; the invoice owes ₹680 again")
+      const payDel = (await db.query<{ reason: string; role: string; alloc: string; utr: string; at: string | null }>(`select reason, actor_role::text as role, before->'allocations' as alloc, before->>'utr' as utr, at::text as at from audit.events where record_id = '${adv.id}' and action = 'DELETED'`)).rows
+      assert.deepEqual(payDel.map((e) => [e.reason, e.role, e.alloc, e.utr, !!e.at]), [["Cheque bounced", "OWNER", [{ invoiceId: pi.id, amount: 680 }], "UPI-ADV", true]], "the audit event outlives the payment: its allocations, reference, reason, who and when")
+      assert.ok(!(await call<TP[]>(OWNER, "tyrePayments.list")).some((p) => p.id === adv.id), "gone from every list")
+      await call<TP>(EMP, "tyrePayments.create", { date: today, supplierId: supplier.id, amount: 680, mode: "UPI", utr: "UPI-ADV", allocations: [{ invoiceId: pi.id, amount: 680 }] })
+      assert.equal(await paidOf(pi.id), 1180, "the deleted payment's reference is free again")
+      // "Deduct TDS?" and corrections (owner, 17 Nov 2026): ₹1,00,000 settled at 0.1% = ₹99,900 paid + ₹100 TDS.
+      const big = await call<TI>(EMP, "tyreInvoices.create", body([ln(rtId("New Tyre Purchased"), 10, 10000, { gstRate: 0 })], { billNo: "T-1" })) // ₹1,00,000, no GST
+      const tp = await call<TP>(EMP, "tyrePayments.create", { date: today, supplierId: supplier.id, amount: 100000, tdsPercent: 0.1, mode: "IMPS", utr: "IMPS-1", allocations: [{ invoiceId: big.id, amount: 100000 }] })
+      const tpRow = (await db.query<{ a: string; t: string; r: string }>(`select amount::text as a, tds_amount::text as t, tds_rate::text as r from ops.tyre_payments where id = '${tp.id}'`)).rows[0]
+      assert.deepEqual([tpRow, await paidOf(big.id)], [{ a: "99900.00", t: "100.00", r: "0.1000" }, 100000], "stored ₹99,900 paid + ₹100 TDS; the invoice is paid in full (₹1,00,000 settled)")
+      await assert.rejects(sqlAs(OWNER, `update ops.tyre_payments set tds_amount = 50 where id = '${tp.id}'; ${evP(tp.id)}`), /tyre_payments_tds_check/, "the database checks TDS = settled × % / 100")
+      // The Employee corrects it: 1%, and part of it moved off the bill (allocations rewritten inside the audited edit).
+      const tpNow = (await call<TP[]>(EMP, "tyrePayments.list")).find((x) => x.id === tp.id)!
+      await as(EMP, () => api.tyrePayments.update(tp.id, { date: today, amount: 100000, tdsPercent: 1, mode: "IMPS", utr: "IMPS-1", allocations: [{ invoiceId: big.id, amount: 60000 }], acceptAdvance: true }, "1% applies; part is advance"), true, { [tp.id]: tpNow.updatedAt })
+      const edited = (await db.query<{ a: string; t: string }>(`select amount::text as a, tds_amount::text as t from ops.tyre_payments where id = '${tp.id}'`)).rows[0]
+      assert.deepEqual([edited, await paidOf(big.id), (await db.query(`select 1 from ops.tyre_payment_allocations where payment_id = '${tp.id}'`)).rows.length], [{ a: "99000.00", t: "1000.00" }, 60000, 1], "edited through the engine: ₹99,000 + ₹1,000; ₹60,000 on the bill, ₹40,000 advance")
+      await assert.rejects(call(EMP, "tyrePayments.remove", tp.id, "Wrong"), /can't/, "deleting stays the Owner's and Dev's")
+      await assert.rejects(sqlAs(EMP, `update ops.tyre_payments set date = '2026-10-15' where id = '${tp.id}'; ${evP(tp.id)}`), /row-level security|0 rows|no audit/i, "RLS: the Employee can't move a payment into a locked month")
+      // A direct Owner delete with its event: the allocations go with the payment (on delete cascade).
+      await sqlAs(OWNER, `delete from ops.tyre_payments where id = '${tp.id}'; ${evP(tp.id, "DELETED")}`)
+      assert.deepEqual([(await db.query(`select 1 from ops.tyre_payment_allocations where payment_id = '${tp.id}'`)).rows.length, await paidOf(big.id)], [0, 0], "cascade: no allocation left; the bill owes its full ₹1,00,000 again")
+      for (const id of [TATA, ADB]) {
+        await assert.rejects(call(id, "tyrePayments.remove", tp.id, "x y z"), /refused by the method list/)
+        await assert.rejects(call(id, "tyrePayments.list"), /refused by the method list/)
+        assert.deepEqual(await rowsAs(id, `select id from ops.tyre_payments union all select id from ops.tyre_payment_allocations`), [], `RLS: ${id.role} reads no tyre payment`)
+      }
+    }
+
+    /* -------------------------------------------------------------- 12g. AdBlue supplier payments (owner, 18 Nov 2026) */
+    {
+      type AP = import("@/lib/types").AdBluePayment
+      const { purchaseValue } = await import("@/domain/adblue-payments")
+      const vendor = await as(OWNER, () => api.adblueVendors.create({ name: "Payable Vendor", defaultRate: 50 }))
+      const otherVendor = await as(OWNER, () => api.adblueVendors.create({ name: "Other Payable Vendor", defaultRate: 50 }))
+      const paidOfP = async (id: string) => Number((await db.query<{ s: string }>(`select coalesce(sum(amount), 0)::text as s from fuel.adblue_payment_allocations where purchase_id = '${id}'`)).rows[0].s)
+      const buyP = (x: Record<string, unknown>) => ({ date: today, adblueVendorId: vendor.id, product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 1000, invoiceNo: "AB", notes: "", ...x })
+      const credit = await call<AdBluePurchase>(EMP, "adbluePurchases.create", buyP({ invoiceNo: "AB-1", gstRate: 18 }))
+      const cRow = (await db.query<{ c: string; g: string; l: string }>(`select total_cost::text as c, gst_amount::text as g, total_litres::text as l from fuel.adblue_purchases where id = '${credit.id}'`)).rows[0]
+      assert.deepEqual([cRow, purchaseValue(credit), (await db.query(`select 1 from fuel.adblue_payments`)).rows.length], [{ c: "10000.00", g: "1800.00", l: "200.000" }, 11800, 0], "a credit purchase: ₹10,000 + ₹1,800 GST (generated by the database), 200 L, no payment")
+      const part = await call<AdBluePurchase>(EMP, "adbluePurchases.create", buyP({ invoiceNo: "AB-2", payment: { type: "PARTIAL", amount: 4000, mode: "UPI", utr: "UPI-AB2" } }))
+      assert.equal(await paidOfP(part.id), 4000, "purchase, payment and allocation stored together")
+      const p = await call<AP>(EMP, "adbluePayments.create", { date: today, vendorId: vendor.id, amount: 20000, tdsPercent: 0.1, mode: "NEFT", utr: "NEFT-AB", allocations: [{ purchaseId: credit.id, amount: 11800 }, { purchaseId: part.id, amount: 6000 }], acceptAdvance: true })
+      const pRow = (await db.query<{ a: string; t: string }>(`select amount::text as a, tds_amount::text as t from fuel.adblue_payments where id = '${p.id}'`)).rows[0]
+      assert.deepEqual([pRow, await paidOfP(credit.id), await paidOfP(part.id)], [{ a: "19980.00", t: "20.00" }, 11800, 10000], "₹20,000 settled at 0.1%: ₹19,980 + ₹20 TDS; both purchases paid; ₹2,200 advance")
+      // The database's own rules, past the API.
+      const evA = (rid: string, action = "UPDATED", type = "AdBlue payment") => `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), '${action}', 'AdBlue', '${type}', '${rid}');`
+      await assert.rejects(sqlAs(OWNER, `update fuel.adblue_payments set tds_amount = 5 where id = '${p.id}'; ${evA(p.id)}`), /adblue_payments_tds_check/, "TDS = settled × % / 100")
+      await assert.rejects(sqlAs(OWNER, `update fuel.adblue_payments set vendor_id = '${otherVendor.id}' where id = '${p.id}'; ${evA(p.id)}`), /vendor never changes/)
+      await assert.rejects(sqlAs(OWNER, `update fuel.adblue_payments set amount = 100, tds_rate = null, tds_amount = 0 where id = '${p.id}'; ${evA(p.id)}`), /more than the payment settles/, "allocations never above what the payment settles")
+      await assert.rejects(sqlAs(OWNER, `insert into fuel.adblue_payment_allocations (payment_id, line_no, purchase_id, amount) values ('${p.id}', 9, '${credit.id}', 1); ${evA(p.id)}`), /beyond its value/, "a purchase is never paid beyond its value")
+      await assert.rejects(sqlAs(OWNER, `update fuel.adblue_purchases set price_per_bucket = 100 where id = '${credit.id}'; ${evA(credit.id, "UPDATED", "AdBlue purchase")}`), /beyond its value/, "…not even after a purchase edit")
+      await assert.rejects(sqlAs(OWNER, `delete from fuel.adblue_purchases where id = '${credit.id}'; ${evA(credit.id, "DELETED", "AdBlue purchase")}`), /foreign key/, "a purchase with payments isn't deleted")
+      await assert.rejects(sqlAs(EMP, `insert into fuel.adblue_payments (date, vendor_id, amount, mode, utr) values ('${today}', '${vendor.id}', 10, 'Credit', 'C-1')`), /check constraint/, "Credit is never a payment")
+      await assert.rejects(sqlAs(EMP, `insert into fuel.adblue_payments (id, date, vendor_id, amount, mode, utr) values ('abp_dup', '${today}', '${vendor.id}', 10, 'Cash', 'neft-ab'); ${evA("abp_dup", "PAYMENT_RECORDED")}`), /adblue_payments_utr_key/, "one reference, one payment")
+      await assert.rejects(sqlAs(EMP, `insert into fuel.adblue_payments (id, date, vendor_id, amount, mode, utr) values ('abp_oct', '2026-10-15', '${vendor.id}', 10, 'Cash', 'OCT-AB'); ${evA("abp_oct", "PAYMENT_RECORDED")}`), /row-level security/, "the month lock")
+      await assert.rejects(sqlAs(OWNER, `delete from fuel.adblue_payments where id = '${p.id}'`), /no audit event/, "no deletion without its DELETED event")
+      await sqlAs(EMP, `delete from fuel.adblue_payments where id = '${p.id}'; ${evA(p.id, "DELETED")}`).catch(() => undefined)
+      assert.equal((await db.query(`select 1 from fuel.adblue_payments where id = '${p.id}'`)).rows.length, 1, "RLS: the Employee deletes no payment, even with an event")
+      await assert.rejects(sqlAs(EMP, `delete from fuel.adblue_payment_allocations where payment_id = '${p.id}'; ${evA(p.id)}`), /Only the Owner and Dev can delete records: an AdBlue payment allocation/, "the Employee removes an allocation only inside a real edit")
+      // The Employee corrects it through the engine: one purchase only — the allocation rows rewritten inside the audited edit.
+      const pNow = (await call<AP[]>(EMP, "adbluePayments.list")).find((x) => x.id === p.id)!
+      await as(EMP, () => api.adbluePayments.update(p.id, { date: today, amount: 20000, tdsPercent: 0.1, mode: "NEFT", utr: "NEFT-AB", allocations: [{ purchaseId: credit.id, amount: 11800 }], acceptAdvance: true }, "Only AB-1 was paid"), true, { [p.id]: pNow.updatedAt })
+      assert.deepEqual([await paidOfP(part.id), (await db.query(`select 1 from fuel.adblue_payment_allocations where payment_id = '${p.id}'`)).rows.length], [4000, 1], "edited: AB-2 owes ₹6,000 again")
+      await assert.rejects(call(EMP, "adbluePayments.remove", p.id, "Wrong"), /Only the Owner and Dev/)
+      // The Owner deletes it through the engine: payment, allocations and the DELETED event in one transaction.
+      const litres = async () => (await db.query<{ l: string }>(`select sum(total_litres)::text as l from fuel.adblue_purchases`)).rows[0].l
+      const l0 = await litres()
+      await call(OWNER, "adbluePayments.remove", p.id, "Bank returned it")
+      const gone = (await db.query<{ r: string; a: unknown; t: string }>(`select reason as r, before->'allocations' as a, before->>'tdsAmount' as t from audit.events where record_id = '${p.id}' and action = 'DELETED'`)).rows
+      assert.deepEqual([(await db.query(`select 1 from fuel.adblue_payments where id = '${p.id}' union all select 1 from fuel.adblue_payment_allocations where payment_id = '${p.id}'`)).rows.length, await paidOfP(credit.id), gone], [0, 0, [{ r: "Bank returned it", a: [{ purchaseId: credit.id, amount: 11800 }], t: "20" }]], "deleted with its allocations; the audit event keeps them and the TDS")
+      assert.equal(await litres(), l0, "stock never moves with a payment")
+      // Edit Purchase → Credit to Fully Paid (Employee, through the engine): a payment and its allocation in one
+      // transaction; the purchase row — the stock batch — is not written at all.
+      const conv = await call<AdBluePurchase>(EMP, "adbluePurchases.create", buyP({ invoiceNo: "AB-CONV" }))
+      const rowOf = async () => (await db.query<{ u: string; c: string }>(`select updated_at::text as u, total_cost::text as c from fuel.adblue_purchases where id = '${conv.id}'`)).rows[0]
+      const convBefore = await rowOf()
+      await call(EMP, "adbluePurchases.update", conv.id, buyP({ invoiceNo: "AB-CONV", payment: { type: "FULL", amount: 10000, mode: "RTGS", utr: "RTGS-CONV", date: today } }))
+      assert.deepEqual([await rowOf(), await paidOfP(conv.id)], [convBefore, 10000], "Credit → Fully Paid: ₹10,000 paid; the purchase row untouched")
+      await assert.rejects(call(EMP, "adbluePurchases.update", conv.id, buyP({ invoiceNo: "AB-CONV", payment: { type: "FULL", amount: 10000, mode: "RTGS", utr: "RTGS-CONV2", date: today } })), /already fully paid/, "saving again creates no duplicate")
+      // Apply Advance (vendor page): the vendor's advance applied to a purchase — allocation rows on the existing payment, no new payment.
+      const advP = await call<AP>(EMP, "adbluePayments.create", { date: today, vendorId: vendor.id, amount: 3000, mode: "IMPS", utr: "IMPS-ADV-AB", allocations: [], acceptAdvance: true })
+      const owedP = await call<AdBluePurchase>(EMP, "adbluePurchases.create", buyP({ invoiceNo: "AB-ADV" }))
+      const nPay = (await db.query(`select 1 from fuel.adblue_payments`)).rows.length
+      await call(EMP, "adbluePayments.applyAdvance", vendor.id, [{ purchaseId: owedP.id, amount: 3000 }])
+      assert.deepEqual([(await db.query(`select 1 from fuel.adblue_payments`)).rows.length, await paidOfP(owedP.id), (await db.query<{ p: string }>(`select payment_id as p from fuel.adblue_payment_allocations where purchase_id = '${owedP.id}'`)).rows.map((r) => r.p)], [nPay, 3000, [advP.id]], "advance applied through the engine: no new payment, the allocation on the advance's payment")
+      await assert.rejects(call(TATA, "adbluePayments.applyAdvance", vendor.id, [{ purchaseId: owedP.id, amount: 1 }]), /refused by the method list/)
+      for (const id of [TATA, ADB]) {
+        await assert.rejects(call(id, "adbluePayments.list"), /refused by the method list/)
+        assert.deepEqual(await rowsAs(id, `select id from fuel.adblue_payments union all select id from fuel.adblue_payment_allocations`), [], `RLS: ${id.role} reads no AdBlue payment`)
+        await assert.rejects(sqlAs(id, `insert into fuel.adblue_payments (id, date, vendor_id, amount, mode, utr) values ('abp_${id.role}', '${today}', '${vendor.id}', 10, 'Cash', 'R-${id.role}'); ${evA(`abp_${id.role}`, "PAYMENT_RECORDED")}`), /row-level security/, `RLS: ${id.role} records no payment`)
+      }
+    }
+
     // An Owner's direct delete commits with its audit event (the guard doesn't apply); the Employee's same statement doesn't.
     await sqlAs(OWNER, `delete from core.customer_route_rates where customer_id = '${epsilon.id}'; ${evAs("UPDATED", "Customers", "Customer", epsilon.id, {})}`)
     assert.deepEqual(await routeRows(), [], "the Owner deleted the route rate")

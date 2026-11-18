@@ -201,6 +201,104 @@ export interface IndustrialSupply extends BaseEntity {
   updatedBy?: string | null
 }
 
+/* ------------------------------------------------------------------ Tyre Data (owner, 17 Nov 2026) */
+
+/** The four tyre masters, one list each: who it was bought from, what was done, the tyre's brand and size. */
+export type TyreMasterKind = "SUPPLIER" | "REPAIR_TYPE" | "BRAND" | "SIZE"
+
+/** A tyre master value. Never deleted — archived and restored (an archived value takes no new invoice line). */
+export interface TyreMaster extends BaseEntity {
+  kind: TyreMasterKind
+  name: string
+  status: "ACTIVE" | "ARCHIVED"
+}
+
+/** GST on a repair line: within the state (CGST + SGST, half each) or inter-state (IGST) — calculateTax in domain/pricing. */
+export type TyreTaxType = "CGST_SGST" | "IGST"
+
+/**
+ * One line of a tyre invoice (the Excel register's row). Amounts are calculated, never typed: base = quantity × rate,
+ * GST = base × gstRate % split by taxType; total = base + GST (domain/tyre.ts; the database generates the same).
+ */
+export interface TyreInvoiceItem {
+  id: string
+  repairTypeId: string
+  brandId: string | null
+  sizeId: string | null
+  tyreNumber: string
+  openingKm: number | null
+  closingKm: number | null
+  quantity: number
+  rate: number
+  gstRate: number
+  taxType: TyreTaxType
+  baseValue: number
+  cgst: number
+  sgst: number
+  igst: number
+  totalValue: number
+  removingNumber: string
+  remarks: string
+}
+
+/**
+ * A tyre / repair invoice (owner, 17 Nov 2026): one supplier bill for one vehicle, with its repair lines. The company is
+ * the customer the vehicle was assigned to on the invoice date (Vehicle Assignment History) — or, only for a vehicle
+ * with no customer on that date and only when chosen explicitly, "Office / No Customer" (`office`, no customer).
+ * Invoice totals are the sum of the lines (domain/tyre.ts), never stored. Mode of purchase / payment and payment details
+ * describe the bill; money paid is a TyrePayment allocated to the invoice (paid / outstanding are calculated from those).
+ */
+export interface TyreInvoice extends BaseEntity {
+  date: string
+  vehicleId: string
+  /** The vehicle's customer on `date`; null exactly when `office`. */
+  customerId: string | null
+  /** "Office / No Customer": counted in total tyre spend, never in any customer's. Never a default. */
+  office: boolean
+  supplierId: string
+  billNo: string
+  purchaseMode: string
+  paymentMode: string
+  paymentDetails: string
+  remarks: string
+  items: TyreInvoiceItem[]
+}
+
+/** One allocation: how much of a tyre payment settles one tyre invoice (same supplier). */
+export interface TyrePaymentAllocation {
+  invoiceId: string
+  amount: number
+}
+
+/**
+ * A payment to a tyre supplier (owner, 17 Nov 2026). Money actually paid — never "Credit" (that is no payment). Its
+ * allocations settle invoices of the same supplier; settled (amount + TDS) − Σ allocations is advance credit with the
+ * supplier. Edited by roles with tyres:edit (audited, month-locked); deleted permanently by the Owner / Dev (with a
+ * reason; its allocations go with it; the DELETED audit event keeps it). `amount` = paid to the vendor (bank / cash). An invoice's paid / outstanding / status are calculated from the allocations (domain/tyre.ts).
+ */
+export interface TyrePayment extends BaseEntity {
+  date: string
+  supplierId: string
+  /** Paid to the vendor (the bank / cash outflow). Without TDS it is also the total settled. */
+  amount: number
+  /** Cash, UPI, NEFT, RTGS, IMPS or Cheque (TYRE_PAYMENT_MODES). */
+  mode: string
+  /** The payment's reference — UTR (transfers), cheque number (Cheque) or receipt number (Cash); required on every payment. */
+  utr: string
+  /** The supplier's bill number or another reference (optional). */
+  reference: string
+  /** Paid by (VT / VTHPL), when recorded. */
+  companyCode: CompanyCode | null
+  notes: string
+  allocations: TyrePaymentAllocation[]
+  /**
+   * "Deduct TDS?" (owner, 17 Nov 2026): `amount` is then what reached the vendor; tdsAmount = round2(settled × tdsRate
+   * / 100); settled = amount + tdsAmount (domain/tyre.ts settledOf). Absent / 0 / null on payments without TDS.
+   */
+  tdsAmount?: number
+  tdsRate?: number | null
+}
+
 export interface DieselEntry extends BaseEntity {
   companyCode: CompanyCode
   date: string
@@ -307,6 +405,12 @@ export interface Payment extends BaseEntity {
    * payments (OUT, mode TDS, amount 0): deducted on the station's fuel bills; settles that much of what we owe it.
    */
   tdsAmount: number
+  /**
+   * Fuel station payments with "Deduct TDS?" on (owner, 17 Nov 2026): the TDS % applied to the total settled. Then
+   * `amount` = what reached the station (net), `tdsAmount` = round2(total × tdsRate / 100), and the total settled =
+   * amount + tdsAmount. Absent on every other payment (and on the monthly TDS entry, mode TDS).
+   */
+  tdsRate?: number
   mode: PaymentMode
   reference: string
   allocations: Allocation[]
@@ -539,6 +643,41 @@ export interface AdBluePurchase extends BaseEntity {
   notes: string
   /** Legacy opening stock (recording it was removed on 31 Oct 2026): records saved earlier count as stock, never as a purchase. */
   opening?: boolean
+  /**
+   * GST % on the Total Cost (owner, 18 Nov 2026; absent / 0 on purchases saved before). The purchase's value to the
+   * vendor = Total Cost + GST (domain/adblue-payments.ts purchaseValue); stock, FIFO and Inventory Value use Total Cost only.
+   */
+  gstRate?: number
+}
+
+/** How much of an AdBlue payment settles a bulk purchase of the same vendor. */
+export interface AdBluePaymentAllocation {
+  purchaseId: string
+  amount: number
+}
+
+/**
+ * A payment to an AdBlue vendor (owner, 18 Nov 2026) — money actually paid (never "Credit"), allocated to that vendor's
+ * bulk purchases; settled (amount + TDS) − Σ allocations is advance credit with the vendor. Never touches stock. Edited
+ * by the Owner, Dev and Employee (audited, month-locked); deleted permanently by the Owner / Dev (with a reason; its
+ * allocations go with it; the DELETED audit event keeps it). Figures: domain/adblue-payments.ts.
+ */
+export interface AdBluePayment extends BaseEntity {
+  date: string
+  vendorId: string
+  /** Paid to the vendor (the bank / cash outflow). Without TDS it is also the total settled. */
+  amount: number
+  /** "Deduct TDS?": tdsAmount = round2(settled × tdsRate / 100); null rate = no TDS. */
+  tdsAmount: number
+  tdsRate: number | null
+  /** Cash, UPI, NEFT, RTGS, IMPS or Cheque (ADBLUE_PAYMENT_MODES). */
+  mode: string
+  /** The payment's reference — UTR (transfers), cheque number (Cheque) or receipt number (Cash). */
+  utr: string
+  /** Paid by (VT / VTHPL), when recorded. */
+  companyCode: CompanyCode | null
+  notes: string
+  allocations: AdBluePaymentAllocation[]
 }
 
 /**
@@ -643,12 +782,16 @@ export interface CollectionMap {
   fuel_stations: FuelStation
   adblue_purchases: AdBluePurchase
   adblue_vendors: AdBlueVendor
+  adblue_payments: AdBluePayment
   tanker_loads: TankerLoad
   tanker_dispenses: TankerDispense
   tankers: Tanker
   tanker_transfers: TankerTransfer
   tanker_adjustments: TankerAdjustment
   industrial_supplies: IndustrialSupply
+  tyre_masters: TyreMaster
+  tyre_invoices: TyreInvoice
+  tyre_payments: TyrePayment
   month_locks: MonthLock
   invoices: Invoice
   payments: Payment

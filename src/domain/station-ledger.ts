@@ -37,6 +37,8 @@ interface StationPayment {
   mode?: string
   /** TDS deducted on the purchase (u/s 194Q) — counts as paid to the station, but goes to the government, not the bank. */
   tdsAmount?: number
+  /** TDS % deducted on this payment ("Deduct TDS?"); absent otherwise. */
+  tdsRate?: number
   vendorId: string | null
   date: string
   amount: number
@@ -145,7 +147,16 @@ export interface StationPaymentRow {
   reference: string
   date: string
   createdAt?: string
+  /** Total settled — counted in Payments Made (= paid + tds). */
   amount: number
+  /** The money that reached the station (bank / cash). */
+  paid: number
+  /** TDS deducted (monthly TDS entry, or on this payment). */
+  tds: number
+  /** "Deduct TDS?" payments: the % applied. */
+  tdsRate?: number
+  /** Voucher's UTR / transaction reference, when recorded. */
+  utr?: string
   kind: StationPaymentKind
   mode: string
   companyCode?: string
@@ -161,6 +172,7 @@ export interface StationPaymentRow {
 }
 
 interface HistoryVoucher extends StationPayment {
+  reference?: string
   id: string
   paymentNo: string
   createdAt?: string
@@ -183,6 +195,10 @@ export function stationPaymentHistory(stationId: string, payments: HistoryVouche
         date: p.date,
         createdAt: p.createdAt,
         amount: round2(p.amount + (p.tdsAmount ?? 0)),
+        paid: p.amount,
+        tds: p.tdsAmount ?? 0,
+        ...(p.reference && p.mode !== "TDS" ? { utr: p.reference } : {}),
+        ...(p.tdsRate != null ? { tdsRate: p.tdsRate } : {}),
         kind: !p.amount && p.tdsAmount ? "TDS" : p.mode === "CASH" ? "MANUAL_CASH" : "VOUCHER",
         mode: p.mode ?? "",
         companyCode: p.companyCode,
@@ -198,6 +214,8 @@ export function stationPaymentHistory(stationId: string, payments: HistoryVouche
         date: f.date,
         createdAt: f.createdAt,
         amount: f.amount,
+        paid: f.amount,
+        tds: 0,
         kind: "CASH_AT_PUMP",
         mode: "CASH",
         notes: "Cash paid at the pump for this fuel fill",
@@ -226,6 +244,48 @@ export function stationPaymentHistory(stationId: string, payments: HistoryVouche
  * show whole rupees, but no rounding rule has been confirmed (open question in issues.md, Problem 14).
  */
 export const FUEL_TDS_PERCENT = 0.1
+
+/*
+ * TDS deducted on a payment (owner, 17 Nov 2026): Add Payment → "Deduct TDS?" (off by default, 0.1% suggested).
+ *   TDS             = round2(Total settled × TDS % / 100)
+ *   Paid to station = Total settled − TDS          (the voucher's `amount`: the money that left the bank / cash)
+ *   Total settled   = Paid + TDS                   (what the ledger's Payments Made counts — TDS once, never on top)
+ * Stored on the voucher as amount = paid, tdsAmount = TDS, tdsRate = the %; the database checks the same arithmetic.
+ */
+export function tdsSplit(total: number, percent: number) {
+  const settled = round2(total)
+  const tds = round2((settled * percent) / 100)
+  return { settled, tds, paid: round2(settled - tds) }
+}
+
+/**
+ * TDS already taken on one month's purchases of a station (owner's decision, 17 Nov 2026: per-payment TDS is the normal
+ * method; the monthly TDS entry stays for historical adjustments and separately managed months). The purchases are
+ * identified by the month paid against: the monthly entry's own month, a payment's `forMonth`. Both kinds on the same
+ * month = the same purchases taxed twice, so adding the second kind needs an explicit confirmation (API and dialogs).
+ * Nothing is ever changed or removed by this check.
+ */
+export function tdsTakenOn<P extends StationPayment & { id: string; paymentNo?: string }>(payments: P[], stationId: string, month: string) {
+  const own = payments.filter((p) => isStationPayment(p, stationId))
+  const monthly = own.find((p) => p.mode === "TDS" && (p.forMonth ?? p.date.slice(0, 7)) === month)
+  const deducted = own.filter((p) => p.mode !== "TDS" && (p.tdsAmount ?? 0) > 0 && p.forMonth === month)
+  return { monthly, deducted, onPayments: round2(deducted.reduce((t, p) => t + (p.tdsAmount ?? 0), 0)) }
+}
+
+const decimals = (n: number) => (String(n).split(".")[1] ?? "").length
+
+/** What's wrong with a TDS-deducted payment, or null — the form and the API use the same rules. */
+export function tdsPaymentProblem(total: number, percent: number): string | null {
+  if (!(Number.isFinite(total) && total > 0)) return "Enter the total payment amount (more than ₹0)"
+  if (!Number.isFinite(percent)) return "Enter the TDS percentage"
+  if (percent < 0) return "The TDS percentage can't be negative"
+  if (decimals(percent) > 4) return "TDS percentage: up to 4 decimals"
+  if (percent >= 100) return "TDS can't be the whole payment — the station must receive something (use Record TDS for a TDS-only entry)"
+  const { tds, paid } = tdsSplit(total, percent)
+  if (tds > total) return "The TDS can't be more than the total payment"
+  if (!(paid > 0)) return "Nothing would be paid to the station after TDS"
+  return null
+}
 
 export const tdsDue = (monthPurchased: number) => round2((monthPurchased * FUEL_TDS_PERCENT) / 100)
 
