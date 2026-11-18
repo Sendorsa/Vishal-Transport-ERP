@@ -378,12 +378,15 @@ export function CompanyDiesel({ slug }: { slug: string }) {
                           </div>
                         </div>
                         <dl className="grid grid-cols-2 gap-x-3 gap-y-2 border-t pt-2.5 text-sm">
+                          {/* Fixed 2 × 4 grid (owner, 18 Nov 2026): every slot always rendered, so nothing moves when a value is missing. */}
                           <VehicleFigure label={`${fuelName(v.vehicle.fuelType)} Spend`} value={v.spend ? formatINR(v.spend) : "—"} strong />
+                          {v.vehicle.fuelType === "EV" ? <VehicleFigure label="Charged" value={v.kwh ? `${formatNumber(v.kwh, 2)} kWh` : "—"} /> : <VehicleFigure label={`${fuelName(v.vehicle.fuelType)} Consumed`} value={v.litres ? `${formatNumber(v.litres, 2)} L` : "—"} />}
                           <VehicleFigure label="KM Run" value={formatNumber(v.km)} />
+                          {v.vehicle.fuelType === "EV" ? <div aria-hidden /> : <VehicleFigure label="KM / Litre" value={v.kmpl ?? "—"} />}
                           <VehicleFigure label={`${v.vehicle.fuelType === "EV" ? "Charging" : fuelName(v.vehicle.fuelType)} Cost per KM`} value={v.costPerKm ? formatINR(v.costPerKm) : "—"} />
-                          {v.vehicle.fuelType === "EV" ? <VehicleFigure label="Charged" value={v.kwh ? `${formatNumber(v.kwh, 2)} kWh` : "—"} /> : <VehicleFigure label="KM / Litre" value={v.kmpl ?? "—"} />}
-                          <VehicleFigure label="AdBlue Litres" value={d.abByVehicle.get(v.vehicle.id) ? `${formatNumber(d.abByVehicle.get(v.vehicle.id)!.litres, 2)} L` : "—"} />
+                          <div aria-hidden />
                           <VehicleFigure label="AdBlue Spend" value={d.abByVehicle.get(v.vehicle.id) ? formatINR(d.abByVehicle.get(v.vehicle.id)!.spend) : "—"} />
+                          <VehicleFigure label="AdBlue Litres" value={d.abByVehicle.get(v.vehicle.id) ? `${formatNumber(d.abByVehicle.get(v.vehicle.id)!.litres, 2)} L` : "—"} />
                         </dl>
                       </Card>
                     </div>

@@ -340,7 +340,34 @@ async function main() {
   assert.equal(activeFleetCount([one, one, { ...one }]), 1, "the same vehicle twice: once")
   assert.equal(activeFleetCount([{ id: "a", status: "ARCHIVED" }, { id: "b", status: "INACTIVE" }, { id: "c", status: "MAINTENANCE" }, { id: "d", status: "ACTIVE" }]), 1, "only Active counts")
 
-  console.log("fuel-wise expenditure: Diesel / Petrol / EV / Industrial / AdBlue per customer and vehicle, only the fuel types present, Total Expenditure, reassignment, month boundaries, delete / restore, Tata Adblue scope, reconciliation: all checks passed")
+  /* ---------------------------------------------------------------- 20. vehicle card: {Fuel} Consumed (owner, 18 Nov 2026) */
+  // A tanker fill is the vehicle's consumption; the tanker load (5,000 L) is a purchase, never on a vehicle card.
+  odo.set(mD, odo.get(mD)! + 400)
+  await api.diesel.create({ date: "2026-11-08", vehicleId: mD, customerId: M, vendorId: "dv_tanker", tankerId: tanker, litres: 33.5, rate: 90, odometerKm: odo.get(mD)!, billNo: "", paymentMode: "CREDIT" } as never)
+  data = await load()
+  const { fillRow } = await import("@/domain/diesel")
+  const cardIx = buildDieselIndex(data as never)
+  const card = (cid: string | null, month: string, vid: string) => groupMonth(cardIx, cid, month, undefined, month === "2026-11").vehicles.find((v) => v.vehicle.id === vid)
+  let cards = 0
+  for (const cid of [null, ...data.customers.map((c) => c.id)])
+    for (const month of ["2026-09", "2026-10", "2026-11"])
+      for (const v of groupMonth(cardIx, cid, month, undefined, month === "2026-11").vehicles) {
+        const own = data.diesel.filter((e) => e.vehicleId === v.vehicle.id && (e.customerId ?? null) === cid && e.date.startsWith(month))
+        const expected = v.vehicle.fuelType === "EV" ? 0 : round2(own.reduce((t, e) => t + e.litres, 0))
+        assert.equal(v.litres, expected, `${v.vehicle.regNo} ${month}: Consumed = Σ litres of its fill records under that customer`)
+        if (v.litres > 0 && own.every((e) => (fillRow(cardIx, e).kmSince ?? 0) > 0)) assert.equal(v.kmpl, round2(v.km / v.litres), `${v.vehicle.regNo} ${month}: KM / Litre = KM Run ÷ Consumed`)
+        cards++
+      }
+  assert.ok(cards > 20, "every vehicle card checked")
+  assert.equal(card(M, "2026-11", mD)!.litres, 113.5, "Diesel: pump 80 L + tanker fill 33.5 L; the tanker load is not counted")
+  assert.equal(card(ALL, "2026-11", aD)!.litres, 120, "AdBlue (10 L draw + 8 L direct) never in Diesel Consumed")
+  assert.equal(card(ALL, "2026-11", aP)!.litres, 15, "Petrol vehicle: its petrol litres")
+  assert.equal(card(ALL, "2026-11", aE)!.litres, 0, "EV: kWh only, no litres (the card shows Charged)")
+  assert.deepEqual([card(A, "2026-10", moved)!.litres, card(B, "2026-10", moved)!.litres], [40, 70], "transfer mid-month: each customer's card shows only its own fills")
+  assert.deepEqual([card(D, "2026-10", edge)!.litres, card(D, "2026-11", edge)!.litres], [10, 11], "month boundary: each month its own litres")
+  assert.equal(card(Z, "2026-11", spare)?.litres ?? 0, 0, "no fill: nothing consumed")
+
+  console.log("fuel-wise expenditure:Diesel / Petrol / EV / Industrial / AdBlue per customer and vehicle, only the fuel types present, Total Expenditure, reassignment, month boundaries, delete / restore, Tata Adblue scope, reconciliation: all checks passed")
 }
 
 main().catch((e) => {
