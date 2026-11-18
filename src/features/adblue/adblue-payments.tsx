@@ -14,7 +14,7 @@ import { StatsCard } from "@/components/shared/stats-card"
 import { monthLabel } from "@/domain/diesel"
 import { fyName, fyStartYear } from "@/domain/financial-year"
 import { canEditMonth } from "@/domain/month-lock"
-import { ADBLUE_PAYMENT_MODES, ALLOCATION_STATUS_LABEL, allocationStatus, periodRange, referenceLabel, settledOf, supplierTotals, unallocated, vendorAccounts, type AllocationStatus } from "@/domain/adblue-payments"
+import { ADBLUE_PAYMENT_MODES, ALLOCATION_STATUS_LABEL, allocationStatus, PAYABLE_KIND_LABEL, periodRange, referenceLabel, settledOf, supplierTotals, unallocated, vendorAccounts, type AllocationStatus } from "@/domain/adblue-payments"
 import { useDeleteAdBluePayment } from "@/lib/api/hooks"
 import { useCan, useRole } from "@/lib/app-state"
 import { canManageAdBluePayments } from "@/lib/permissions"
@@ -83,7 +83,7 @@ export function AdBluePaymentsPanel() {
       .filter((p) => !f.mode || p.mode === f.mode)
       .filter((p) => !f.tds || (f.tds === "ON") === p.tdsAmount > 0)
       .filter((p) => !f.status || allocationStatus(p) === f.status)
-      .filter((p) => !q || [p.utr, p.notes, d.vendorName(p.vendorId), ...p.allocations.map((a) => d.purchase(a.purchaseId)?.invoiceNo ?? "")].some((s) => norm(s ?? "").includes(q)))
+      .filter((p) => !q || [p.utr, p.notes, d.vendorName(p.vendorId), ...p.allocations.map((a) => d.payableOf(a.purchaseId)?.billNo ?? "")].some((s) => norm(s ?? "").includes(q)))
       .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))
   }, [d, f, range])
 
@@ -95,7 +95,7 @@ export function AdBluePaymentsPanel() {
   const asOf = range ? (range.to > today ? today : range.to) : today
   const owed = supplierTotals(
     vendorAccounts(
-      d.purchases.filter((p) => p.date <= asOf && (!f.vendorId || p.adblueVendorId === f.vendorId)),
+      d.payables.filter((x) => x.date <= asOf && (!f.vendorId || x.vendorId === f.vendorId)),
       d.payments.filter((p) => p.date <= asOf && (!f.vendorId || p.vendorId === f.vendorId))
     )
   )
@@ -109,8 +109,8 @@ export function AdBluePaymentsPanel() {
   const open = (date: string) => canEditMonth(role, date.slice(0, 7), today, d.locks)
   const mayEdit = canManageAdBluePayments(role, "edit")
   const mayDelete = canManageAdBluePayments(role, "delete") && can("adblue", "delete")
-  const deletable = (p: AdBluePayment) => open(p.date) && p.allocations.every((a) => open(d.purchase(a.purchaseId)?.date ?? p.date))
-  const bills = (p: AdBluePayment) => [...new Set(p.allocations.map((a) => `Bill ${d.purchase(a.purchaseId)?.invoiceNo || "—"}`))]
+  const deletable = (p: AdBluePayment) => open(p.date) && p.allocations.every((a) => open(d.payableOf(a.purchaseId)?.date ?? p.date))
+  const bills = (p: AdBluePayment) => [...new Set(p.allocations.map((a) => { const x = d.payableOf(a.purchaseId); return `${x ? PAYABLE_KIND_LABEL[x.kind] : ""} Bill ${x?.billNo || "—"}`.trim() }))]
 
   const mayPay = canManageAdBluePayments(role, "create")
   return (
@@ -200,7 +200,7 @@ export function AdBluePaymentsPanel() {
               <div className="max-w-48 space-y-0.5 text-xs whitespace-normal">
                 {p.allocations.map((a, n) => (
                   <div key={n}>
-                    Bill {d.purchase(a.purchaseId)?.invoiceNo || "—"} <span className="num text-muted-foreground">{formatINR(a.amount)}</span>
+                    <span className="text-muted-foreground">{d.payableOf(a.purchaseId) ? PAYABLE_KIND_LABEL[d.payableOf(a.purchaseId)!.kind] : ""}</span> Bill {d.payableOf(a.purchaseId)?.billNo || "—"} <span className="num text-muted-foreground">{formatINR(a.amount)}</span>
                   </div>
                 ))}
                 {unallocated(p) > 0 && <div className="num text-sky-700 dark:text-sky-400">{formatINR(unallocated(p))} advance</div>}

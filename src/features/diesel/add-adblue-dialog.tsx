@@ -18,6 +18,9 @@ import { hasOwnerAuthority } from "@/lib/permissions"
 import { adBlueNeighbours } from "@/domain/adblue"
 import { formatDate, formatINR, formatNumber, toISODate, todayISO } from "@/lib/format"
 import type { AdBlueEntry, Customer, PaymentMode, Vehicle } from "@/lib/types"
+import { ON_ACCOUNT } from "@/domain/adblue-payments"
+import { useAdBlueFinance } from "@/features/adblue/adblue-data"
+import { PurchasePaymentSection, usePurchasePayment } from "@/features/adblue/purchase-payment-section"
 
 /**
  * Records (or, with `entry`, edits) an AdBlue top-up for one vehicle — kept apart from diesel entries.
@@ -57,8 +60,8 @@ export function AddAdBlueDialog({
   const monthEnd = toISODate(endOfMonth(parseISO(`${month}-01`)))
   const maxDate = monthEnd < today ? monthEnd : today
   const blank = entry
-    ? { date: entry.date, closingKm: String(entry.closingKm), qty: String(entry.quantityLitres), invoiceNo: entry.invoiceNo, notes: entry.notes, source: isDirectAdBlue(entry) ? "DIRECT" : "STOCK", vendorId: entry.adblueVendorId ?? "", vendorName: isDirectAdBlue(entry) ? (entry.vendorName ?? "") : "", rate: isDirectAdBlue(entry) && entry.rate ? String(entry.rate) : "", paymentMode: entry.paymentMode ?? "CASH" }
-    : { date: maxDate, closingKm: "", qty: "", invoiceNo: "", notes: "", source: initialSource as string, vendorId: "", vendorName: "", rate: "", paymentMode: "CASH" }
+    ? { date: entry.date, closingKm: String(entry.closingKm), qty: String(entry.quantityLitres), invoiceNo: entry.invoiceNo, notes: entry.notes, source: isDirectAdBlue(entry) ? "DIRECT" : "STOCK", vendorId: entry.adblueVendorId ?? "", vendorName: isDirectAdBlue(entry) ? (entry.vendorName ?? "") : "", rate: isDirectAdBlue(entry) && entry.rate ? String(entry.rate) : "", paymentMode: (entry.paymentMode as string) ?? ON_ACCOUNT }
+    : { date: maxDate, closingKm: "", qty: "", invoiceNo: "", notes: "", source: initialSource as string, vendorId: "", vendorName: "", rate: "", paymentMode: ON_ACCOUNT } // a new direct purchase is on the vendor's credit
   const [f, setF] = useState(blank)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [reason, setReason] = useState("")
@@ -100,6 +103,14 @@ export function AddAdBlueDialog({
       const v = vendorOf(id)
       return { ...s, vendorId: id, vendorName: v?.name ?? s.vendorName, rate: s.source === "DIRECT" && !s.rate && v?.defaultRate ? String(v.defaultRate) : s.rate }
     })
+  // Direct purchase money (owner, 18 Nov 2026): on the vendor's credit, settled by AdBlue payments — paid now (Fully /
+  // Partially Paid: a payment with it), or later. Direct purchases recorded before that were paid at purchase: shown as is.
+  const fin = useAdBlueFinance()
+  const legacyPaid = direct && !!entry && isDirectAdBlue(entry) && !!entry.paymentMode && entry.paymentMode !== ON_ACCOUNT
+  const applied = entry ? fin.payments.flatMap((x) => x.allocations.filter((a) => a.purchaseId === entry.id).map((a) => ({ payment: x, amount: a.amount }))) : []
+  const paidSoFar = applied.reduce((t, a) => Math.round((t + a.amount) * 100) / 100, 0)
+  const owed = Math.max(0, Math.round((amount - paidSoFar) * 100) / 100)
+  const payState = usePurchasePayment(owed)
   const kmRun = prev && f.closingKm !== "" ? closing - prev.closingKm : null
   const kmPerLitre = kmRun && kmRun > 0 && qty > 0 ? kmRun / qty : null
   const costPerKm = kmRun && kmRun > 0 && amount > 0 ? amount / kmRun : null
@@ -120,7 +131,9 @@ export function AddAdBlueDialog({
     if (!(qty > 0)) errs.qty = "Enter AdBlue litres"
     else if (!direct && after.shortfall) errs.qty = adBlueShortfallMessage(after.shortfall, (id) => vendorOf(id)?.name ?? "this vendor")
     if (!direct && !f.vendorId && !legacyDraw && !(openingLeft > 0 && openingLeft >= qty)) errs.vendorId = openingLeft > 0 ? `Only ${formatNumber(openingLeft, 2)} L of unattributed stock — choose a vendor` : "Choose the vendor whose AdBlue stock is used"
-    if (direct && !f.vendorId && !f.vendorName.trim()) errs.vendorId = "Choose the vendor"
+    if (direct && !f.vendorId && (!legacyPaid || !f.vendorName.trim())) errs.vendorId = legacyPaid ? "Choose the vendor" : "Choose the vendor from the list — a purchase on credit is owed to that vendor"
+    if (direct && !legacyPaid && fin.canPay && payState.problem()) errs.pay = payState.problem()!
+    if (direct && entry && paidSoFar > 0 && amount < paidSoFar) errs.rate = `${formatINR(paidSoFar)} is already paid against this purchase — its amount can't go below that`
     if (direct && !(rate > 0)) errs.rate = "Enter the rate per litre"
     setErrors(errs)
     if (Object.keys(errs).length) return
@@ -135,11 +148,15 @@ export function AddAdBlueDialog({
         invoiceNo: f.invoiceNo.trim(),
         notes: f.notes.trim(),
         adblueVendorId: f.vendorId || null,
-        ...(direct ? { source: "DIRECT" as const, vendorName: f.vendorName.trim(), rate, paymentMode: f.paymentMode as PaymentMode } : { source: "STOCK" as const }),
+        ...(direct
+          ? { source: "DIRECT" as const, vendorName: f.vendorName.trim(), rate, paymentMode: (legacyPaid ? f.paymentMode : ON_ACCOUNT) as PaymentMode | "CREDIT", ...(!legacyPaid && fin.canPay && payState.paying ? { payment: payState.payload() } : {}) }
+          : { source: "STOCK" as const }),
       },
       reason,
     })
-    toast.success(`AdBlue entry ${entry ? "updated" : "saved"} — ${formatNumber(qty, 2)} L, ${formatINR(amount)}`)
+    toast.success(`AdBlue entry ${entry ? "updated" : "saved"} — ${formatNumber(qty, 2)} L, ${formatINR(amount)}`, {
+      description: direct && !legacyPaid ? (payState.paying ? `${formatINR(Math.min(payState.payAmount, owed))} paid now · ${formatINR(Math.max(0, owed - payState.payAmount))} outstanding with the vendor` : `On the vendor's credit · ${formatINR(owed)} outstanding`) : undefined,
+    })
     close()
   }
 
@@ -207,9 +224,11 @@ export function AddAdBlueDialog({
             <Field label="Rate (₹ / L)" required error={errors.rate}>
               <Input type="number" step="0.01" min={0} value={f.rate} onChange={(e) => set("rate")(e.target.value)} />
             </Field>
-            <Field label="Payment mode">
-              <SimpleSelect value={f.paymentMode} onChange={set("paymentMode")} options={(["CASH", "UPI", "NEFT", "CHEQUE"] as const).map((m) => ({ value: m, label: m === "CASH" ? "Cash" : m }))} />
-            </Field>
+            {legacyPaid && (
+              <Field label="Paid at purchase" hint="Recorded before AdBlue vendor credit — paid on the spot, nothing owed to the vendor">
+                <SimpleSelect value={f.paymentMode} onChange={set("paymentMode")} options={(["CASH", "UPI", "NEFT", "CHEQUE"] as const).map((m) => ({ value: m, label: m === "CASH" ? "Cash" : m }))} />
+              </Field>
+            )}
           </>
         ) : null}
         <Field label={direct ? "Total amount" : "Cost (from the vendor's stock)"} hint={direct ? "Litres × rate" : qty > 0 && amount > 0 ? `${formatINR(amount / qty)} / L — litres × the purchase rate of each batch used (oldest first)` : "Litres × the vendor's purchase rate — calculated, not typed"}>
@@ -223,6 +242,14 @@ export function AddAdBlueDialog({
         </Field>
         {entry && <ReasonField value={reason} onChange={setReason} className="sm:col-span-2" />}
       </div>
+      {direct && !legacyPaid && (fin.canPay ? (
+        <>
+          <PurchasePaymentSection state={payState} owed={owed} paidSoFar={paidSoFar} editing={!!entry} applied={applied} minDate={f.date} vendor={vendorOf(f.vendorId)?.name ?? f.vendorName} />
+          {errors.pay && <p className="text-sm text-destructive">{errors.pay}</p>}
+        </>
+      ) : (
+        <p className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">Recorded on {vendorOf(f.vendorId)?.name ?? "the vendor"}&apos;s credit — {formatINR(amount)} owed until the Owner, Dev or an Employee records the payment.</p>
+      ))}
       <div className="grid grid-cols-3 gap-3 rounded-lg border bg-muted/40 p-3 text-sm [&>div]:min-w-0 [&_.num]:[overflow-wrap:anywhere]">
         <div>
           <div className="text-xs text-muted-foreground">KM Run</div>

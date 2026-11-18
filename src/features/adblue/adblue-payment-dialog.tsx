@@ -18,7 +18,7 @@ import { SimpleSelect } from "@/components/shared/simple-select"
 import { deletionReasonError } from "@/domain/audit"
 import { monthLabel } from "@/domain/diesel"
 import { canEditMonth } from "@/domain/month-lock"
-import { ADBLUE_PAYMENT_MODES, ADBLUE_TDS_PERCENT, ALLOCATION_STATUS_LABEL, allocateOldestFirst, allocationStatus, paymentProblem, referenceLabel, settledOf, tdsProblem, tdsSplit, unallocated, type AllocationStatus } from "@/domain/adblue-payments"
+import { ADBLUE_PAYMENT_MODES, ADBLUE_TDS_PERCENT, ALLOCATION_STATUS_LABEL, allocateOldestFirst, allocationStatus, PAYABLE_KIND_LABEL, payableLabel, type Payable, paymentProblem, referenceLabel, settledOf, tdsProblem, tdsSplit, unallocated, type AllocationStatus } from "@/domain/adblue-payments"
 import { useAllocateAdBluePayment, useApplyAdBlueAdvance, useCreateAdBluePayment, useSettings, useUpdateAdBluePayment } from "@/lib/api/hooks"
 import { useRole } from "@/lib/app-state"
 import { formatDate, formatINR, formatLitres, formatNumber, round2, todayISO } from "@/lib/format"
@@ -28,7 +28,14 @@ import { useAdBlueFinance } from "./adblue-data"
 
 const NONE = "_none"
 const num = (s: string) => (s.trim() === "" ? 0 : Number(s))
-const billOf = (p: { invoiceNo: string; date: string } | undefined) => (p ? `Bill ${p.invoiceNo || "—"} (${formatDate(p.date)})` : "Purchase")
+/** Bulk (into stock) or Direct (straight into a vehicle) — every place a purchase is listed for payment. */
+export function PayableKindBadge({ kind }: { kind: Payable["kind"] }) {
+  return (
+    <Badge variant="outline" className={cn("px-1.5 py-0 text-[11px] font-medium", kind === "DIRECT" ? "border-violet-300 text-violet-800 dark:border-violet-800 dark:text-violet-300" : "text-muted-foreground")}>
+      {PAYABLE_KIND_LABEL[kind]}
+    </Badge>
+  )
+}
 
 const ALLOC_CLASS: Record<AllocationStatus, string> = {
   FULL: "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300",
@@ -143,9 +150,9 @@ export function AdBluePaymentDialog({ vendorId: fixedVendor, payment, edit, vend
   // the purchases this payment already pays, so they stay editable.
   const open = useMemo(
     () =>
-      d.payable
-        .filter((p) => p.adblueVendorId === vendorId)
-        .map((p) => ({ p, pay: d.payOf(p), left: round2(d.payOf(p).outstanding + (own.get(p.id) ?? 0)), locked: !canEditMonth(role, p.date.slice(0, 7), today, d.locks) }))
+      d.payables
+        .filter((p) => p.vendorId === vendorId)
+        .map((p) => ({ p, pay: d.payOfPayable(p), left: round2(d.payOfPayable(p).outstanding + (own.get(p.id) ?? 0)), locked: !canEditMonth(role, p.date.slice(0, 7), today, d.locks) }))
         .filter((x) => x.left > 0 || own.has(x.p.id))
         .sort((a, b) => a.p.date.localeCompare(b.p.date) || a.p.createdAt.localeCompare(b.p.createdAt)),
     [d, vendorId, role, today, own]
@@ -159,7 +166,7 @@ export function AdBluePaymentDialog({ vendorId: fixedVendor, payment, edit, vend
   const allocations = open.filter((x) => num(apply[x.p.id] ?? "") !== 0).map((x) => ({ purchaseId: x.p.id, amount: num(apply[x.p.id]) }))
   const allocated = round2(allocations.reduce((t, a) => t + a.amount, 0))
   const rest = round2(amount - allocated)
-  const label = (id: string) => billOf(d.purchase(id))
+  const label = (id: string) => (d.payableOf(id) ? payableLabel(d.payableOf(id)!, formatDate) : "Purchase")
   const outstanding = (id: string) => open.find((x) => x.p.id === id)?.left
   const problem = !vendorId
     ? "Choose the AdBlue vendor"
@@ -298,7 +305,7 @@ export function AdBluePaymentDialog({ vendorId: fixedVendor, payment, edit, vend
               ) : (
                 <ul className="divide-y rounded-lg border">
                   <li className="hidden grid-cols-[1fr_7rem_7rem_7rem_9rem] gap-3 bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground md:grid">
-                    <span>Purchase date · Bill</span>
+                    <span>Purchase date · Type · Bill</span>
                     <span className="text-right">Purchase amount</span>
                     <span className="text-right">Already paid</span>
                     <span className="text-right">Outstanding</span>
@@ -307,7 +314,7 @@ export function AdBluePaymentDialog({ vendorId: fixedVendor, payment, edit, vend
                   {open.map(({ p, pay, left, locked }) => (
                     <li key={p.id} className="grid grid-cols-2 items-center gap-x-3 gap-y-1 px-3 py-2 text-sm md:grid-cols-[1fr_7rem_7rem_7rem_9rem]">
                       <div className="col-span-2 md:col-span-1">
-                        <span className="num">{formatDate(p.date)}</span> · <span className="font-medium">Bill {p.invoiceNo || "—"}</span> <span className="text-xs text-muted-foreground">· {formatLitres(p.totalLitres)}</span>
+                        <span className="num">{formatDate(p.date)}</span> · <PayableKindBadge kind={p.kind} /> <span className="font-medium">Bill {p.billNo || "—"}</span> <span className="text-xs text-muted-foreground">· {formatLitres(p.litres)}</span>
                       </div>
                       <div className="num text-xs md:text-right md:text-sm"><span className="text-muted-foreground md:hidden">Amount </span>{formatINR(pay.value)}</div>
                       <div className="num text-xs md:text-right md:text-sm"><span className="text-muted-foreground md:hidden">Paid </span>{formatINR(round2(pay.value - left))}</div>
@@ -328,7 +335,7 @@ export function AdBluePaymentDialog({ vendorId: fixedVendor, payment, edit, vend
                             onChange={(e) => setApply((a) => ({ ...a, [p.id]: e.target.value }))}
                             className="num h-8 w-full md:w-36"
                             placeholder="0.00"
-                            aria-label={`Amount for bill ${p.invoiceNo || "—"} of ${formatDate(p.date)}`}
+                            aria-label={`Amount for ${PAYABLE_KIND_LABEL[p.kind].toLowerCase()} bill ${p.billNo || "—"} of ${formatDate(p.date)}`}
                           />
                         )}
                       </div>
@@ -480,7 +487,7 @@ export function AdBluePaymentDetailsDialog({ payment: p, onClose }: { payment: A
             <ul className="divide-y rounded-md border text-sm">
               {p.allocations.map((a, n) => (
                 <li key={n} className="flex items-center justify-between gap-3 px-3 py-1.5">
-                  <span>{billOf(d.purchase(a.purchaseId))}</span>
+                  <span>{d.payableOf(a.purchaseId) ? payableLabel(d.payableOf(a.purchaseId)!, formatDate) : "Purchase"}</span>
                   <span className="num">{formatINR(a.amount)}</span>
                 </li>
               ))}

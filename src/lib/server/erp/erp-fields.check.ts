@@ -55,14 +55,16 @@ async function main() {
     { id: "adv_field2", createdAt: at, updatedAt: at, name: "Old Vendor", defaultRate: null, contactPerson: "", phone: "", notes: "", status: "ARCHIVED" },
   ])
   writeCollection("adblue_purchases", [{ id: "adp_field1", createdAt: at, updatedAt: at, date: "2026-10-05", adblueVendorId: "adv_field1", vendorName: "Field Vendor", product: "AdBlue ISO 22241", buckets: 10, litresPerBucket: 20, totalLitres: 200, pricePerBucket: 900, totalCost: 9000, invoiceNo: "INV-1", notes: "Field check", gstRate: 18 }])
-  // AdBlue supplier payments: ₹10,000 settled at 0.1% on the ₹10,620 purchase (every field set), and a cash advance with no allocation.
+  // AdBlue supplier payments: ₹10,000 settled at 0.1% on the ₹10,620 purchase (every field set), and a cash payment for a direct purchase on credit (entry_id), the rest advance.
   writeCollection("adblue_payments", [
     { id: "abp_field1", createdAt: at, updatedAt: at, date: "2026-10-08", vendorId: "adv_field1", amount: 9990, tdsAmount: 10, tdsRate: 0.1, mode: "RTGS", utr: "UTR AB 77", companyCode: "VTHPL", notes: "Part paid", allocations: [{ purchaseId: "adp_field1", amount: 10000 }] },
-    { id: "abp_field2", createdAt: at, updatedAt: at, date: "2026-10-09", vendorId: "adv_field1", amount: 620.5, tdsAmount: 0, tdsRate: null, mode: "Cash", utr: "R-AB-1", companyCode: null, notes: "", allocations: [] },
+    { id: "abp_field2", createdAt: at, updatedAt: at, date: "2026-10-09", vendorId: "adv_field1", amount: 620.5, tdsAmount: 0, tdsRate: null, mode: "Cash", utr: "R-AB-1", companyCode: null, notes: "", allocations: [{ purchaseId: "adb_field3", amount: 490, direct: true }] },
   ])
   writeCollection("adblue_entries", [
     { id: "adb_field1", createdAt: at, updatedAt: at, source: "STOCK", adblueVendorId: "adv_field1", beforeVendorTracking: false, vehicleId: abVehicle, customerId: null, vendorId: "", date: "2026-10-06", closingKm: 1000, quantityLitres: 15, amount: 0, invoiceNo: "JC-1", notes: "" },
     { id: "adb_field2", createdAt: at, updatedAt: at, beforeVendorTracking: true, source: "DIRECT", adblueVendorId: "adv_field1", vendorName: "Field Vendor", rate: 95.5, paymentMode: "CASH", vehicleId: abVehicle, customerId: null, vendorId: "", date: "2026-10-07", closingKm: 1100, quantityLitres: 10, amount: 955, invoiceNo: "R-1", notes: "Direct" },
+    // A direct purchase on the vendor's credit (owner, 18 Nov 2026): paymentMode CREDIT, paid by abp_field2 below (entry_id).
+    { id: "adb_field3", createdAt: at, updatedAt: at, beforeVendorTracking: false, source: "DIRECT", adblueVendorId: "adv_field1", vendorName: "Field Vendor", rate: 98, paymentMode: "CREDIT", vehicleId: abVehicle, customerId: null, vendorId: "", date: "2026-10-08", closingKm: 1200, quantityLitres: 5, amount: 490, invoiceNo: "R-2", notes: "On credit" },
   ])
   // Tyre Data (17 Nov 2026): the migration already holds the starting repair types (unique names), so the demo copies
   // give way to one value of each list (one archived) and an invoice with every field set — CGST + SGST and IGST lines.
@@ -89,7 +91,7 @@ async function main() {
     const tds = round2((sp.amount * 0.1) / 100)
     writeCollection("payments", pays.map((p) => (p === sp ? { ...p, amount: round2(sp.amount - tds), tdsAmount: tds, tdsRate: 0.1 } : p)))
   }
-  // Tyre vendor payments: one allocated (part advance, every field set), one with no allocations and no TDS (all advance).
+  // Tyre vendor payments: one allocated (part advance, every field set), one paying a direct purchase on credit (entry_id), the rest advance.
   writeCollection("tyre_payments", [
     { id: "tpy_field1", createdAt: at, updatedAt: at, date: "2026-10-08", supplierId: "tym_f_sup", amount: 1499, tdsAmount: 1.5, tdsRate: 0.1, mode: "IMPS", utr: "UTR 4455", reference: "003/26-27", companyCode: "VT", notes: "Part advance", allocations: [{ invoiceId: "tyr_field1", amount: 1000.25 }, { invoiceId: "tyr_field2", amount: 400 }] },
     { id: "tpy_field2", createdAt: at, updatedAt: at, date: "2026-10-08", supplierId: "tym_f_sup", amount: 10, mode: "Cash", utr: "R-9", reference: "", companyCode: null, notes: "", allocations: [], tdsAmount: 0, tdsRate: null },

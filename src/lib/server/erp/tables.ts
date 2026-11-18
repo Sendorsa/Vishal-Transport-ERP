@@ -433,12 +433,12 @@ const adbluePayments: Spec<AdBluePayment> = {
     return (await rows(sql, "fuel.adblue_payments")).map((j) => ({
       ...base(j), date: j.date as string, vendorId: j.vendor_id as string, amount: num(j.amount), tdsAmount: num(j.tds_amount), tdsRate: numOrNull(j.tds_rate), mode: str(j.mode), utr: str(j.utr),
       companyCode: (j.company_code as AdBluePayment["companyCode"]) ?? null, notes: str(j.notes),
-      allocations: allocs.filter((a) => a.payment_id === j.id).map((a) => ({ purchaseId: a.purchase_id as string, amount: num(a.amount) })),
+      allocations: allocs.filter((a) => a.payment_id === j.id).map((a) => (a.entry_id ? { purchaseId: a.entry_id as string, amount: num(a.amount), direct: true } : { purchaseId: a.purchase_id as string, amount: num(a.amount) })),
     }))
   },
   cols: (p) => ({ id: p.id, date: p.date, vendor_id: p.vendorId, amount: p.amount, tds_amount: p.tdsAmount ?? 0, tds_rate: p.tdsRate ?? null, mode: p.mode, utr: p.utr, company_code: p.companyCode ?? null, notes: p.notes ?? "" }),
   async afterInsert(sql, p) {
-    for (const [n, a] of p.allocations.entries()) await sql(`insert into fuel.adblue_payment_allocations (payment_id, line_no, purchase_id, amount) values ($1, $2, $3, $4)`, [p.id, n, a.purchaseId, a.amount])
+    for (const [n, a] of p.allocations.entries()) await sql(`insert into fuel.adblue_payment_allocations (payment_id, line_no, purchase_id, entry_id, amount) values ($1, $2, $3, $4, $5)`, [p.id, n, a.direct ? null : a.purchaseId, a.direct ? a.purchaseId : null, a.amount])
   },
   async afterUpdate(sql, before, after) {
     const appended = JSON.stringify(after.allocations.slice(0, before.allocations.length)) === JSON.stringify(before.allocations)
@@ -452,7 +452,7 @@ const adbluePayments: Spec<AdBluePayment> = {
     // An edit changed the allocations: remove the old rows (inside the audited edit — adblue_allocation_delete_guard), insert the new.
     if (!appended) await sql(`delete from fuel.adblue_payment_allocations where payment_id = $1`, [after.id])
     const start = appended ? before.allocations.length : 0
-    for (const [n, a] of added.entries()) await sql(`insert into fuel.adblue_payment_allocations (payment_id, line_no, purchase_id, amount) values ($1, $2, $3, $4)`, [after.id, start + n, a.purchaseId, a.amount])
+    for (const [n, a] of added.entries()) await sql(`insert into fuel.adblue_payment_allocations (payment_id, line_no, purchase_id, entry_id, amount) values ($1, $2, $3, $4, $5)`, [after.id, start + n, a.direct ? null : a.purchaseId, a.direct ? a.purchaseId : null, a.amount])
   },
 }
 
@@ -545,7 +545,7 @@ export const SPECS: Record<CollectionKey, Spec<never>> = {
   diesel_entries: diesel, tanker_loads: tankerLoads, tanker_transfers: tankerTransfers, tanker_adjustments: tankerAdjustments,
   industrial_supplies: industrialSupplies, tyre_masters: tyreMasters, tyre_invoices: tyreInvoices, tyre_payments: tyrePayments, adblue_vendors: adblueVendors, adblue_purchases: adbluePurchases, adblue_payments: adbluePayments, adblue_entries: adblueEntries, tanker_dispenses: tankerDispenses, invoices, trips, payments,
 } as unknown as Record<CollectionKey, Spec<never>>
-export const WRITE_ORDER: CollectionKey[] = ["customers", "drivers", "vehicles", "vehicle_assignments", "month_locks", "fuel_stations", "tankers", "diesel_entries", "tanker_loads", "tanker_transfers", "tanker_adjustments", "industrial_supplies", "adblue_vendors", "adblue_purchases", "adblue_payments", "adblue_entries", "tyre_masters", "tyre_invoices", "tyre_payments", "invoices", "trips", "payments", "tanker_dispenses"]
+export const WRITE_ORDER: CollectionKey[] = ["customers", "drivers", "vehicles", "vehicle_assignments", "month_locks", "fuel_stations", "tankers", "diesel_entries", "tanker_loads", "tanker_transfers", "tanker_adjustments", "industrial_supplies", "adblue_vendors", "adblue_purchases", "adblue_entries", "adblue_payments", "tyre_masters", "tyre_invoices", "tyre_payments", "invoices", "trips", "payments", "tanker_dispenses"]
 
 /** Applies one collection's changes: deletes (by the caller, in reverse FK order) are separate from upserts. */
 export async function applyUpserts(sql: Sql, key: CollectionKey, before: { id: string; updatedAt: string }[], after: { id: string; updatedAt: string }[], ctx: WriteCtx) {

@@ -9,6 +9,9 @@
  *      — every CHECK row OK, purchases / litres / costs exactly as before, no payment invented, every purchase still
  *      outstanding at its old value; 10-adblue-vendors-post-apply.sql still OK (the two new tables classified); a second
  *      run stops.
+ *   4. 20261118000100_adblue_direct_purchase_payments.sql (direct purchases on credit): reviewed (md5), guarded (after
+ *      20261118000000, once); with a payment already recorded: 17 pre-flight OK, the migration, 18 post-apply OK — direct
+ *      purchases, payments and allocations unchanged; 10-adblue-vendors-post-apply.sql still OK.
  *   The rules themselves (engine + RLS, every role): check:erp-db section 12g; the calculations: check:adblue-payments.
  */
 import assert from "node:assert/strict"
@@ -79,6 +82,32 @@ async function main() {
   await assert.rejects(db.exec(migration), /already applied/, "runs once")
   await db.exec("rollback").catch(() => undefined)
   assert.ok((await stops(db, preflight)).some((s) => s.startsWith("3 ")), "the pre-flight then reports it applied")
+
+  /* ---------------------------------------------------------------- 4. direct purchases on credit (20261118000100) */
+  const DIRECT = "20261118000100_adblue_direct_purchase_payments.sql"
+  const directMigration = read(MIGRATIONS, DIRECT)
+  assert.equal(createHash("md5").update(directMigration).digest("hex"), "1c67ec53c89562157cc9db3edb724c31", `${DIRECT} changed after review`)
+  assert.match(directMigration, /^begin;$/m)
+  const pre17 = read(SCRIPTS, "17-adblue-direct-payments-preflight.sql")
+  const post18 = read(SCRIPTS, "18-adblue-direct-payments-post-apply.sql")
+  const notYet = await database(MIGRATION) // 20261118000000 not applied
+  await assert.rejects(notYet.exec(directMigration), /20261118000000_adblue_supplier_payments\.sql must be applied first/, "never before the AdBlue payments migration")
+  // A payment recorded before it (₹5,000 on adp_1): it must come through unchanged.
+  await db.exec(`begin;
+    insert into fuel.adblue_payments (id, date, vendor_id, amount, mode, utr) values ('abp_1', '2026-11-06', 'adv_a', 5000, 'NEFT', 'UTR-AB-1');
+    insert into fuel.adblue_payment_allocations (payment_id, line_no, purchase_id, amount) values ('abp_1', 0, 'adp_1', 5000);
+    insert into audit.events (actor_kind, action, module, record_type, record_id) values ('SYSTEM', 'PAYMENT_RECORDED', 'AdBlue', 'AdBlue payment', 'abp_1');
+    commit;`)
+  assert.deepEqual(await stops(db, pre17), [], "pre-flight 17: every CHECK row OK")
+  const [d6, d7] = [await info(db, pre17, 6), await info(db, pre17, 7)]
+  assert.equal(d7, "1 · 1 · 5000.00")
+  await db.exec(directMigration)
+  assert.deepEqual(await stops(db, post18), [], "post-apply 18: every CHECK row OK")
+  assert.deepEqual([await info(db, post18, 10), await info(db, post18, 11)], [d6, d7], "direct purchases, payments and allocations exactly as before")
+  assert.deepEqual(await stops(db, vendors), [], "10-adblue-vendors-post-apply: still every row OK")
+  assert.deepEqual((await run(db, `select purchase_id, entry_id from fuel.adblue_payment_allocations`))[0], { purchase_id: "adp_1", entry_id: null }, "the existing allocation still points at its bulk purchase")
+  await assert.rejects(db.exec(directMigration), /already applied/, "runs once")
+  await db.exec("rollback").catch(() => undefined)
 
   console.log("AdBlue payments deploy: reviewed migration, guarded (AdBlue vendors first, once), pre-flight and post-apply all OK on a Production-like state, purchases and stock unchanged, no payment invented, deletable tables classified: all checks passed")
 }

@@ -13,7 +13,7 @@ import { NoAccess, PageSkeleton } from "@/components/shared/misc"
 import { PageHeader } from "@/components/shared/page-header"
 import { StatsCard } from "@/components/shared/stats-card"
 import { stockDraws, valueInventory, vendorLedger as stockLedger } from "@/domain/adblue-inventory"
-import { gstOf, PURCHASE_PAY_LABEL, referenceLabel, settledOf, unallocated, vendorLedger, type PurchasePayStatus } from "@/domain/adblue-payments"
+import { gstOf, PAYABLE_KIND_LABEL, PURCHASE_PAY_LABEL, type Payable, referenceLabel, settledOf, unallocated, vendorLedger, type PurchasePayStatus } from "@/domain/adblue-payments"
 import { monthLabel } from "@/domain/diesel"
 import { canEditMonth } from "@/domain/month-lock"
 import { useAdBlueEntries, useAdBlueVehicles, useDeleteAdBluePayment } from "@/lib/api/hooks"
@@ -22,7 +22,7 @@ import { canManageAdBluePayments } from "@/lib/permissions"
 import { formatDate, formatINR, formatLitres as L, formatNumber, round2, todayISO } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import type { AdBluePayment, AdBluePurchase } from "@/lib/types"
-import { AdBluePaymentDialog, AllocationBadge, DeleteAdBluePaymentDialog, SettledAmount } from "./adblue-payment-dialog"
+import { AdBluePaymentDialog, AllocationBadge, DeleteAdBluePaymentDialog, PayableKindBadge, SettledAmount } from "./adblue-payment-dialog"
 import { useAdBlueFinance, type AdBlueFinance } from "./adblue-data"
 
 export const PAY_CLASS: Record<PurchasePayStatus, string> = {
@@ -50,7 +50,7 @@ export function AdBlueVendorAccount({ id }: { id: string }) {
   const del = useDeleteAdBluePayment()
   const [paying, setPaying] = useState<{ payment?: AdBluePayment; edit?: boolean; vendorAdvance?: boolean } | null>(null)
   const [deleting, setDeleting] = useState<AdBluePayment | null>(null)
-  const [viewing, setViewing] = useState<AdBluePurchase | null>(null)
+  const [viewing, setViewing] = useState<Payable | null>(null)
   const [tab, setTab] = useState("purchases")
   const today = todayISO()
 
@@ -63,15 +63,16 @@ export function AdBlueVendorAccount({ id }: { id: string }) {
 
   const acc = d.accounts.find((a) => a.vendorId === id) ?? { purchased: 0, litres: 0, settled: 0, cashPaid: 0, tds: 0, outstanding: 0, advance: 0, balance: 0, purchases: 0, payments: 0 }
   const left = stock.vendorStock.get(id) ?? { litres: 0, value: 0 }
-  const purchases = d.payable.filter((p) => p.adblueVendorId === id).sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))
+  // Everything bought on this vendor's account: bulk purchases (stock) and direct purchases on credit (straight into a vehicle).
+  const purchases = d.payables.filter((p) => p.vendorId === id).sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))
   const payments = d.payments.filter((p) => p.vendorId === id).sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))
-  const ledger = vendorLedger(d.purchases, d.payments, id).reverse()
-  const owing = purchases.some((p) => d.payOf(p).outstanding > 0)
+  const ledger = vendorLedger(d.payables, d.payments, id).reverse()
+  const owing = purchases.some((p) => d.payOfPayable(p).outstanding > 0)
   const open = (date: string) => canEditMonth(role, date.slice(0, 7), today, d.locks)
   const mayPay = canManageAdBluePayments(role, "create") && vendor.status === "ACTIVE"
   const mayEdit = canManageAdBluePayments(role, "edit")
   const mayDelete = canManageAdBluePayments(role, "delete")
-  const bill = (purchaseId: string) => `Bill ${d.purchase(purchaseId)?.invoiceNo || "—"}`
+  const bill = (purchaseId: string) => { const x = d.payableOf(purchaseId); return `${x ? `${PAYABLE_KIND_LABEL[x.kind]} · ` : ""}Bill ${x?.billNo || "—"}` }
   const regOf = (vehicleId: string) => regs.data?.find((v) => v.id === vehicleId)?.regNo ?? "Vehicle"
 
   // Stock movements of this vendor's batches (FIFO, the same run as every AdBlue figure): in = its purchases (and opening),
@@ -139,15 +140,16 @@ export function AdBlueVendorAccount({ id }: { id: string }) {
             mobileColumns={["bill", "value", "out", "status"]}
             columns={[
               { id: "date", header: "Purchase Date", sortValue: (p) => p.date, cell: (p) => <span className="num">{formatDate(p.date)}</span>, footer: `${purchases.length} purchase${purchases.length === 1 ? "" : "s"}` },
-              { id: "bill", header: "Invoice / Bill No.", cell: (p) => p.invoiceNo || <span className="text-muted-foreground">—</span> },
-              { id: "qty", header: "Quantity", align: "right", sortValue: (p) => p.totalLitres, cell: (p) => <span className="num">{L(p.totalLitres)}</span>, footer: <span className="num">{L(acc.litres)}</span> },
-              { id: "rate", header: "Rate / L", align: "right", cell: (p) => <span className="num">{formatINR(ratePerLitre(p))}</span> },
-              { id: "taxable", header: "Taxable", align: "right", cell: (p) => <span className="num">{formatINR(p.totalCost)}</span> },
-              { id: "gst", header: "GST", align: "right", cell: (p) => (p.gstRate ? <span className="num">{formatINR(gstOf(p.totalCost, p.gstRate))} <span className="text-xs text-muted-foreground">({formatNumber(p.gstRate, 2)}%)</span></span> : <span className="text-muted-foreground">—</span>) },
-              { id: "value", header: "Total Value", align: "right", sortValue: (p) => d.payOf(p).value, cell: (p) => <span className="num font-medium">{formatINR(d.payOf(p).value)}</span>, footer: <span className="num">{formatINR(acc.purchased)}</span> },
-              { id: "paid", header: "Paid", align: "right", cell: (p) => <span className="num">{formatINR(d.payOf(p).paid)}</span> },
-              { id: "out", header: "Outstanding", align: "right", sortValue: (p) => d.payOf(p).outstanding, cell: (p) => <span className={cn("num", d.payOf(p).outstanding > 0 && "font-medium text-rose-700 dark:text-rose-400")}>{formatINR(d.payOf(p).outstanding)}</span>, footer: <span className="num">{formatINR(acc.outstanding)}</span> },
-              { id: "status", header: "Status", sortValue: (p) => d.payOf(p).status, cell: (p) => <PurchaseStatusBadge status={d.payOf(p).status} /> },
+              { id: "type", header: "Type", sortValue: (p) => p.kind, cell: (p) => <PayableKindBadge kind={p.kind} /> },
+              { id: "bill", header: "Invoice / Bill No.", cell: (p) => <span>{p.billNo || <span className="text-muted-foreground">—</span>}{p.vehicleId && <span className="block text-xs text-muted-foreground">{regOf(p.vehicleId)}</span>}</span> },
+              { id: "qty", header: "Quantity", align: "right", sortValue: (p) => p.litres, cell: (p) => <span className="num">{L(p.litres)}</span>, footer: <span className="num">{L(acc.litres)}</span> },
+              { id: "rate", header: "Rate / L", align: "right", cell: (p) => { const b = d.purchase(p.id); return <span className="num">{formatINR(b ? ratePerLitre(b) : p.litres ? round2(p.value / p.litres) : 0)}</span> } },
+              { id: "taxable", header: "Taxable", align: "right", cell: (p) => <span className="num">{formatINR(d.purchase(p.id)?.totalCost ?? p.value)}</span> },
+              { id: "gst", header: "GST", align: "right", cell: (p) => { const b = d.purchase(p.id); return b?.gstRate ? <span className="num">{formatINR(gstOf(b.totalCost, b.gstRate))} <span className="text-xs text-muted-foreground">({formatNumber(b.gstRate, 2)}%)</span></span> : <span className="text-muted-foreground">—</span> } },
+              { id: "value", header: "Total Value", align: "right", sortValue: (p) => p.value, cell: (p) => <span className="num font-medium">{formatINR(p.value)}</span>, footer: <span className="num">{formatINR(acc.purchased)}</span> },
+              { id: "paid", header: "Paid", align: "right", cell: (p) => <span className="num">{formatINR(d.payOfPayable(p).paid)}</span> },
+              { id: "out", header: "Outstanding", align: "right", sortValue: (p) => d.payOfPayable(p).outstanding, cell: (p) => <span className={cn("num", d.payOfPayable(p).outstanding > 0 && "font-medium text-rose-700 dark:text-rose-400")}>{formatINR(d.payOfPayable(p).outstanding)}</span>, footer: <span className="num">{formatINR(acc.outstanding)}</span> },
+              { id: "status", header: "Status", sortValue: (p) => d.payOfPayable(p).status, cell: (p) => <PurchaseStatusBadge status={d.payOfPayable(p).status} /> },
             ]}
           />
         </TabsContent>
@@ -244,7 +246,7 @@ export function AdBlueVendorAccount({ id }: { id: string }) {
                         <Pencil />
                       </Button>
                     )}
-                    {mayDelete && open(p.date) && p.allocations.every((a) => open(d.purchase(a.purchaseId)?.date ?? p.date)) && (
+                    {mayDelete && open(p.date) && p.allocations.every((a) => open(d.payableOf(a.purchaseId)?.date ?? p.date)) && (
                       <Button variant="ghost" size="icon-sm" className="hover:bg-destructive/10 hover:text-destructive" aria-label={`Delete the payment of ${formatDate(p.date)}`} title="Delete payment" onClick={() => setDeleting(p)}>
                         <Trash2 />
                       </Button>
@@ -271,8 +273,8 @@ export function AdBlueVendorAccount({ id }: { id: string }) {
             mobileColumns={["type", "debit", "credit", "bal"]}
             columns={[
               { id: "date", header: "Date", cell: (r) => <span className="num">{formatDate(r.date)}</span> },
-              { id: "type", header: "Type", cell: (r) => (r.kind === "PURCHASE" ? "Purchase" : "Payment") },
-              { id: "bill", header: "Bill / Invoice No.", cell: (r) => (r.kind === "PURCHASE" ? d.purchase(r.id)?.invoiceNo || "—" : [...new Set(d.payments.find((p) => p.id === r.id)?.allocations.map((a) => d.purchase(a.purchaseId)?.invoiceNo || "—") ?? [])].join(", ") || "—") },
+              { id: "type", header: "Type", cell: (r) => (r.kind === "PURCHASE" ? (r.purchaseKind === "DIRECT" ? "Direct purchase" : "Bulk purchase") : "Payment") },
+              { id: "bill", header: "Bill / Invoice No.", cell: (r) => (r.kind === "PURCHASE" ? d.payableOf(r.id)?.billNo || "—" : [...new Set(d.payments.find((p) => p.id === r.id)?.allocations.map((a) => d.payableOf(a.purchaseId)?.billNo || "—") ?? [])].join(", ") || "—") },
               { id: "ref", header: "Payment Reference", cell: (r) => (r.kind === "PAYMENT" ? <span className="num text-xs break-all">{d.payments.find((p) => p.id === r.id)?.utr}</span> : "—") },
               {
                 id: "desc",
@@ -281,7 +283,8 @@ export function AdBlueVendorAccount({ id }: { id: string }) {
                 cell: (r) => {
                   if (r.kind === "PURCHASE") {
                     const p = d.purchase(r.id)
-                    return <span className="text-xs text-muted-foreground">{p ? `${L(p.totalLitres)} ${p.product || "AdBlue"}${p.gstRate ? ` · incl. ${formatNumber(p.gstRate, 2)}% GST` : ""}` : ""}</span>
+                    const x = d.payableOf(r.id)
+                    return <span className="text-xs text-muted-foreground">{p ? `${L(p.totalLitres)} ${p.product || "AdBlue"} into stock${p.gstRate ? ` · incl. ${formatNumber(p.gstRate, 2)}% GST` : ""}` : x ? `${L(x.litres)} straight into ${x.vehicleId ? regOf(x.vehicleId) : "a vehicle"}` : ""}</span>
                   }
                   const p = d.payments.find((x) => x.id === r.id)
                   return <span className="text-xs text-muted-foreground">{p ? `${p.mode}${r.tds ? ` · ${formatINR(r.paid)} paid + ${formatINR(r.tds)} TDS` : ""}` : ""}</span>
@@ -319,37 +322,55 @@ export function AdBlueVendorAccount({ id }: { id: string }) {
           onClose={() => setDeleting(null)}
         />
       )}
-      {viewing && <PurchaseDetailsDialog purchase={viewing} d={d} onClose={() => setViewing(null)} />}
+      {viewing && <PurchaseDetailsDialog payable={viewing} d={d} regOf={regOf} onClose={() => setViewing(null)} />}
     </div>
   )
 }
 
-/** One bulk purchase, read only: quantities, taxable, GST, value, paid, outstanding and every payment applied to it. */
-export function PurchaseDetailsDialog({ purchase: p, d, onClose }: { purchase: AdBluePurchase; d: AdBlueFinance; onClose: () => void }) {
-  const pay = d.payOf(p)
-  const applied = d.payments.flatMap((x) => x.allocations.filter((a) => a.purchaseId === p.id).map((a) => ({ x, amount: a.amount }))).sort((a, b) => b.x.date.localeCompare(a.x.date))
-  const rows: [string, React.ReactNode][] = [
-    ["Vendor", d.vendorName(p.adblueVendorId)],
-    ["Purchase date", formatDate(p.date)],
-    ["Invoice / bill", p.invoiceNo || "—"],
-    ["Product", p.product || "—"],
-    ["Quantity", `${formatNumber(p.buckets)} × ${formatNumber(p.litresPerBucket, 2)} L = ${L(p.totalLitres)}`],
-    ["Rate per litre", formatINR(ratePerLitre(p))],
-    ["Taxable amount", formatINR(p.totalCost)],
-    ["GST", p.gstRate ? `${formatINR(gstOf(p.totalCost, p.gstRate))} (${formatNumber(p.gstRate, 2)}%)` : "None"],
-    ["Total purchase value", <span key="v" className="font-semibold">{formatINR(pay.value)}</span>],
-    ["Paid", formatINR(pay.paid)],
-    ["Outstanding", formatINR(pay.outstanding)],
-    ["Notes", p.notes || "—"],
-  ]
+/**
+ * One purchase owed to a vendor, read only: a bulk purchase (quantities, taxable, GST) or a direct purchase on credit
+ * (vehicle, litres × rate) — its value, paid, outstanding and every payment applied to it.
+ */
+export function PurchaseDetailsDialog({ purchase, payable, d, regOf, onClose }: { purchase?: AdBluePurchase; payable?: Payable; d: AdBlueFinance; regOf?: (vehicleId: string) => string; onClose: () => void }) {
+  const x = payable ?? (purchase ? d.payableOf(purchase.id) : undefined)
+  const p = purchase ?? (x?.kind === "BULK" ? d.purchase(x.id) : undefined)
+  const id = (p?.id ?? x?.id)!
+  const pay = x ? d.payOfPayable(x) : d.payOf(p!)
+  const applied = d.payments.flatMap((y) => y.allocations.filter((a) => a.purchaseId === id).map((a) => ({ x: y, amount: a.amount }))).sort((a, b) => b.x.date.localeCompare(a.x.date))
+  const rows: [string, React.ReactNode][] = p
+    ? [
+        ["Vendor", d.vendorName(p.adblueVendorId)],
+        ["Purchase date", formatDate(p.date)],
+        ["Invoice / bill", p.invoiceNo || "—"],
+        ["Product", p.product || "—"],
+        ["Quantity", `${formatNumber(p.buckets)} × ${formatNumber(p.litresPerBucket, 2)} L = ${L(p.totalLitres)}`],
+        ["Rate per litre", formatINR(ratePerLitre(p))],
+        ["Taxable amount", formatINR(p.totalCost)],
+        ["GST", p.gstRate ? `${formatINR(gstOf(p.totalCost, p.gstRate))} (${formatNumber(p.gstRate, 2)}%)` : "None"],
+        ["Total purchase value", <span key="v" className="font-semibold">{formatINR(pay.value)}</span>],
+        ["Paid", formatINR(pay.paid)],
+        ["Outstanding", formatINR(pay.outstanding)],
+        ["Notes", p.notes || "—"],
+      ]
+    : [
+        ["Vendor", d.vendorName(x!.vendorId)],
+        ["Purchase date", formatDate(x!.date)],
+        ["Invoice / bill", x!.billNo || "—"],
+        ["Vehicle", x!.vehicleId ? (regOf?.(x!.vehicleId) ?? "—") : "—"],
+        ["Quantity", L(x!.litres)],
+        ["Rate per litre", formatINR(x!.litres ? round2(x!.value / x!.litres) : 0)],
+        ["Total purchase value", <span key="v" className="font-semibold">{formatINR(pay.value)}</span>],
+        ["Paid", formatINR(pay.paid)],
+        ["Outstanding", formatINR(pay.outstanding)],
+      ]
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex flex-wrap items-center gap-2">
-            Bulk purchase · {formatINR(pay.value)} <PurchaseStatusBadge status={pay.status} />
+            {p ? "Bulk purchase" : "Direct purchase"} · {formatINR(pay.value)} <PurchaseStatusBadge status={pay.status} />
           </DialogTitle>
-          <DialogDescription>Stock: +{L(p.totalLitres)} at {formatINR(p.totalCost)} (taxable — what FIFO costs these litres at).</DialogDescription>
+          <DialogDescription>{p ? `Stock: +${L(p.totalLitres)} at ${formatINR(p.totalCost)} (taxable — what FIFO costs these litres at).` : "Bought straight into the vehicle on the vendor's credit — never bulk stock. Edit it from the vehicle's AdBlue tab."}</DialogDescription>
         </DialogHeader>
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-sm">
           {rows.map(([k, v]) => (
@@ -380,7 +401,7 @@ export function PurchaseDetailsDialog({ purchase: p, d, onClose }: { purchase: A
           )}
         </div>
         <DialogFooter className="items-center sm:justify-between">
-          <HistoryButton id={p.id} />
+          <HistoryButton id={id} />
           <Button variant="outline" onClick={onClose}>
             <Droplets /> Close
           </Button>

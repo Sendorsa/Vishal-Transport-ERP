@@ -528,10 +528,13 @@ export interface AdBlueEntry extends BaseEntity {
    * flag and no vendor never gets a vendor guessed (see "Old draws" in src/domain/adblue-inventory.ts).
    */
   beforeVendorTracking?: boolean
-  /** DIRECT only: who sold it, the rate per litre and how it was paid (informational — no AdBlue payables ledger). */
+  /**
+   * DIRECT only: who sold it, the rate per litre and how it was paid. "CREDIT" (owner, 18 Nov 2026) = on the vendor's
+   * account, settled by AdBlue payments (domain/adblue-payments.ts); CASH / UPI / NEFT / CHEQUE = paid at purchase.
+   */
   vendorName?: string
   rate?: number
-  paymentMode?: PaymentMode
+  paymentMode?: PaymentMode | "CREDIT"
   vehicleId: string
   /** Customer the vehicle was serving (for customer-wise summaries). */
   customerId: string | null
@@ -652,8 +655,11 @@ export interface AdBluePurchase extends BaseEntity {
 
 /** How much of an AdBlue payment settles a bulk purchase of the same vendor. */
 export interface AdBluePaymentAllocation {
+  /** The payable's id: a bulk purchase, or (with `direct`) a direct vendor purchase — an AdBlue entry on credit. */
   purchaseId: string
   amount: number
+  /** The payable is a direct purchase (fuel.adblue_payment_allocations.entry_id), not a bulk one (purchase_id). */
+  direct?: boolean
 }
 
 /**

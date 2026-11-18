@@ -30,7 +30,7 @@ globalThis.Date = FixedDate as DateConstructor
 async function main() {
   const { api } = await import("./index")
   const { valueInventory, stockDraws } = await import("@/domain/adblue-inventory")
-  const { purchaseValue, purchasePay, paidByPurchase, vendorAccounts, vendorLedger, tdsSplit, allocationStatus, unallocated, settledOf, supplierTotals } = await import("@/domain/adblue-payments")
+  const { payablesOf, purchaseValue, purchasePay, paidByPurchase, vendorAccounts, vendorLedger, tdsSplit, allocationStatus, unallocated, settledOf, supplierTotals } = await import("@/domain/adblue-payments")
   const { profileCall } = await import("@/lib/server/erp/profiles")
   const { readCollection, writeCollection } = await import("@/lib/storage/local-store")
   setRole("OWNER")
@@ -41,12 +41,13 @@ async function main() {
   const legacy = await api.adbluePurchases.create({ date: "2026-11-01", adblueVendorId: V.id, product: "AdBlue", buckets: 5, litresPerBucket: 20, pricePerBucket: 1000, invoiceNo: "OLD-1", notes: "" })
   writeCollection("adblue_purchases", readCollection("adblue_purchases").map((p) => (p.id === legacy.id ? (({ gstRate: _g, ...rest }) => (void _g, rest))(p) : p)))
   const pays = () => api.adbluePayments.list()
+  const payables = async () => payablesOf(await api.adbluePurchases.list(), await api.adblue.list())
   const purchases = () => api.adbluePurchases.list()
   const payOf = async (id: string) => {
     const p = (await purchases()).find((x) => x.id === id)!
     return purchasePay(purchaseValue(p), paidByPurchase(await pays()).get(id) ?? 0)
   }
-  const acct = async (vendorId = V.id) => vendorAccounts(await purchases(), await pays()).find((a) => a.vendorId === vendorId)!
+  const acct = async (vendorId = V.id) => vendorAccounts(await payables(), await pays()).find((a) => a.vendorId === vendorId)!
   assert.deepEqual(await payOf(legacy.id), { value: 5000, paid: 0, outstanding: 5000, status: "UNPAID" }, "21. an old purchase: value = Total Cost, fully outstanding, no payment invented")
   assert.equal((await pays()).length, 0)
   const stockOf = async () => {
@@ -112,13 +113,13 @@ async function main() {
 
   /* ---------------------------------------------------------------- 13. reconciliation */
   const a = await acct()
-  const ledger = vendorLedger(await purchases(), await pays(), V.id)
+  const ledger = vendorLedger(await payables(), await pays(), V.id)
   assert.equal(a.balance, Math.round((a.purchased - a.settled) * 100) / 100, "13. balance = purchases − settled")
   assert.equal(a.balance, Math.round((a.outstanding - a.advance) * 100) / 100, "…= outstanding − advance")
   assert.equal(ledger.at(-1)!.balance, a.balance, "…and the ledger closes at it")
   assert.equal(a.tds, 250, "TDS counted once (₹50 + ₹200), inside settled")
   assert.equal(Math.round((a.cashPaid + a.tds) * 100) / 100, a.settled, "settled = cash paid + TDS")
-  const tot = supplierTotals(vendorAccounts(await purchases(), await pays()))
+  const tot = supplierTotals(vendorAccounts(await payables(), await pays()))
   assert.ok(tot.outstanding >= a.outstanding && tot.advance >= a.advance, "the page totals cover every vendor (never netted across vendors)")
 
   /* ---------------------------------------------------------------- 17–18. stock untouched by payments */
@@ -161,7 +162,7 @@ async function main() {
     assert.deepEqual(await asIs(k1.id), k1Before, "the purchase record is unchanged (not even updatedAt)")
     assert.deepEqual((await api.audit.history(k1.id)).map((e) => e.action), ["CREATED"], "…and has no UPDATED event: only the payment was recorded")
     assert.equal((await api.audit.history(k1Pay.id))[0].action, "PAYMENT_RECORDED")
-    assert.ok(vendorLedger(await purchases(), await pays(), V.id).some((r) => r.id === k1Pay.id && r.credit === 50000), "7. in the vendor ledger")
+    assert.ok(vendorLedger(await payables(), await pays(), V.id).some((r) => r.id === k1Pay.id && r.credit === 50000), "7. in the vendor ledger")
     assert.ok((await pays()).some((x) => x.id === k1Pay.id), "…and in the central payments list")
     assert.deepEqual(await stockOf(), stockBefore, "8. stock litres, value and every FIFO cost unchanged")
     // Saving the same form again creates no duplicate: nothing is owed any more.
@@ -196,7 +197,7 @@ async function main() {
     assert.deepEqual([await asIs(k4.id), (await pays()).some((x) => x.utr === "R-K4")], [k4Before, false], "nothing saved")
     // 7. Reconciliation after all of it.
     const r = await acct()
-    assert.equal(vendorLedger(await purchases(), await pays(), V.id).at(-1)!.balance, r.balance)
+    assert.equal(vendorLedger(await payables(), await pays(), V.id).at(-1)!.balance, r.balance)
     assert.equal(r.balance, Math.round((r.outstanding - r.advance) * 100) / 100)
     // Month lock: the Employee can't settle an October purchase from its edit.
     const octP = await buy(V, "2026-10-20", 1, 1000, { invoiceNo: "INV-OCT" })
@@ -231,7 +232,7 @@ async function main() {
   assert.equal(del.actor.role, "OWNER")
   assert.equal(await api.adbluePayments.remove(t1.id, "again"), undefined, "a repeated delete finds nothing")
   assert.equal((await api.audit.history(t1.id)).filter((e) => e.action === "DELETED").length, 1, "…and records nothing")
-  assert.equal(vendorLedger(await purchases(), await pays(), V.id).some((r) => r.id === t1.id), false, "not in the ledger")
+  assert.equal(vendorLedger(await payables(), await pays(), V.id).some((r) => r.id === t1.id), false, "not in the ledger")
   const restore = await api.audit.checkRestore(del.id)
   assert.ok(!restore.ok, "permanent: never pushed back from the audit log")
   const reused = await pay(50000, "NEFT-TDS", [{ purchaseId: p7.id, amount: 50000 }], { tdsPercent: 0.1 })
@@ -276,7 +277,7 @@ async function main() {
     const x1 = await xb("2026-11-02", 5, "X-1") // ₹4,000
     const x2 = await xb("2026-11-03", 10, "X-2") // ₹8,000
     const novAdv = await xp(5000, "X-NOV", "2026-11-04")
-    const xAcc = async () => vendorAccounts(await purchases(), await pays()).find((a) => a.vendorId === X.id)!
+    const xAcc = async () => vendorAccounts(await payables(), await pays()).find((a) => a.vendorId === X.id)!
     const before = await xAcc()
     const nPays = (await pays()).length
     const sBefore = await stockOf()
@@ -301,13 +302,110 @@ async function main() {
     const octNow = (await pays()).find((p) => p.id === octAdv.id)!
     assert.deepEqual([octNow.allocations, unallocated(octNow), (await xAcc()).advance], [[{ purchaseId: x2.id, amount: 3000 }], 0, 0], "oldest advance used; nothing left")
     assert.deepEqual((await api.audit.history(novAdv.id)).map((e) => e.action), ["PAYMENT_RECORDED", "UPDATED"], "audited on the payment it came from")
-    const xl = vendorLedger(await purchases(), await pays(), X.id)
+    const xl = vendorLedger(await payables(), await pays(), X.id)
     assert.equal(xl.at(-1)!.balance, (await xAcc()).balance, "10. the ledger closes at the vendor balance (applying advance moves no money)")
     assert.deepEqual(await stockOf(), sBefore, "11. stock and FIFO untouched")
     await assert.rejects(api.adbluePayments.applyAdvance(X.id, [{ purchaseId: x2.id, amount: 1 }]), /no advance credit to apply|more than the advance credit available \(₹0.00\)/)
   }
 
-  console.log("AdBlue supplier payments: credit / partly / fully paid purchases (GST), instalments, several purchases, advance and applying it, TDS (0.1 %, custom, rounding), Credit refused, reconciliation, edits, permanent delete (audit kept, atomic), stock and FIFO untouched, roles, month lock, historical purchases, Edit Purchase → Credit / Partially / Fully Paid (new payments only, purchase untouched), allocate oldest first, vendor advance applied without a new payment: all checks passed")
+  /* ---------------------------------------------------------------- Direct purchases on vendor credit (owner, 18 Nov 2026) */
+  {
+    const { allocateOldestFirst, isPayableDirect } = await import("@/domain/adblue-payments")
+    const D = await api.adblueVendors.create({ name: "Direct Vendor", defaultRate: 100 })
+    const assignments = await api.assignments.list()
+    const tankerVehicles = new Set(readCollection("tankers").map((x) => x.vehicleId))
+    const veh = (await api.vehicles.list()).find((v) => v.status === "ACTIVE" && v.fuelType === "DIESEL" && !tankerVehicles.has(v.id) && assignments.some((a) => a.vehicleId === v.id && a.customerId && a.startDate <= "2026-10-01" && a.endDate === null))!
+    writeCollection("adblue_entries", readCollection("adblue_entries").filter((e) => e.vehicleId !== veh.id))
+    let seq = 0
+    const odo = (date: string) => 300_000 + Math.round((Date.parse(date) - Date.parse("2026-10-01")) / 86_400_000) * 1000 + ++seq
+    type Pay = NonNullable<AdBluePurchaseInput["payment"]>
+    const dIn = (date: string, litres: number, rate: number, invoiceNo: string, payment?: Pay, x: Record<string, unknown> = {}) => ({ vehicleId: veh.id, customerId: veh.assignedCustomerId, date, closingKm: odo(date), quantityLitres: litres, invoiceNo, notes: "", source: "DIRECT" as const, adblueVendorId: D.id, vendorName: "", rate, paymentMode: "CREDIT" as const, ...(payment ? { payment } : {}), ...x })
+    const direct = (date: string, litres: number, rate: number, invoiceNo: string, payment?: Pay) => api.adblue.create(dIn(date, litres, rate, invoiceNo, payment))
+    const edit = (e: { id: string; date: string; closingKm: number; quantityLitres: number; rate?: number; invoiceNo: string }, payment?: Pay, notes = "") =>
+      api.adblue.update(e.id, { vehicleId: veh.id, customerId: veh.assignedCustomerId, date: e.date, closingKm: e.closingKm, quantityLitres: e.quantityLitres, invoiceNo: e.invoiceNo, notes, source: "DIRECT", adblueVendorId: D.id, vendorName: "", rate: e.rate!, paymentMode: "CREDIT", ...(payment ? { payment } : {}) }, notes ? "Note" : undefined)
+    const stored = (id: string) => readCollection("adblue_entries").find((e) => e.id === id)!
+    const dPayOf = async (id: string) => { const x = (await payables()).find((y) => y.id === id)!; return purchasePay(x.value, paidByPurchase(await pays()).get(id) ?? 0) }
+    const dAcc = async () => vendorAccounts(await payables(), await pays()).find((a) => a.vendorId === D.id)!
+    const s0 = await stockOf()
+    const n0 = (await pays()).length
+    // 1. Credit: no payment; ₹10,000 owed; stock untouched.
+    const d1 = await direct("2026-11-03", 100, 100, "DV-1")
+    assert.deepEqual([isPayableDirect(stored(d1.id)), await dPayOf(d1.id), (await pays()).length], [true, { value: 10000, paid: 0, outstanding: 10000, status: "UNPAID" }, n0], "1. direct on credit: ₹10,000 outstanding, no payment")
+    // 2. Fully Paid; 3. Partially Paid; 11. TDS.
+    const d2 = await direct("2026-11-01", 50, 100, "DV-2", { type: "FULL", amount: 5000, mode: "UPI", utr: "UPI-DV2", date: "2026-11-03" })
+    const p2 = (await pays()).find((x) => x.utr === "UPI-DV2")!
+    assert.deepEqual([await dPayOf(d2.id), p2.allocations], [{ value: 5000, paid: 5000, outstanding: 0, status: "PAID" }, [{ purchaseId: d2.id, amount: 5000, direct: true }]], "2. Fully Paid: the payment allocated to the direct purchase")
+    const d3 = await direct("2026-11-04", 100, 100, "DV-3", { type: "PARTIAL", amount: 4000, mode: "NEFT", utr: "NEFT-DV3", date: "2026-11-04" })
+    assert.deepEqual(await dPayOf(d3.id), { value: 10000, paid: 4000, outstanding: 6000, status: "PARTIAL" }, "3. Partially Paid: ₹4,000 paid, ₹6,000 outstanding")
+    const d4 = await direct("2026-11-04", 100, 100, "DV-4", { type: "FULL", amount: 10000, mode: "RTGS", utr: "RTGS-DV4", date: "2026-11-05", tdsPercent: 0.1 })
+    const p4 = (await pays()).find((x) => x.utr === "RTGS-DV4")!
+    assert.deepEqual([p4.amount, p4.tdsAmount, settledOf(p4), (await dPayOf(d4.id)).outstanding], [9990, 10, 10000, 0], "11. TDS: ₹10,000 settled = ₹9,990 paid + ₹10 TDS")
+    await assert.rejects(direct("2026-11-04", 10, 100, "DV-X", { type: "FULL", amount: 1000, mode: "NEFT", utr: " " }), /Enter the UTR/)
+    await assert.rejects(direct("2026-11-04", 10, 100, "DV-X", { type: "FULL", amount: 1000, mode: "NEFT", utr: "UPI-DV2" }), /Reference UPI-DV2 is already recorded/, "12. a reference used before is refused")
+    await assert.rejects(direct("2026-11-04", 10, 100, "DV-X", { type: "CREDIT", amount: 100 }), /Payment Type is Credit/)
+    // Paid at purchase (the old way): never payable, and refuses payment details.
+    const legacyD = await api.adblue.create(dIn("2026-11-04", 10, 90, "OLD-CASH", undefined, { paymentMode: "CASH" }))
+    assert.equal(isPayableDirect(stored(legacyD.id)), false, "a direct purchase paid at purchase is not owed")
+    await assert.rejects(api.adblue.create(dIn("2026-11-04", 10, 90, "OLD-CASH2", { type: "FULL", amount: 900, mode: "Cash", utr: "R-OLD" }, { paymentMode: "CASH" })), /paid at purchase/)
+    // 4. Credit → Fully Paid through Edit; 5. Credit → Partially Paid; 6. Partially → Fully Paid; 7. nothing overwritten.
+    const d1Before = stored(d1.id)
+    await edit(d1, { type: "FULL", amount: 10000, mode: "NEFT", utr: "NEFT-DV1", date: "2026-11-09" })
+    assert.deepEqual([await dPayOf(d1.id), stored(d1.id)], [{ value: 10000, paid: 10000, outstanding: 0, status: "PAID" }, d1Before], "4. Credit → Fully Paid; the purchase record untouched")
+    assert.deepEqual((await api.audit.history(d1.id)).map((e) => e.action), ["CREATED"], "no UPDATED event on the purchase")
+    await assert.rejects(edit(d1, { type: "FULL", amount: 10000, mode: "NEFT", utr: "NEFT-DV1b", date: "2026-11-09" }), /already fully paid/, "12. no duplicate payment when saved again")
+    const d5 = await direct("2026-11-05", 100, 100, "DV-5")
+    await edit(d5, { type: "PARTIAL", amount: 3000, mode: "UPI", utr: "UPI-DV5", date: "2026-11-09" })
+    assert.equal((await dPayOf(d5.id)).outstanding, 7000, "5. Credit → Partially Paid: ₹7,000 still owed")
+    const first = (await pays()).find((x) => x.utr === "UPI-DV5")!
+    await edit(d5, { type: "FULL", amount: 7000, mode: "NEFT", utr: "NEFT-DV5", date: "2026-11-09" }, "Bill attached")
+    assert.deepEqual([(await dPayOf(d5.id)).status, (await pays()).find((x) => x.id === first.id), stored(d5.id).notes], ["PAID", first, "Bill attached"], "6 / 7. the rest paid by a second payment; the first untouched; a detail change saved with it")
+    await assert.rejects(edit({ ...d5, quantityLitres: 10 }), /already been paid against this purchase/, "its amount never goes below what was paid")
+    await assert.rejects(api.adblue.remove(d5.id, "Duplicate"), /Payments are allocated to this direct purchase/, "a paid direct purchase isn't deleted")
+    // 8. One payment across bulk and direct purchases; 9. oldest first across both by date.
+    const b1 = await api.adbluePurchases.create({ date: "2026-11-01", adblueVendorId: D.id, product: "AdBlue", buckets: 20, litresPerBucket: 20, pricePerBucket: 1000, invoiceNo: "DB-1", notes: "" }) // ₹20,000 bulk
+    const d6 = await direct("2026-11-02", 50, 100, "DV-6") // ₹5,000 direct
+    const b2 = await api.adbluePurchases.create({ date: "2026-11-06", adblueVendorId: D.id, product: "AdBlue", buckets: 10, litresPerBucket: 20, pricePerBucket: 1000, invoiceNo: "DB-2", notes: "" }) // ₹10,000 bulk
+    const rows = (await payables()).filter((x) => x.vendorId === D.id).sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt))
+    const left = paidByPurchase(await pays())
+    const plan = allocateOldestFirst(25000, rows.map((x) => ({ id: x.id, left: Math.max(0, x.value - (left.get(x.id) ?? 0)) })))
+    assert.deepEqual(plan, { [b1.id]: 20000, [d6.id]: 5000 }, "9. oldest first across bulk and direct, by date")
+    const mixed = await api.adbluePayments.create({ date: "2026-11-09", vendorId: D.id, amount: 25000, mode: "NEFT", utr: "NEFT-MIX", allocations: [{ purchaseId: b1.id, amount: 12000 }, { purchaseId: d6.id, amount: 5000 }, { purchaseId: b2.id, amount: 8000 }] })
+    assert.deepEqual(mixed.allocations, [{ purchaseId: b1.id, amount: 12000 }, { purchaseId: d6.id, amount: 5000, direct: true }, { purchaseId: b2.id, amount: 8000 }], "8. one payment over bulk + direct + bulk; the direct one marked")
+    assert.deepEqual([(await dPayOf(b1.id)).outstanding, (await dPayOf(d6.id)).status, (await dPayOf(b2.id)).outstanding], [8000, "PAID", 2000])
+    // 10. Advance applied to a direct purchase: no new payment.
+    const d7 = await direct("2026-11-07", 30, 100, "DV-7") // ₹3,000
+    const adv = await api.adbluePayments.create({ date: "2026-11-09", vendorId: D.id, amount: 3000, mode: "IMPS", utr: "IMPS-DADV", allocations: [], acceptAdvance: true })
+    const nBefore = (await pays()).length
+    await api.adbluePayments.applyAdvance(D.id, [{ purchaseId: d7.id, amount: 3000 }])
+    const advNow = (await pays()).find((x) => x.id === adv.id)!
+    assert.deepEqual([(await pays()).length, advNow.allocations, (await dPayOf(d7.id)).status], [nBefore, [{ purchaseId: d7.id, amount: 3000, direct: true }], "PAID"], "10. advance applied to the direct purchase; no new payment")
+    // 13. The vendor ledger reconciles, direct purchases included (as debits, once each).
+    const a = await dAcc()
+    const led = vendorLedger(await payables(), await pays(), D.id)
+    assert.ok(led.some((r) => r.id === d1.id && r.purchaseKind === "DIRECT" && r.debit === 10000) && led.some((r) => r.id === b1.id && r.purchaseKind === "BULK"), "13. both kinds in the ledger")
+    assert.deepEqual([led.at(-1)!.balance, a.balance, Math.round((a.outstanding - a.advance) * 100) / 100], [a.balance, Math.round((a.purchased - a.settled) * 100) / 100, a.balance])
+    assert.equal(a.purchased, 10000 + 5000 + 10000 + 10000 + 10000 + 20000 + 5000 + 10000 + 3000, "Total Purchased: every bulk and direct purchase on credit, once (the paid-at-purchase one excluded)")
+    // 14. Stock and FIFO untouched by every direct purchase and payment above (the two bulk purchases add their own litres only).
+    const s1 = await stockOf()
+    assert.equal(s1.litres - s0.litres, 400 + 200, "14. only the bulk purchases changed stock (400 + 200 L)")
+    const costsBefore = s1.costs
+    await api.adbluePayments.create({ date: "2026-11-09", vendorId: D.id, amount: 2000, mode: "NEFT", utr: "NEFT-DB2", allocations: [{ purchaseId: b2.id, amount: 2000 }] })
+    assert.equal((await stockOf()).costs, costsBefore, "…and a payment changes no FIFO cost")
+    // 15. Month lock and roles.
+    const dOct = await direct("2026-10-20", 10, 100, "DV-OCT") // the Owner may enter a locked month
+    setRole("EMPLOYEE")
+    await assert.rejects(edit(dOct, { type: "FULL", amount: 1000, mode: "Cash", utr: "R-DOCT", date: "2026-11-09" }), /October 2026 is locked/, "15. the Employee can't settle an October purchase")
+    const dEmp = await direct("2026-11-08", 10, 100, "DV-EMP", { type: "FULL", amount: 1000, mode: "Cash", utr: "R-DEMP" })
+    assert.equal((await dPayOf(dEmp.id)).status, "PAID", "the Employee records a paid direct purchase")
+    await assert.rejects(api.adbluePayments.remove((await pays()).find((x) => x.utr === "R-DEMP")!.id, "x y z"), /Only the Owner and Dev/)
+    setRole("ADBLUE")
+    const dProfile = await direct("2026-11-08", 10, 100, "DV-AB")
+    assert.equal(isPayableDirect(stored(dProfile.id)), true, "the Adblue profile records a direct purchase on credit…")
+    await assert.rejects(direct("2026-11-08", 10, 100, "DV-AB2", { type: "FULL", amount: 1000, mode: "Cash", utr: "R-AB2" }), /can't record AdBlue supplier payments/, "…but never a payment")
+    setRole("OWNER")
+  }
+
+  console.log("AdBlue supplier payments: credit / partly / fully paid purchases (GST), instalments, several purchases, advance and applying it, TDS (0.1 %, custom, rounding), Credit refused, reconciliation, edits, permanent delete (audit kept, atomic), stock and FIFO untouched, roles, month lock, historical purchases, Edit Purchase → Credit / Partially / Fully Paid (new payments only, purchase untouched), allocate oldest first, vendor advance applied without a new payment, direct purchases on credit (create / edit / mixed allocation / advance / TDS): all checks passed")
 }
 
 main().catch((e) => {

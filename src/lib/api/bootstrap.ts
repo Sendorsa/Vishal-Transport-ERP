@@ -164,7 +164,7 @@ export function parseBackup(raw: unknown): BackupFile {
   }
   for (const p of c.adblue_payments ?? []) {
     missing(`AdBlue payment ${p.id}`, ids.adblue_vendors, p.vendorId)
-    for (const a of p.allocations ?? []) missing(`AdBlue payment ${p.id}`, ids.adblue_purchases, a.purchaseId)
+    for (const a of p.allocations ?? []) missing(`AdBlue payment ${p.id}`, a.direct ? ids.adblue_entries : ids.adblue_purchases, a.purchaseId)
   }
   for (const a of c.vehicle_assignments ?? []) {
     missing(`assignment ${a.id}`, ids.vehicles, a.vehicleId)

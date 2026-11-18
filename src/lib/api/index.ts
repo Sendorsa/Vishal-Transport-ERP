@@ -12,7 +12,7 @@ import { allocationProblem, industrialAmount, industrialProblem, sortedAllocatio
 import { odometerConflict } from "@/domain/diesel"
 import { dayBefore, statusOn, withStatus } from "@/domain/status-history"
 import { canEditMonth } from "@/domain/month-lock"
-import { ADBLUE_PAYMENT_MODES, CREDIT as AB_CREDIT, isPayable, paidByPurchase, paymentProblem as abPaymentProblem, purchaseValue, referenceNoun as abReferenceNoun, refKey, settledOf as abSettled, tdsProblem as abTdsProblem, tdsSplit as abTdsSplit, unallocated as abUnallocated, type PurchasePaymentType } from "@/domain/adblue-payments"
+import { ADBLUE_PAYMENT_MODES, CREDIT as AB_CREDIT, directPayable, ON_ACCOUNT, isPayableDirect, paidByPurchase, payableLabel, payablesOf, type Payable, paymentProblem as abPaymentProblem, purchaseValue, referenceNoun as abReferenceNoun, refKey, settledOf as abSettled, tdsProblem as abTdsProblem, tdsSplit as abTdsSplit, unallocated as abUnallocated, type PurchasePaymentType } from "@/domain/adblue-payments"
 import { adBlueTotals, isDirectAdBlue, NO_VENDOR_LABEL, adBlueShortfallMessage, stockDraws, valueInventory } from "@/domain/adblue-inventory"
 import { availabilityMessage, fillAmount, fitsTanker, isStockPool, isTankerFill, normReg, shortfallMessage, tankerAvailability, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate, tdsPaymentProblem, tdsSplit, tdsTakenOn } from "@/domain/station-ledger"
@@ -109,7 +109,13 @@ function nextSeq(existing: string[], prefix: string) {
  * A vehicle's AdBlue entry. STOCK (default): a draw from inventory — no vendor or ₹ (cost comes from the
  * inventory's average rate). DIRECT: bought from a vendor for this vehicle — vendor, rate (₹ = litres × rate).
  */
-export type AdBlueInput = Omit<NewEntity<AdBlueEntry>, "vendorId" | "amount">
+export type AdBlueInput = Omit<NewEntity<AdBlueEntry>, "vendorId" | "amount"> & {
+  /**
+   * Direct purchase on credit (paymentMode "CREDIT") only — the Payment Details (owner, 18 Nov 2026): a NEW payment for
+   * what is still owed, saved with the entry in one transaction (the same rules as a bulk purchase's). Never stored.
+   */
+  payment?: AdBluePurchaseInput["payment"]
+}
 export type TankerLoadInput = Pick<TankerLoad, "date" | "stationId" | "invoiceNo" | "litres" | "rate" | "notes"> & { tankerId: string }
 export type TankerDispenseInput = Pick<TankerDispense, "date" | "vehicleNo" | "litres" | "notes"> & { tankerId: string }
 export type TankerInput = Pick<Tanker, "name" | "regNo" | "vehicleId" | "capacityLitres" | "notes">
@@ -497,6 +503,7 @@ function checkAdBlue(input: AdBlueInput, id?: string): NewEntity<AdBlueEntry> {
   if (!(input.quantityLitres > 0)) throw new Error("AdBlue quantity must be greater than 0")
   if (input.date > todayISO()) throw new Error("An AdBlue entry can't be dated in the future.")
   const view = { ...input }
+  delete (view as AdBlueInput).payment // a payment is its own record (adbluePayments), never stored on the entry
   delete view.sourceVendor // read-only view fields, never stored
   delete view.costRate
   delete view.beforeVendorTracking // set by the API only: false on create, kept as stored on edit
@@ -964,14 +971,25 @@ function assertAdBluePayments(action: "view" | "create" | "edit" | "delete") {
   if (!canManageAdBluePayments(currentRole(), action)) throw new PermissionError(action === "delete" ? "Only the Owner and Dev can delete records — your role can't delete AdBlue supplier payments." : `Your role can't ${action === "view" ? "see" : action === "create" ? "record" : "edit"} AdBlue supplier payments.`)
 }
 const abPurchaseLabel = (x: Pick<AdBluePurchase, "invoiceNo" | "date">) => `Bill ${x.invoiceNo || "—"} (${formatDate(x.date)})`
-/** What each payable purchase of the vendor still owes (an edited payment's own allocations left out), by id. */
-function adblueOutstanding(vendorId: string, exceptPaymentId?: string): Map<string, { purchase: AdBluePurchase; left: number }> {
+/** "Bulk · Bill 12 (02-11-2026)" / "Direct · Bill R-9 (05-11-2026)". */
+const abPayableLabel = (x: Pick<Payable, "kind" | "billNo" | "date">) => payableLabel(x, formatDate)
+/**
+ * What each payable of the vendor still owes — bulk purchases and direct purchases on credit (owner, 18 Nov 2026) —
+ * an edited payment's own allocations left out, by id.
+ */
+function adblueOutstanding(vendorId: string, exceptPaymentId?: string): Map<string, { payable: Payable; left: number }> {
   const paid = paidByPurchase(readCollection("adblue_payments").filter((p) => p.id !== exceptPaymentId))
   return new Map(
-    readCollection("adblue_purchases")
-      .filter((x) => isPayable(x) && x.adblueVendorId === vendorId)
-      .map((x) => [x.id, { purchase: x, left: Math.max(0, round2(purchaseValue(x) - (paid.get(x.id) ?? 0))) }])
+    payablesOf(readCollection("adblue_purchases"), readCollection("adblue_entries"))
+      .filter((x) => x.vendorId === vendorId)
+      .map((x) => [x.id, { payable: x, left: Math.max(0, round2(x.value - (paid.get(x.id) ?? 0))) }])
   )
+}
+/** An allocation to a direct purchase carries `direct` (stored in entry_id, not purchase_id); the API decides, never the caller. */
+const tagAllocation = <A extends { purchaseId: string; amount: number }>(a: A) => {
+  const { direct: _d, ...rest } = a as A & { direct?: boolean }
+  void _d
+  return readCollection("adblue_entries").some((e) => e.id === a.purchaseId) ? { ...rest, direct: true } : rest
 }
 /** A reference (UTR, cheque or receipt number) is on one AdBlue payment only (spaces / case ignored; the database's unique index too). */
 function assertAdBlueRefFree(utr: string, exceptPaymentId?: string) {
@@ -992,9 +1010,12 @@ const abPerPurchase = (list: { purchaseId: string; amount: number }[]) => {
   for (const a of list) m.set(a.purchaseId, round2((m.get(a.purchaseId) ?? 0) + a.amount))
   return m
 }
-/** Allocating changes what a purchase owes: its month must be open too (as the payment's). */
+/** Allocating changes what a purchase (bulk or direct) owes: its month must be open too (as the payment's). */
 function assertAbAllocationMonths(allocations: { purchaseId: string }[]) {
-  for (const a of allocations) assertMonthEditable(readCollection("adblue_purchases").find((x) => x.id === a.purchaseId)!.date)
+  for (const a of allocations) {
+    const x = readCollection("adblue_purchases").find((p) => p.id === a.purchaseId) ?? readCollection("adblue_entries").find((e) => e.id === a.purchaseId)
+    if (x) assertMonthEditable(x.date)
+  }
 }
 /**
  * Validated payment ready to store: amount = paid to the vendor, tdsAmount / tdsRate from "Deduct TDS?", allocations to
@@ -1009,13 +1030,13 @@ function checkAdBluePayment(input: AdBluePaymentInput, before?: AdBluePayment): 
   const owed = adblueOutstanding(vendorId, before?.id)
   const allocations = cleanAbAllocations(input.allocations)
   const draft = { date: input.date, amount: Number(input.amount), mode: input.mode, utr: input.utr ?? "", allocations, acceptAdvance: input.acceptAdvance === true }
-  const problem = abPaymentProblem(draft, todayISO(), (id) => owed.get(id)?.left, (id) => (owed.has(id) ? abPurchaseLabel(owed.get(id)!.purchase) : `Purchase ${id}`))
+  const problem = abPaymentProblem(draft, todayISO(), (id) => owed.get(id)?.left, (id) => (owed.has(id) ? abPayableLabel(owed.get(id)!.payable) : `Purchase ${id}`))
   if (problem) throw new Error(problem)
   if (input.companyCode && !settingsOrThrow().companies.some((c) => c.code === input.companyCode)) throw new Error("Choose the company that paid")
   assertAdBlueRefFree(draft.utr, before?.id)
   return {
     date: draft.date, vendorId, ...adblueTds(draft.amount, input.tdsPercent), mode: draft.mode, utr: draft.utr.trim(), companyCode: input.companyCode || null,
-    notes: (input.notes ?? "").trim(), allocations: allocations.map((a) => ({ purchaseId: a.purchaseId, amount: round2(a.amount) })),
+    notes: (input.notes ?? "").trim(), allocations: allocations.map((a) => tagAllocation({ purchaseId: a.purchaseId, amount: round2(a.amount) })),
   }
 }
 /**
@@ -1025,7 +1046,7 @@ function checkAdBluePayment(input: AdBluePaymentInput, before?: AdBluePayment): 
  * Fully Paid settles all of it (more only as explicitly accepted advance credit); Partially Paid settles less than it.
  * The reference is required by mode; TDS as on any payment (the amount entered is the total settled).
  */
-function purchasePayment(input: AdBluePurchaseInput, outstanding: number, vendorId: string, editing: boolean): NewEntity<AdBluePayment> | null {
+function purchasePayment(input: Pick<AdBluePurchaseInput, "date" | "payment">, outstanding: number, vendorId: string, editing: boolean): NewEntity<AdBluePayment> | null {
   const p = input.payment
   const type = p?.type ?? "CREDIT"
   const amount = Number(p?.amount ?? 0)
@@ -1054,6 +1075,20 @@ function purchasePayment(input: AdBluePurchaseInput, outstanding: number, vendor
   assertMonthEditable(date)
   return { date, vendorId, ...adblueTds(amount, p!.tdsPercent), mode, utr: p!.utr!.trim(), companyCode: p!.companyCode || null, notes: (p!.notes ?? "").trim(), allocations: [{ purchaseId: "new", amount: allocated }] }
 }
+/**
+ * A direct vendor purchase's Payment Details (owner, 18 Nov 2026): only for a direct purchase on the vendor's account
+ * (paymentMode CREDIT, a vendor from the master) — the same rules as a bulk purchase's, for what it still owes
+ * (`paid` = Σ existing allocations). Paid-at-purchase direct purchases (Cash / UPI / NEFT / Cheque) take none.
+ */
+function directPayment(input: AdBlueInput, entry: { source?: string; paymentMode?: string; adblueVendorId?: string | null; amount: number; date: string }, paid: number, editing: boolean) {
+  if (entry.source === "DIRECT" && entry.paymentMode === ON_ACCOUNT && !entry.adblueVendorId) throw new Error("Choose the vendor from the AdBlue vendor list — a purchase on credit is owed to a vendor.")
+  if (!input.payment || input.payment.type === "CREDIT") return purchasePayment({ date: entry.date, payment: input.payment }, 0, "", false) // validates "Credit = nothing paid"
+  if (entry.source !== "DIRECT") throw new Error("Only a direct vendor purchase has payment details — an AdBlue stock draw is never paid for.")
+  if (entry.paymentMode !== ON_ACCOUNT) throw new Error("This direct purchase was paid at purchase — it has nothing on the vendor's account to pay.")
+  if (!entry.adblueVendorId) throw new Error("Choose the vendor from the AdBlue vendor list — a purchase on credit is owed to a vendor.")
+  return purchasePayment({ date: entry.date, payment: input.payment }, Math.max(0, round2(entry.amount - paid)), entry.adblueVendorId, editing)
+}
+
 /** The purchase's own fields (what an edit may change in stock / value): a payment-only edit changes none of them. */
 const PURCHASE_FIELDS = ["date", "adblueVendorId", "vendorName", "product", "buckets", "litresPerBucket", "pricePerBucket", "totalLitres", "totalCost", "gstRate", "invoiceNo", "notes"] as const
 
@@ -2097,10 +2132,16 @@ export const api = {
         assertDrawVendor(input)
         if (isDirectAdBlue(input)) input = { ...input, ...(await directVendor(input)) }
         const entry = { ...checkAdBlue(input), beforeVendorTracking: false }
+        // A direct purchase on credit is owed to its vendor; Fully / Partially Paid add a payment (checked before saving).
+        const pay = directPayment(input, entry, 0, false)
         const would = [...readCollection("adblue_entries"), { ...entry, id: "new", createdAt: new Date().toISOString() }]
         assertStock(readCollection("adblue_purchases"), would) // direct purchases are left out of the stock check
         const after = await adblue.create(entry)
         audit({ action: "CREATED", ...meta.adblue(after), after: adblueView(after) })
+        if (pay) {
+          const p = await adbluePayments.create({ ...pay, allocations: [{ purchaseId: after.id, amount: pay.allocations[0].amount, direct: true }] })
+          audit({ action: "PAYMENT_RECORDED", ...meta.adbluePayment(p), after: p, note: `Paid with ${abPayableLabel(directPayable(after)!)}` })
+        }
         return after
       }),
     update: (id: string, input: AdBlueInput, reason?: string) =>
@@ -2118,11 +2159,29 @@ export const api = {
         assertDrawVendor(input)
         if (isDirectAdBlue(input)) input = { ...input, ...(await directVendor(input, before)) }
         const entry = checkAdBlue(input, id) // beforeVendorTracking stays as stored
+        // Payments already allocated stay as they were: a direct purchase on credit keeps its vendor, stays a direct purchase
+        // on credit, and its value never goes below what was paid (owner, 18 Nov 2026).
+        const paid = paidByPurchase(readCollection("adblue_payments")).get(id) ?? 0
+        if (paid > 0) {
+          if (!isPayableDirect(entry as AdBlueEntry) || entry.adblueVendorId !== before.adblueVendorId) throw new Error(`Payments are allocated to this direct purchase, so it must stay a direct purchase on credit from ${before.vendorName || "its vendor"}. Delete or re-allocate those payments first (AdBlue → Payments).`)
+          if (entry.amount < paid) throw new Error(`${formatINR(paid)} has already been paid against this purchase, so its amount can't go below that (new amount ${formatINR(entry.amount)}). Correct or delete the payment first.`)
+        }
+        const pay = directPayment(input, entry, paid, true)
+        if (pay) assertAbAllocationMonths([{ purchaseId: id }])
         const would = readCollection("adblue_entries").map((e) => (e.id === id ? { ...e, ...entry } : e))
         assertStock(readCollection("adblue_purchases"), would)
-        const beforeView = adblueView(before)
-        const after = await adblue.update(id, entry)
-        audit({ action: "UPDATED", ...meta.adblue(after), before: beforeView, after: adblueView(after), reason })
+        // The entry is rewritten only when its own fields change — never for a payment alone.
+        const changed = Object.keys(entry).some((k) => JSON.stringify((entry as Record<string, unknown>)[k] ?? null) !== JSON.stringify((before as unknown as Record<string, unknown>)[k] ?? null))
+        let after = before
+        if (changed) {
+          const beforeView = adblueView(before)
+          after = await adblue.update(id, entry)
+          audit({ action: "UPDATED", ...meta.adblue(after), before: beforeView, after: adblueView(after), reason })
+        }
+        if (pay) {
+          const p = await adbluePayments.create({ ...pay, allocations: [{ purchaseId: id, amount: pay.allocations[0].amount, direct: true }] })
+          audit({ action: "PAYMENT_RECORDED", ...meta.adbluePayment(p), after: p, note: `Paid from Edit Direct Purchase · ${abPayableLabel(directPayable(after)!)}${p.allocations[0].amount < abSettled(p) ? ` · ${formatINR(round2(abSettled(p) - p.allocations[0].amount))} advance credit` : ""}` })
+        }
         return after
       }),
     /** DELETE — the litres go back into stock. Removing a draw can never make stock negative. */
@@ -2134,6 +2193,8 @@ export const api = {
         if (!e) return
         assertCustomerScope(e.customerId)
         assertMonthEditable(e.date)
+        const pays = readCollection("adblue_payments").filter((p) => p.allocations.some((a) => a.purchaseId === id))
+        if (pays.length) throw new Error(`Payments are allocated to this direct purchase (${pays.map((p) => `${formatDate(p.date)} ${formatINR(abSettled(p))}`).join("; ")}), so it can't be deleted. Delete or re-allocate those payments first (AdBlue → Payments).`)
         const before = adblueView(e)
         await adblue.remove(id)
         audit({ action: "DELETED", ...meta.adblue(e), before, reason })
@@ -2765,16 +2826,16 @@ export const api = {
         assertAdBluePayments("edit")
         const before = await adbluePayments.get(id)
         if (!before) throw new NotFoundError("AdBlue payment", id)
-        const add = cleanAbAllocations(allocations).map((a) => ({ purchaseId: a.purchaseId, amount: round2(a.amount) }))
+        const add = cleanAbAllocations(allocations).map((a) => tagAllocation({ purchaseId: a.purchaseId, amount: round2(a.amount) }))
         if (!add.length) throw new Error("Enter the amount to apply to at least one purchase")
         const owed = adblueOutstanding(before.vendorId)
         const left = abUnallocated(before)
-        const problem = abPaymentProblem({ date: before.date, amount: left, mode: before.mode, utr: before.utr, allocations: add, acceptAdvance: true }, todayISO(), (x) => owed.get(x)?.left, (x) => (owed.has(x) ? abPurchaseLabel(owed.get(x)!.purchase) : `Purchase ${x}`))
+        const problem = abPaymentProblem({ date: before.date, amount: left, mode: before.mode, utr: before.utr, allocations: add, acceptAdvance: true }, todayISO(), (x) => owed.get(x)?.left, (x) => (owed.has(x) ? abPayableLabel(owed.get(x)!.payable) : `Purchase ${x}`))
         if (problem) throw new Error(left <= 0 ? "This payment has no advance credit left to apply." : problem.replace("are more than the payment", "are more than the advance left"))
         assertMonthEditable(before.date)
         assertAbAllocationMonths(add)
         const after = await adbluePayments.update(id, { allocations: [...before.allocations, ...add] })
-        audit({ action: "UPDATED", ...meta.adbluePayment(after), before, after, note: `Advance applied: ${add.map((a) => `${formatINR(a.amount)} to ${abPurchaseLabel(owed.get(a.purchaseId)!.purchase)}`).join("; ")}` })
+        audit({ action: "UPDATED", ...meta.adbluePayment(after), before, after, note: `Advance applied: ${add.map((a) => `${formatINR(a.amount)} to ${abPayableLabel(owed.get(a.purchaseId)!.payable)}`).join("; ")}` })
         return after
       }),
     /**
@@ -2797,7 +2858,7 @@ export const api = {
         const usable = sources.filter((p) => open(p.date))
         const available = round2(usable.reduce((t, p) => t + abUnallocated(p), 0))
         const owed = adblueOutstanding(vendorId)
-        const problem = abPaymentProblem({ date: todayISO(), amount: available, mode: "NEFT", utr: "advance", allocations: add, acceptAdvance: true }, todayISO(), (x) => owed.get(x)?.left, (x) => (owed.has(x) ? abPurchaseLabel(owed.get(x)!.purchase) : `Purchase ${x}`))
+        const problem = abPaymentProblem({ date: todayISO(), amount: available, mode: "NEFT", utr: "advance", allocations: add, acceptAdvance: true }, todayISO(), (x) => owed.get(x)?.left, (x) => (owed.has(x) ? abPayableLabel(owed.get(x)!.payable) : `Purchase ${x}`))
         if (problem) throw new Error(available <= 0 ? (sources.length ? "The advance credit with this vendor is on payments in a locked month." : "This vendor has no advance credit to apply.") : problem.replace(/are more than the payment \(₹[\d.]+\)/, `are more than the advance credit available (₹${available.toFixed(2)})`))
         assertAbAllocationMonths(add)
         // Take each purchase's amount from the oldest payments holding advance.
@@ -2810,7 +2871,7 @@ export const api = {
             const take = round2(Math.min(need, left.get(p.id)!))
             if (take <= 0) continue
             left.set(p.id, round2(left.get(p.id)! - take))
-            extra.set(p.id, [...(extra.get(p.id) ?? []), { purchaseId: a.purchaseId, amount: take }])
+            extra.set(p.id, [...(extra.get(p.id) ?? []), tagAllocation({ purchaseId: a.purchaseId, amount: take })])
             need = round2(need - take)
           }
         }
@@ -2818,7 +2879,7 @@ export const api = {
         for (const p of usable.filter((x) => extra.has(x.id))) {
           const more = extra.get(p.id)!
           const after = await adbluePayments.update(p.id, { allocations: [...p.allocations, ...more] })
-          audit({ action: "UPDATED", ...meta.adbluePayment(after), before: p, after, note: `Advance applied: ${more.map((m) => `${formatINR(m.amount)} to ${abPurchaseLabel(owed.get(m.purchaseId)!.purchase)}`).join("; ")}` })
+          audit({ action: "UPDATED", ...meta.adbluePayment(after), before: p, after, note: `Advance applied: ${more.map((m) => `${formatINR(m.amount)} to ${abPayableLabel(owed.get(m.purchaseId)!.payable)}`).join("; ")}` })
           updated.push(after)
         }
         return updated
@@ -2837,7 +2898,8 @@ export const api = {
         assertMonthEditable(before.date)
         assertAbAllocationMonths(before.allocations)
         await adbluePayments.remove(id)
-        const bills = [...new Set(before.allocations.map((a) => a.purchaseId))].map((x) => readCollection("adblue_purchases").find((p) => p.id === x)).filter((p) => !!p).map((p) => abPurchaseLabel(p!))
+        const all = payablesOf(readCollection("adblue_purchases"), readCollection("adblue_entries"))
+        const bills = [...new Set(before.allocations.map((a) => a.purchaseId))].map((x) => all.find((p) => p.id === x)).filter((p) => !!p).map((p) => abPayableLabel(p!))
         audit({ action: "DELETED", ...meta.adbluePayment(before), before, reason: reason.trim(), note: bills.length ? `Allocations removed: ${bills.join(", ")} owed again` : "No purchase allocated: its advance credit is removed" })
       }),
   },

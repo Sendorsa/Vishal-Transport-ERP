@@ -9,7 +9,11 @@
  *   Payment    Settled     = Paid to the vendor (`amount`: the cash / bank outflow) + TDS deducted (`tdsAmount`)
  *              TDS         = round2(Settled × TDS % / 100) when "Deduct TDS?" is on, else 0
  *              Advance     = Settled − Σ its allocations — credit with the vendor, not yet on a purchase
- *   Vendor     Purchased   = Σ purchase values (opening stock is never a purchase: no vendor, nothing owed)
+ *   Direct     A direct vendor purchase (an AdBlue entry, source DIRECT) is payable when it is on the vendor's account
+ *              (paymentMode CREDIT, owner 18 Nov 2026): value = its amount (litres × rate). Older direct purchases were
+ *              paid at purchase (CASH / UPI / NEFT / CHEQUE): never payable, nothing outstanding, no payment invented.
+ *   Vendor     Purchased   = Σ values of its payables — bulk purchases and direct purchases on credit (opening stock is
+ *              never a purchase: no vendor, nothing owed)
  *              Settled     = Σ payments' Settled — of which Cash paid = Σ amount, TDS = Σ tdsAmount
  *              Outstanding = Σ purchases' outstanding · Advance = Σ payments' advance
  *              Net payable = Purchased − Settled = Outstanding − Advance (+ we owe the vendor, − the vendor holds our money)
@@ -20,7 +24,7 @@
 import { isCalendarDate } from "./assignments"
 import { fyRange } from "./financial-year"
 import { round2 } from "@/lib/format"
-import type { AdBluePayment, AdBluePurchase } from "@/lib/types"
+import type { AdBlueEntry, AdBluePayment, AdBluePurchase } from "@/lib/types"
 
 /** Credit on a purchase = bought on account: nothing paid now, so no payment is recorded. */
 export const CREDIT = "Credit"
@@ -49,6 +53,40 @@ export const gstOf = (taxable: number, gstRate: number | null | undefined) => ro
 export const purchaseValue = (p: Pick<AdBluePurchase, "totalCost" | "gstRate">) => round2(p.totalCost + gstOf(p.totalCost, p.gstRate))
 /** Opening stock was bought from nobody in the records: never owed, never paid. */
 export const isPayable = (p: Pick<AdBluePurchase, "opening" | "adblueVendorId">) => !p.opening && !!p.adblueVendorId
+
+/** Credit on a direct purchase: on the vendor's account (settled by AdBlue payments), never "paid at purchase". */
+export const ON_ACCOUNT = "CREDIT"
+/** A direct vendor purchase that is owed to its vendor (on credit, with a vendor from the master). */
+export const isPayableDirect = (e: Pick<AdBlueEntry, "source" | "paymentMode" | "adblueVendorId">) => e.source === "DIRECT" && (e.paymentMode as string) === ON_ACCOUNT && !!e.adblueVendorId
+
+/**
+ * Anything owed to an AdBlue vendor, whatever it is: a bulk purchase (stock) or a direct purchase on credit (straight
+ * into a vehicle). Payments and allocations treat both the same — one vendor account, one ledger.
+ */
+export interface Payable {
+  id: string
+  kind: "BULK" | "DIRECT"
+  vendorId: string
+  date: string
+  createdAt: string
+  /** Value owed: bulk = taxable + GST; direct = litres × rate. */
+  value: number
+  litres: number
+  /** Invoice / bill number ("" when none). */
+  billNo: string
+  /** Direct: the vehicle it went into. */
+  vehicleId?: string
+}
+export const PAYABLE_KIND_LABEL: Record<Payable["kind"], string> = { BULK: "Bulk", DIRECT: "Direct" }
+export const bulkPayable = (p: AdBluePurchase): Payable | null =>
+  isPayable(p) ? { id: p.id, kind: "BULK", vendorId: p.adblueVendorId!, date: p.date, createdAt: p.createdAt, value: purchaseValue(p), litres: p.totalLitres, billNo: p.invoiceNo ?? "" } : null
+export const directPayable = (e: AdBlueEntry): Payable | null =>
+  isPayableDirect(e) ? { id: e.id, kind: "DIRECT", vendorId: e.adblueVendorId!, date: e.date, createdAt: e.createdAt, value: round2(e.amount), litres: e.quantityLitres, billNo: e.invoiceNo ?? "", vehicleId: e.vehicleId } : null
+/** Every payable of every vendor: bulk purchases, then direct purchases on credit. */
+export const payablesOf = (purchases: AdBluePurchase[], entries: AdBlueEntry[]): Payable[] =>
+  [...purchases.map(bulkPayable), ...entries.map(directPayable)].filter((x): x is Payable => !!x)
+/** "Bulk · Bill 12 (02-11-2026)" / "Direct · Bill R-9 (05-11-2026)". */
+export const payableLabel = (x: Pick<Payable, "kind" | "billNo" | "date">, fmt: (d: string) => string = (d) => d) => `${PAYABLE_KIND_LABEL[x.kind]} · Bill ${x.billNo || "—"} (${fmt(x.date)})`
 
 export type PurchasePayStatus = "PAID" | "PARTIAL" | "UNPAID"
 export const PURCHASE_PAY_LABEL: Record<PurchasePayStatus, string> = { PAID: "Paid", PARTIAL: "Partially Paid", UNPAID: "Unpaid / Credit" }
@@ -180,18 +218,16 @@ export interface VendorAccount {
   payments: number
 }
 
-type P = Pick<AdBluePurchase, "id" | "date" | "createdAt" | "adblueVendorId" | "totalCost" | "gstRate" | "totalLitres" | "opening">
-
-/** One account per vendor with a payable purchase or a payment — the complete history, never one period's. */
-export function vendorAccounts(purchases: P[], payments: AdBluePayment[]): VendorAccount[] {
+/** One account per vendor with a payable (bulk or direct on credit) or a payment — the complete history. */
+export function vendorAccounts(payables: Payable[], payments: AdBluePayment[]): VendorAccount[] {
   const paid = paidByPurchase(payments)
   const acc = new Map<string, VendorAccount>()
   const of = (vendorId: string) => acc.get(vendorId) ?? acc.set(vendorId, { vendorId, purchased: 0, litres: 0, settled: 0, cashPaid: 0, tds: 0, outstanding: 0, advance: 0, balance: 0, purchases: 0, payments: 0 }).get(vendorId)!
-  for (const x of purchases.filter(isPayable)) {
-    const a = of(x.adblueVendorId!)
-    const pay = purchasePay(purchaseValue(x), paid.get(x.id) ?? 0)
+  for (const x of payables) {
+    const a = of(x.vendorId)
+    const pay = purchasePay(x.value, paid.get(x.id) ?? 0)
     a.purchased = round2(a.purchased + pay.value)
-    a.litres = round2(a.litres + x.totalLitres)
+    a.litres = round2(a.litres + x.litres)
     a.outstanding = round2(a.outstanding + pay.outstanding)
     a.purchases++
   }
@@ -210,6 +246,8 @@ export function vendorAccounts(purchases: P[], payments: AdBluePayment[]): Vendo
 export interface LedgerRow {
   date: string
   kind: "PURCHASE" | "PAYMENT"
+  /** Purchases: bulk or direct. */
+  purchaseKind?: Payable["kind"]
   id: string
   /** Debit = a purchase's value (we owe the vendor more); Credit = a payment's total settled (we owe less). */
   debit: number
@@ -222,17 +260,16 @@ export interface LedgerRow {
 }
 
 /**
- * The vendor's account in date order (a purchase before a payment on the same day, then as entered). Purchases are
- * debits (what we owe grows), payments credits (it shrinks); the last balance = Purchased − Settled. No opening balance
- * exists for AdBlue vendors.
+ * The vendor's account in date order (a purchase before a payment on the same day, then as entered). Purchases — bulk
+ * and direct on credit — are debits, payments credits; the last balance = Purchased − Settled. No opening balance.
  */
-export function vendorLedger(purchases: P[], payments: AdBluePayment[], vendorId: string): LedgerRow[] {
+export function vendorLedger(payables: Payable[], payments: AdBluePayment[], vendorId: string): LedgerRow[] {
   const rows = [
-    ...purchases.filter((x) => isPayable(x) && x.adblueVendorId === vendorId).map((x) => ({ date: x.date, at: x.createdAt, kind: "PURCHASE" as const, id: x.id, debit: purchaseValue(x), credit: 0, paid: 0, tds: 0 })),
-    ...payments.filter((p) => p.vendorId === vendorId).map((p) => ({ date: p.date, at: p.createdAt, kind: "PAYMENT" as const, id: p.id, debit: 0, credit: settledOf(p), paid: p.amount, tds: p.tdsAmount ?? 0 })),
+    ...payables.filter((x) => x.vendorId === vendorId).map((x) => ({ date: x.date, at: x.createdAt, kind: "PURCHASE" as const, purchaseKind: x.kind, id: x.id, debit: x.value, credit: 0, paid: 0, tds: 0 })),
+    ...payments.filter((p) => p.vendorId === vendorId).map((p) => ({ date: p.date, at: p.createdAt, kind: "PAYMENT" as const, purchaseKind: undefined, id: p.id, debit: 0, credit: settledOf(p), paid: p.amount, tds: p.tdsAmount ?? 0 })),
   ].sort((a, b) => a.date.localeCompare(b.date) || (a.kind === b.kind ? 0 : a.kind === "PURCHASE" ? -1 : 1) || a.at.localeCompare(b.at) || a.id.localeCompare(b.id))
   let balance = 0
-  return rows.map((r) => ({ date: r.date, kind: r.kind, id: r.id, debit: r.debit, credit: r.credit, paid: r.paid, tds: r.tds, balance: (balance = round2(balance + r.debit - r.credit)) }))
+  return rows.map((r) => ({ date: r.date, kind: r.kind, purchaseKind: r.purchaseKind, id: r.id, debit: r.debit, credit: r.credit, paid: r.paid, tds: r.tds, balance: (balance = round2(balance + r.debit - r.credit)) }))
 }
 
 /** Totals over every vendor (the AdBlue page's money cards): payables and advances never netted across vendors. */

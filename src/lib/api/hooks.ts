@@ -632,7 +632,7 @@ export function useSaveAdBlue() {
   const invalidate = useInvalidate()
   return useMutation({
     mutationFn: ({ id, data, reason, version }: { id?: string; data: AdBlueInput; reason?: string; version?: string }) => v(id, version, () => (id ? api.adblue.update(id, data, reason) : api.adblue.create(data))),
-    onSuccess: () => invalidate("adblue_entries"),
+    onSuccess: () => invalidate("adblue_entries", "adblue_payments"),
     onError,
   })
 }

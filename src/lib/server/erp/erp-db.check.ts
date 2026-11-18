@@ -1131,6 +1131,27 @@ async function main() {
       await call(EMP, "adbluePayments.applyAdvance", vendor.id, [{ purchaseId: owedP.id, amount: 3000 }])
       assert.deepEqual([(await db.query(`select 1 from fuel.adblue_payments`)).rows.length, await paidOfP(owedP.id), (await db.query<{ p: string }>(`select payment_id as p from fuel.adblue_payment_allocations where purchase_id = '${owedP.id}'`)).rows.map((r) => r.p)], [nPay, 3000, [advP.id]], "advance applied through the engine: no new payment, the allocation on the advance's payment")
       await assert.rejects(call(TATA, "adbluePayments.applyAdvance", vendor.id, [{ purchaseId: owedP.id, amount: 1 }]), /refused by the method list/)
+      // Direct purchases on credit (owner, 18 Nov 2026): the entry on CREDIT, its payment's allocation in entry_id.
+      type AE = import("@/lib/types").AdBlueEntry
+      const dBody = (x: Record<string, unknown> = {}) => ({ vehicleId: vA.id, customerId: alpha.id, date: today, closingKm: 9_000_000, quantityLitres: 50, invoiceNo: "DIR-1", notes: "", source: "DIRECT", adblueVendorId: vendor.id, vendorName: "", rate: 100, paymentMode: "CREDIT", ...x })
+      const dEntry = await call<AE>(EMP, "adblue.create", dBody({ payment: { type: "PARTIAL", amount: 2000, mode: "UPI", utr: "UPI-DIR-1" } }))
+      const dRows = async () => (await db.query<{ p: string | null; e: string | null; a: string }>(`select purchase_id as p, entry_id as e, amount::text as a from fuel.adblue_payment_allocations where entry_id = '${dEntry.id}' order by created_at`)).rows
+      assert.deepEqual([(await db.query<{ m: string }>(`select payment_mode::text as m from fuel.adblue_entries where id = '${dEntry.id}'`)).rows[0].m, await dRows()], ["CREDIT", [{ p: null, e: dEntry.id, a: "2000.00" }]], "a direct purchase on credit, part paid: the allocation in entry_id")
+      const mixPay = await call<AP>(EMP, "adbluePayments.create", { date: today, vendorId: vendor.id, amount: 4000, mode: "NEFT", utr: "NEFT-MIX-DB", allocations: [{ purchaseId: owedP.id, amount: 1000 }, { purchaseId: dEntry.id, amount: 3000 }] })
+      const mixRows = (await db.query<{ p: string | null; e: string | null }>(`select purchase_id as p, entry_id as e from fuel.adblue_payment_allocations where payment_id = '${mixPay.id}' order by line_no`)).rows
+      assert.deepEqual(mixRows, [{ p: owedP.id, e: null }, { p: null, e: dEntry.id }], "one payment across a bulk and a direct purchase")
+      const evE = (rid: string, action = "UPDATED") => evA(rid, action, "AdBlue entry")
+      await assert.rejects(sqlAs(OWNER, `insert into fuel.adblue_payment_allocations (payment_id, line_no, entry_id, amount) values ('${advP.id}', 9, '${dEntry.id}', 1); ${evA(advP.id)}`), /beyond its value|more than the payment settles/, "a direct purchase is never paid beyond its value")
+      await assert.rejects(sqlAs(OWNER, `insert into fuel.adblue_payment_allocations (payment_id, line_no, purchase_id, entry_id, amount) values ('${mixPay.id}', 9, '${owedP.id}', '${dEntry.id}', 1); ${evA(mixPay.id)}`), /adblue_payment_allocations_target_check/, "an allocation points at exactly one purchase")
+      await assert.rejects(sqlAs(OWNER, `update fuel.adblue_entries set payment_mode = 'CASH' where id = '${dEntry.id}'; ${evE(dEntry.id)}`), /not a direct purchase on credit/, "a paid direct purchase stays on credit")
+      await assert.rejects(sqlAs(OWNER, `update fuel.adblue_entries set quantity_litres = 10 where id = '${dEntry.id}'; ${evE(dEntry.id)}`), /beyond its value/, "…and its amount never goes below what was paid")
+      await assert.rejects(sqlAs(OWNER, `delete from fuel.adblue_entries where id = '${dEntry.id}'; ${evE(dEntry.id, "DELETED")}`), /foreign key/, "a direct purchase with payments isn't deleted")
+      // The Employee corrects the mixed payment: the direct allocation removed inside the audited edit (the guard finds it by entry id).
+      const mixNow = (await call<AP[]>(EMP, "adbluePayments.list")).find((x) => x.id === mixPay.id)!
+      await as(EMP, () => api.adbluePayments.update(mixPay.id, { date: today, amount: 4000, mode: "NEFT", utr: "NEFT-MIX-DB", allocations: [{ purchaseId: owedP.id, amount: 1000 }], acceptAdvance: true }, "Direct part was a mistake"), true, { [mixPay.id]: mixNow.updatedAt })
+      assert.deepEqual((await dRows()).map((r) => r.a), ["2000.00"], "the edit removed the direct allocation (₹3,000 back to advance)")
+      await call(OWNER, "adbluePayments.remove", mixPay.id, "Re-enter")
+      assert.equal((await db.query(`select 1 from fuel.adblue_payment_allocations where payment_id = '${mixPay.id}'`)).rows.length, 0, "deleted with its allocations")
       for (const id of [TATA, ADB]) {
         await assert.rejects(call(id, "adbluePayments.list"), /refused by the method list/)
         assert.deepEqual(await rowsAs(id, `select id from fuel.adblue_payments union all select id from fuel.adblue_payment_allocations`), [], `RLS: ${id.role} reads no AdBlue payment`)
