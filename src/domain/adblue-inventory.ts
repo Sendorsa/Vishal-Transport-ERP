@@ -22,6 +22,7 @@
  */
 import { addMonths, format, parseISO } from "date-fns"
 import { round2 } from "@/lib/format"
+import { purchaseValue } from "./adblue-payments"
 
 interface Purchase {
   id: string
@@ -34,6 +35,8 @@ interface Purchase {
   adblueVendorId?: string | null
   /** Opening stock (fresh start): litres and value already on hand — never a purchase. */
   opening?: boolean
+  /** GST % on the bill (owed to the vendor; stock is costed before GST). */
+  gstRate?: number | null
 }
 interface Consumption {
   id: string
@@ -62,6 +65,8 @@ const eventOrder = (a: Event, b: Event) => {
 /** A vendor's stock that became unattributed at an old draw (vendor unknown): litres and value, relabelled only. */
 export interface Move {
   consumptionId: string
+  /** The purchase batch (lot) whose stock became unattributed. */
+  purchaseId: string
   date: string
   vendor: string
   litres: number
@@ -71,6 +76,8 @@ export interface Move {
 /** Litres a draw took from one vendor's batch, and their cost. */
 export interface Take {
   consumptionId: string
+  /** The purchase batch (lot) the litres came from. */
+  purchaseId: string
   date: string
   vendor: string
   litres: number
@@ -90,6 +97,8 @@ export interface Valuation {
   takes: Take[]
   /** Vendor stock that became unattributed at old draws, in event order (Σ litres in = Σ litres out: never counted twice). */
   moves: Move[]
+  /** Every purchase batch (lot) after the last event: litres and value left, and whose stock it is now (NO_VENDOR once unattributed). */
+  lots: { purchaseId: string; vendor: string; litres: number; value: number }[]
   /**
    * First moment stock would go below zero, if any — of the draw's vendor, of unattributed stock (vendor NO_VENDOR) for
    * a new draw without one while vendors hold stock too, or in total (vendor null: an old draw, or a draw without a
@@ -101,14 +110,14 @@ export interface Valuation {
 /** Runs every purchase and consumption in order through FIFO batches. */
 export function valueInventory(purchases: Purchase[], consumptions: Consumption[]): Valuation {
   const events: Event[] = [...purchases.map((p) => ({ kind: "IN" as const, p })), ...consumptions.map((c) => ({ kind: "OUT" as const, c }))].sort(eventOrder)
-  const lots: { vendor: string; litres: number; value: number }[] = []
+  const lots: { purchaseId: string; vendor: string; litres: number; value: number }[] = []
   const costOf = new Map<string, number>()
   const takes: Take[] = []
   const moves: Move[] = []
   let shortfall: Valuation["shortfall"] = null
   for (const e of events) {
     if (e.kind === "IN") {
-      lots.push({ vendor: vendorKey(e.p), litres: e.p.totalLitres, value: e.p.totalCost })
+      lots.push({ purchaseId: e.p.id, vendor: vendorKey(e.p), litres: e.p.totalLitres, value: e.p.totalCost })
       continue
     }
     const want = e.c.adblueVendorId || null
@@ -117,7 +126,7 @@ export function valueInventory(purchases: Purchase[], consumptions: Consumption[
     // An old draw while two or more sources held stock: its source is unknown, so everything on hand becomes unattributed.
     if (old && new Set(open.map((l) => l.vendor)).size > 1)
       for (const l of open.filter((x) => x.vendor !== NO_VENDOR)) {
-        moves.push({ consumptionId: e.c.id, date: e.c.date, vendor: l.vendor, litres: l.litres, value: l.value })
+        moves.push({ consumptionId: e.c.id, purchaseId: l.purchaseId, date: e.c.date, vendor: l.vendor, litres: l.litres, value: l.value })
         l.vendor = NO_VENDOR
       }
     // Old draw: whatever is on hand (one source by now). New draw: its vendor's stock, or unattributed stock only.
@@ -135,7 +144,7 @@ export function valueInventory(purchases: Purchase[], consumptions: Consumption[
       l.value = whole ? 0 : round2(l.value - part)
       left -= take
       cost += part
-      takes.push({ consumptionId: e.c.id, date: e.c.date, vendor: l.vendor, litres: take, cost: part })
+      takes.push({ consumptionId: e.c.id, purchaseId: l.purchaseId, date: e.c.date, vendor: l.vendor, litres: take, cost: part })
     }
     costOf.set(e.c.id, round2(cost))
   }
@@ -146,7 +155,51 @@ export function valueInventory(purchases: Purchase[], consumptions: Consumption[
   }
   const litres = lots.reduce((t, l) => t + l.litres, 0)
   const value = lots.reduce((t, l) => t + l.value, 0)
-  return { costOf, stockLitres: round2(litres), stockValue: round2(value), avgRate: litres > 1e-9 ? round2(value / litres) : null, vendorStock, takes, moves, shortfall }
+  return { costOf, stockLitres: round2(litres), stockValue: round2(value), avgRate: litres > 1e-9 ? round2(value / litres) : null, vendorStock, takes, moves, lots: lots.map((l) => ({ ...l, litres: round2(l.litres) })), shortfall }
+}
+
+export interface VendorStockUse {
+  /** Litres vehicles drew from the vendor's lots while they were its stock (FIFO takes). */
+  used: number
+  /** Litres left in the vendor's lots that are still its stock. */
+  remaining: number
+  /** Litres of its lots that became unattributed at an old draw (vendor unknown) — counted under unattributed stock. */
+  moved: number
+}
+
+/**
+ * Used and remaining stock of the bulk lots dated in a period, as of today (owner, 24 Nov 2026: the Overview's vendor
+ * table), read from `valueInventory`'s own lots and takes — never a second FIFO. Per vendor: Purchased = Used +
+ * Remaining + Moved. Opening stock and stock whose vendor is unknown are never a vendor's: they are `unattributed`.
+ * Σ vendors' remaining + unattributed remaining = the period lots' stock (all time: the bulk stock).
+ */
+export function bulkStockUse<P extends Purchase>(purchases: P[], draws: Consumption[], inPeriod: (p: P) => boolean) {
+  const v = valueInventory(purchases, draws)
+  const lots = new Map(purchases.filter(inPeriod).map((p) => [p.id, p]))
+  const byVendor = new Map<string, VendorStockUse>()
+  const unattributed = { opening: 0, used: 0, remaining: 0 }
+  const row = (k: string) => byVendor.get(k) ?? byVendor.set(k, { used: 0, remaining: 0, moved: 0 }).get(k)!
+  // A lot is its vendor's while its stock is labelled with that vendor; opening stock / no vendor / moved stock is not.
+  const owner = (purchaseId: string, label: string) => {
+    const p = lots.get(purchaseId)
+    return !p ? null : p.adblueVendorId && label === p.adblueVendorId ? p.adblueVendorId : NO_VENDOR
+  }
+  for (const t of v.takes) {
+    const k = owner(t.purchaseId, t.vendor)
+    if (k === null) continue
+    if (k === NO_VENDOR) unattributed.used += t.litres
+    else row(k).used += t.litres
+  }
+  for (const l of v.lots) {
+    const k = owner(l.purchaseId, l.vendor)
+    if (k === null) continue
+    if (k === NO_VENDOR) unattributed.remaining += l.litres
+    else row(k).remaining += l.litres
+  }
+  for (const m of v.moves) if (lots.has(m.purchaseId)) row(m.vendor).moved += m.litres
+  for (const p of lots.values()) if (p.opening) unattributed.opening += p.totalLitres
+  const r = (x: VendorStockUse) => ({ used: round2(x.used), remaining: round2(x.remaining), moved: round2(x.moved) })
+  return { byVendor: new Map([...byVendor].map(([k, x]) => [k, r(x)])), unattributed: { opening: round2(unattributed.opening), used: round2(unattributed.used), remaining: round2(unattributed.remaining) } }
 }
 
 /** "Insufficient AdBlue inventory. Available stock: 5L" */
@@ -241,7 +294,7 @@ export function stockFor(rows: StockRow[], months?: string[]) {
 }
 
 /** A purchase's vendor: the vendor master id, or its saved name for a purchase not linked to one. */
-const purchaseVendor = (p: Purchase) => p.adblueVendorId || `name:${p.vendorName?.trim().toLowerCase() || "unknown"}`
+const purchaseVendor = (p: { adblueVendorId?: string | null; vendorName?: string }) => p.adblueVendorId || `name:${p.vendorName?.trim().toLowerCase() || "unknown"}`
 
 /** Per vendor (by vendor id, so a rename keeps one row): litres, amount and average ₹ per litre purchased. */
 export function vendorAnalytics(purchases: Purchase[]) {
@@ -310,6 +363,39 @@ export function adBlueTotals(purchases: Purchase[], entries: (Consumption & { am
     monthEnd: ledger.map((r) => ({ month: r.month, ...stock(valueInventory(purchases.filter(upTo(r.month)), draws.filter(upTo(r.month)))) })),
     direct: [...direct].sort().map(([month, r]) => ({ month, litres: round2(r.litres), cost: round2(r.cost), count: r.count })),
   }
+}
+
+export interface VendorPurchases {
+  key: string
+  vendor: string
+  purchases: number
+  litres: number
+  value: number
+}
+
+/**
+ * The AdBlue Overview's purchase summary for a period: bulk purchases (stock batches dated in it; value = taxable + GST,
+ * `purchaseValue`; opening stock is never a purchase) and direct vendor purchases (DIRECT entries dated in it, litres ×
+ * rate; every role reads every AdBlue entry), vendor-wise and never mixed. Only purchase records count — payments, advance and outstanding never do. Each
+ * section's total is the sum of its rows, and the overall total the sum of the two sections.
+ */
+type DirectPurchase = { date: string; quantityLitres: number; amount: number; source?: "STOCK" | "DIRECT"; adblueVendorId?: string | null; vendorName?: string }
+
+export function purchaseSummary<P extends Purchase, E extends DirectPurchase>(purchases: P[], entries: E[], inPeriod: (x: { date: string }) => boolean) {
+  const group = (rows: { key: string; vendor: string; count: number; litres: number; value: number }[]): VendorPurchases[] => {
+    const m = new Map<string, VendorPurchases>()
+    for (const r of rows) {
+      const v = m.get(r.key) ?? { key: r.key, vendor: r.vendor, purchases: 0, litres: 0, value: 0 }
+      m.set(r.key, { ...v, purchases: v.purchases + r.count, litres: v.litres + r.litres, value: v.value + r.value })
+    }
+    return [...m.values()].map((v) => ({ ...v, litres: round2(v.litres), value: round2(v.value) })).sort((a, b) => b.value - a.value || a.vendor.localeCompare(b.vendor))
+  }
+  const bulk = group(purchases.filter((p) => !p.opening && inPeriod(p)).map((p) => ({ key: purchaseVendor(p), vendor: p.vendorName?.trim() || "Unknown vendor", count: 1, litres: p.totalLitres, value: purchaseValue({ totalCost: p.totalCost, gstRate: p.gstRate ?? 0 }) })))
+  const direct = group(entries.filter((e) => isDirectAdBlue(e) && inPeriod(e)).map((e) => ({ key: purchaseVendor(e), vendor: e.vendorName?.trim() || "Unknown vendor", count: 1, litres: e.quantityLitres, value: e.amount })))
+  const total = (rows: VendorPurchases[]) => ({ litres: round2(rows.reduce((t, r) => t + r.litres, 0)), value: round2(rows.reduce((t, r) => t + r.value, 0)) })
+  const b = total(bulk)
+  const d = total(direct)
+  return { bulk, direct, totals: { bulk: b, direct: d, overall: { litres: round2(b.litres + d.litres), value: round2(b.value + d.value) } } }
 }
 
 /** A period's figures from the totals (months: the period's yyyy-MM list; undefined = all time). */

@@ -1,9 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import { endOfMonth, format, parseISO } from "date-fns"
-import Link from "next/link"
-import { IndianRupee, Landmark, Package, PackageMinus, PackagePlus, Plus, Store, Sigma, Wallet, WalletCards } from "lucide-react"
+import { IndianRupee, Package, PackageMinus, PackagePlus, Plus, Store } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -20,10 +18,9 @@ import { PageHeader } from "@/components/shared/page-header"
 import { AdBlueOpeningDialog } from "@/features/go-live/opening-dialogs"
 import { canChangeAdBluePurchases, hasOwnerAuthority } from "@/lib/permissions"
 import { StatsCard } from "@/components/shared/stats-card"
-import { inventoryLedger, isDirectAdBlue, purchasedIn, stockDraws, stockFor, totalsFor, valueInventory } from "@/domain/adblue-inventory"
+import { bulkStockUse, inventoryLedger, isDirectAdBlue, type VendorStockUse, purchaseSummary, stockDraws, stockFor, totalsFor, valueInventory, type VendorPurchases } from "@/domain/adblue-inventory"
 import { CreatableSelect } from "@/components/shared/creatable-select"
-import { AdBlueVendorsSection } from "./adblue-vendors"
-import { useAdBlueFinance, type AdBlueFinance } from "./adblue-data"
+import { useAdBlueFinance } from "./adblue-data"
 import { AdBluePaymentsPanel } from "./adblue-payments"
 import { TdsBreakdown } from "./adblue-payment-dialog"
 import { PurchaseDetailsDialog, PurchaseStatusBadge } from "./adblue-vendor-account"
@@ -35,12 +32,14 @@ import { canEditMonth } from "@/domain/month-lock"
 import { inEntryOrder } from "@/domain/payment-order"
 import { useAdBlueEntries, useAdBluePurchases, useAdBlueTotals, useAdBlueVehicles, useAdBlueVendors, useCreateAdBlueVendorByName, useDeleteAdBluePurchase, useMonthLocks, useSaveAdBluePurchase } from "@/lib/api/hooks"
 import { useCan, useRole } from "@/lib/app-state"
-import { formatDate, formatINR, formatNumber, monthKey, todayISO, formatLitres } from "@/lib/format"
-import type { AdBluePayment, AdBluePurchase, AdBlueVendor, Vehicle } from "@/lib/types"
+import { formatDate, formatINR, formatNumber, monthKey, todayISO, formatLitres, round2 } from "@/lib/format"
+import type { AdBlueEntry, AdBluePayment, AdBluePurchase, AdBlueVendor, Vehicle } from "@/lib/types"
 import { MonthLockControl, useDieselIndex } from "../diesel/parts"
 import { usePeriod } from "../diesel/period"
 
 const L = formatLitres
+/** The AdBlue page's tabs (owner, 24 Nov 2026: Vendor Accounts removed — each vendor's page stays, linked from Payments). */
+const TABS = ["overview", "purchases", "payments", "stock"]
 
 /**
  * AdBlue Inventory — physical stock in litres: bulk purchases in, vehicle AdBlue entries out.
@@ -73,7 +72,8 @@ export function AdBlueInventory() {
   // The tab shown (this browser only, kept while moving between pages).
   const [tab, setTab] = useState(() => {
     try {
-      return sessionStorage.getItem("vt:ui:adblueTab") || "overview"
+      const t = sessionStorage.getItem("vt:ui:adblueTab")
+      return t && TABS.includes(t) ? t : "overview" // a tab remembered from before (e.g. the removed Vendor Accounts) opens Overview
     } catch {
       return "overview"
     }
@@ -90,25 +90,20 @@ export function AdBlueInventory() {
   const d = useMemo(() => {
     if (!purchases.data || !entries.data || !totals.data) return null
     // Purchased − Consumed = Current Stock is asserted in npm run check:diesel — an internal check, never shown to users.
-    return { totals: totals.data, ledger: totals.data.ledger, all: inEntryOrder(entries.data), history: inEntryOrder(purchases.data), vendorStock: valueInventory(purchases.data, stockDraws(entries.data)).vendorStock }
+    return { totals: totals.data, all: inEntryOrder(entries.data), history: inEntryOrder(purchases.data) }
   }, [purchases.data, entries.data, totals.data])
 
   if (!can("adblue")) return <NoAccess what="AdBlue inventory" />
   if (!d || !f.ready) return <PageSkeleton />
-  const allBought = purchasedIn(purchases.data ?? [], () => true)
-  const m = stockFor(d.ledger, period.periodMonths)
-  // Money spent buying AdBlue in the period — only batches dated in it, never carry-forward or stock value.
-  const bought = purchasedIn(purchases.data ?? [], period.match)
+  // The Overview: vendor-wise bulk and direct purchases dated in the period (purchase records only, never payments).
+  const summary = purchaseSummary(purchases.data ?? [], d.all, period.match)
+  // Used / remaining of the period's bulk lots, as of today — from the FIFO valuation's own lots.
+  const bulkUse = bulkStockUse(purchases.data ?? [], stockDraws(d.all), period.match)
+  // Used in the period (company-wide totals by month): bulk draws from the stock ledger (FIFO) + direct purchases, each entry once.
+  const used = { bulk: stockFor(d.totals.ledger, period.periodMonths).consumed, direct: totalsFor(d.totals, period.periodMonths, null).directLitres }
   const p = period.label
-  // A period that ended before this month shows stock and value at its month end, never today's.
-  const lastMonth = period.periodMonths?.at(-1)
-  const endedMonth = lastMonth && lastMonth < monthKey(todayISO()) ? lastMonth : null
-  // Every card and the direct purchases table are company-wide, for every role (Tata Adblue too: owner, 12 Nov 2026).
-  const { stock, directCost, directLitres, directCount } = totalsFor(d.totals, period.periodMonths, endedMonth)
   const entriesInPeriod = d.all.filter(period.match)
-  const issued = { cost: m.consumedCost, litres: m.consumed }
   const regOf = (id: string) => idx?.vehicles.get(id)?.regNo ?? regs.data?.find((v) => v.id === id)?.regNo ?? "Unknown"
-  const asOf = endedMonth ? `As of ${format(endOfMonth(parseISO(`${endedMonth}-01`)), "d MMM yyyy")}` : "As of today"
   const open = (p: AdBluePurchase) => canEditMonth(role, p.date.slice(0, 7), todayISO(), locks.data ?? [])
   const mayEdit = canChangeAdBluePurchases(role, "edit")
   const mayDelete = canChangeAdBluePurchases(role, "delete")
@@ -140,28 +135,21 @@ export function AdBlueInventory() {
       />
 
       <section>
-        <h2 className="mb-2 text-sm font-semibold">AdBlue at a glance · all time</h2>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 2xl:grid-cols-6">
-          <StatsCard label="Total AdBlue Purchased" icon={PackagePlus} value={L(allBought.litres)} hint={`${allBought.purchases} bulk purchase${allBought.purchases === 1 ? "" : "s"}`} info="Σ litres of every bulk purchase recorded (opening stock is not a purchase)." />
-          <StatsCard label="Total AdBlue Available" icon={Package} value={L(d.totals.current.stockLitres)} hint={`As of today · worth ${formatINR(d.totals.current.stockValue)}`} info="Litres left after every vehicle refill (FIFO by vendor). Payments never change it." />
-          {f.canPay && (
-            <>
-              <StatsCard label="Total Purchase Value" icon={IndianRupee} value={formatINR(f.totals.purchased)} hint="Bulk purchases incl. GST" info="Σ value owed for every bulk purchase: taxable + GST. Not Inventory Value (stock still on hand at cost)." prominent />
-              <StatsCard label="Total Amount Paid" icon={Landmark} value={formatINR(f.totals.settled)} hint={f.totals.tds ? `${formatINR(f.totals.cashPaid)} paid + ${formatINR(f.totals.tds)} TDS` : "Payments to vendors"} info="Σ of what the payments to AdBlue vendors settle: the money paid plus any TDS deducted (counted once)." />
-              <StatsCard label="Total Outstanding Credit" icon={Wallet} value={formatINR(f.totals.outstanding)} hint="Still owed to vendors" info="Σ over purchases of (value − paid). Advance with a vendor is never subtracted — it is shown on its own." />
-              <StatsCard label="Total Advance Credit" icon={WalletCards} value={formatINR(f.totals.advance)} hint="Paid, not yet on a purchase" info="Σ of payments not allocated to any purchase — credit the vendors hold for later purchases." />
-            </>
-          )}
+        <h2 className="mb-2 text-sm font-semibold">Purchase summary · {p}</h2>
+        <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+          <StatsCard label="Total Quantity Purchased" icon={PackagePlus} value={L(summary.totals.overall.litres)} hint={`Bulk + Direct · ${p}`} info="Σ litres of bulk purchases and direct vendor purchases dated in the period. Opening stock, payments and advances are never purchases." />
+          <StatsCard label="Total Purchase Value" icon={IndianRupee} value={formatINR(summary.totals.overall.value)} hint={`Bulk + Direct · ${p}`} info="Bulk: taxable + GST of each purchase. Direct: litres × the recorded rate. Payments, advances and outstanding balances never change it." />
+          <StatsCard label="Total AdBlue Used" icon={PackageMinus} value={L(round2(used.bulk + used.direct))} hint={`${p} · Bulk ${L(used.bulk)} + Direct ${L(used.direct)}`} info="Litres vehicles received in the period: drawn from bulk stock (FIFO) plus bought directly from a vendor. A direct purchase is never a bulk draw, so each entry counts once." />
+          <StatsCard label="Total Bulk Stock Remaining" icon={Package} value={L(d.totals.current.stockLitres)} hint="As of today · not filtered by period" info="Litres in bulk storage today: every vendor's stock plus opening / unattributed stock (FIFO valuation). Direct vendor purchases never enter bulk storage. The period filter doesn't change it." />
         </div>
       </section>
 
       <Tabs value={tab} onValueChange={pickTab} className="gap-4">
         <TabsList className="max-w-full justify-start overflow-x-auto">
-          <TabsTrigger value="overview">Inventory Overview</TabsTrigger>
-          <TabsTrigger value="vendors">Vendor Accounts</TabsTrigger>
+          <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="purchases">Purchase History</TabsTrigger>
           {f.canPay && <TabsTrigger value="payments">Payments</TabsTrigger>}
-          <TabsTrigger value="stock">Stock History</TabsTrigger>
+          <TabsTrigger value="stock">Stock Usage</TabsTrigger>
         </TabsList>
         {tab !== "payments" && tab !== "purchases" && (
           <div className="flex flex-wrap items-center gap-3">
@@ -171,87 +159,18 @@ export function AdBlueInventory() {
         )}
 
         <TabsContent value="overview" className="mt-0 space-y-5">
-          <section>
-            <h2 className="mb-2 text-sm font-semibold">{endedMonth ? `Inventory at month end · ${p}` : "Current inventory"}</h2>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <StatsCard
-                label={endedMonth ? "Closing Stock" : "Current Stock"}
-                icon={Package}
-                value={L(stock.stockLitres)}
-                hint={asOf}
-                info={endedMonth ? "Σ litres purchased − Σ litres drawn by vehicles, up to the period's month end." : "Σ litres purchased − Σ litres drawn by vehicles, all time."}
-              />
-              <StatsCard
-                label="Inventory Value"
-                icon={IndianRupee}
-                value={formatINR(stock.stockValue)}
-                hint={`${asOf}${stock.avgRate ? ` · Average ${formatINR(stock.avgRate)} / L` : " · No stock"}`}
-                info="The stock still on hand, at the purchase rate of the batches it is left from (each vendor's batches are used oldest first). For a past period, the value at its month end."
-              />
-            </div>
-          </section>
-
-          <section>
-            <h2 className="mb-2 text-sm font-semibold">AdBlue purchased · {p}</h2>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <StatsCard
-                label="AdBlue Purchased"
-                icon={IndianRupee}
-                value={formatINR(bought.cost)}
-                hint={`${p} · ${bought.purchases} purchase${bought.purchases === 1 ? "" : "s"}`}
-                info="Σ Total Purchase Cost of AdBlue batches dated in the period. Stock carried forward and the value of stock already held are never included — that is Inventory Value."
-              />
-              <StatsCard label="AdBlue Litres Purchased" icon={PackagePlus} value={L(bought.litres)} hint={p} info="Σ Total Litres of AdBlue batches dated in the period — carry-forward stock excluded." />
-              <StatsCard label="Average Purchase Rate" icon={IndianRupee} value={bought.avgRate ? `${formatINR(bought.avgRate)} / L` : "—"} hint={p} info="AdBlue Purchased ÷ AdBlue Litres Purchased, for batches in the period." />
-              <StatsCard label="Vendors Bought From" icon={Package} value={bought.vendors} hint={p} info="Distinct vendors of the AdBlue batches dated in the period." />
-            </div>
-          </section>
-
-          <section>
-            <h2 className="mb-2 text-sm font-semibold">Stock movement · {p}</h2>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <StatsCard
-                label="Opening Stock"
-                icon={Package}
-                value={L(m.opening + m.openingStock)}
-                hint={m.openingStock ? `Opening stock recorded · ${p}` : m.carriedFrom && m.opening ? `Carried forward from ${format(parseISO(`${m.carriedFrom}-01`), "MMMM yyyy")}` : p}
-                info="Closing stock before the period (carried forward), plus any opening stock recorded in it. Never a purchase."
-              />
-              <StatsCard label="Purchased (in)" icon={PackagePlus} value={L(m.purchased)} hint={p} info="Litres of AdBlue batches dated in the period." />
-              <StatsCard label="Consumed (out)" icon={PackageMinus} value={L(m.consumed)} hint={`${formatINR(m.consumedCost)} at purchase cost`} info="Σ litres of vehicle AdBlue entries dated in the period, each at the purchase rate of the vendor's batches it used (oldest first)." />
-              <StatsCard label="Closing Stock" icon={Package} value={L(m.closing)} hint="Carries into the next period" info={`Opening ${L(m.opening + m.openingStock)} + Purchased ${L(m.purchased)} − Consumed ${L(m.consumed)} = ${L(m.closing)}.`} />
-            </div>
-          </section>
-
-          <section>
-            <h2 className="mb-2 text-sm font-semibold">Direct vendor purchases & total AdBlue expense · {p}</h2>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <StatsCard label="Direct Vendor Purchases" icon={Store} value={formatINR(directCost)} hint={`${p} · ${directCount} purchase${directCount === 1 ? "" : "s"}`} info="Σ amount (litres × rate) of AdBlue bought from a vendor straight into a vehicle, dated in the period. Never part of bulk stock or bulk purchases." />
-              <StatsCard label="Direct Litres" icon={PackagePlus} value={L(directLitres)} hint={p} info="Σ litres of direct vendor purchases dated in the period. Not in bulk stock." />
-              <StatsCard label="Bulk Issued to Vehicles" icon={PackageMinus} value={formatINR(issued.cost)} hint={`${L(issued.litres)} at purchase cost`} info="Σ bulk-stock draws by vehicles dated in the period, each at the purchase rate of the vendor's batches it used (oldest first)." />
-              <StatsCard
-                label="Total AdBlue Expense"
-                icon={Sigma}
-                value={formatINR(issued.cost + directCost)}
-                hint={`${L(issued.litres + directLitres)} used`}
-                info="Bulk issued to vehicles (at purchase cost) + direct vendor purchases. Bulk purchases are stock, not expense, so they're not added again — nothing is counted twice."
-              />
-            </div>
-          </section>
-        </TabsContent>
-
-        <TabsContent value="vendors" className="mt-0 space-y-5">
-          {f.canPay && <VendorAccountsTable f={f} stockOf={(id) => d.vendorStock.get(id)?.litres ?? 0} />}
-          <AdBlueVendorsSection
-            vendors={vendors.data ?? []}
-            purchases={purchases.data ?? []}
-            entries={entries.data ?? []}
-            months={period.periodMonths}
-            endedMonth={endedMonth}
-            periodLabel={p}
-            regOf={regOf}
-            mayManage={mayManageVendors}
+          <VendorPurchasesTable
+            title="Bulk purchases by vendor"
+            rows={[
+              ...summary.bulk.map((r) => ({ ...r, ...(bulkUse.byVendor.get(r.key) ?? { used: 0, remaining: 0, moved: 0 }) })),
+              ...(bulkUse.unattributed.opening || bulkUse.unattributed.used || bulkUse.unattributed.remaining ? [{ key: UNATTRIBUTED, vendor: "Unattributed / Opening stock", purchases: 0, litres: 0, value: 0, used: bulkUse.unattributed.used, remaining: bulkUse.unattributed.remaining, moved: 0, opening: bulkUse.unattributed.opening }] : []),
+            ]}
+            total={summary.totals.bulk}
+            empty="No bulk purchases in this period."
+            note="Used and Remaining Stock: of the lots bought in this period, as of today (each vendor's oldest lot is used first). Opening stock and stock whose vendor is unknown are never a vendor's."
           />
+          {/* A direct purchase is one record of litres delivered into a vehicle: all used, nothing enters bulk stock. */}
+          <VendorPurchasesTable title="Direct purchases by vendor" rows={summary.direct.map((r) => ({ ...r, used: r.litres, remaining: 0, moved: 0 }))} total={summary.totals.direct} empty="No direct vendor purchases in this period." />
         </TabsContent>
 
         <TabsContent value="purchases" className="mt-0">
@@ -316,63 +235,24 @@ export function AdBlueInventory() {
         )}
 
         <TabsContent value="stock" className="mt-0 space-y-5">
-          <section>
-            <h2 className="mb-2 text-sm font-semibold">AdBlue added to vehicles · {p}</h2>
-            <DataTable
-              data={entriesInPeriod}
-              getRowId={(e) => e.id}
-              dense
-              pageSize={15}
-              emptyMessage="No AdBlue added to vehicles in this period."
-              columns={[
-                { id: "d", header: "Date", cell: (e) => <span className="num">{formatDate(e.date)}</span> },
-                { id: "v", header: "Vehicle", cell: (e) => <span className="font-medium">{regOf(e.vehicleId)}</span> },
-                { id: "src", header: "Source", hideOnMobile: true, cell: (e) => <span className="text-xs text-muted-foreground">{isDirectAdBlue(e) ? "Direct purchase" : "Bulk stock"}</span> },
-                { id: "vendor", header: "Source Vendor", cell: (e) => <span className={e.adblueVendorId || isDirectAdBlue(e) ? "" : "text-muted-foreground"}>{e.sourceVendor || "—"}</span> },
-                { id: "l", header: "Litres", align: "right", cell: (e) => <span className="num">{L(e.quantityLitres)}</span> },
-                { id: "r", header: "Rate / L", align: "right", cell: (e) => <span className="num">{e.costRate ? formatINR(e.costRate) : "—"}</span> },
-                { id: "a", header: "Total", align: "right", cell: (e) => <span className="num font-medium">{formatINR(e.amount)}</span> },
-                { id: "pm", header: "Paid", hideOnMobile: true, cell: (e) => <span className="text-xs text-muted-foreground">{e.paymentMode ?? "—"}</span> },
-                { id: "notes", header: "Notes", hideOnMobile: true, cell: (e) => <span className="text-xs text-muted-foreground">{[e.invoiceNo, e.notes].filter(Boolean).join(" · ") || "—"}</span> },
-              ]}
-            />
-            <p className="mt-1 text-xs text-muted-foreground">Bulk stock is costed at the purchase rate of the vendor&apos;s batches used (oldest first). Edit or delete an entry on the vehicle&apos;s AdBlue tab.</p>
-          </section>
-
-          <section>
-            <h2 className="mb-2 text-sm font-semibold">Monthly AdBlue ledger · each closing carries forward</h2>
-            <DataTable
-              data={[...d.ledger].reverse()}
-              getRowId={(r) => r.month}
-              dense
-              pageSize={24}
-              emptyMessage="No AdBlue purchased or consumed yet."
-              columns={[
-                { id: "m", header: "Month", cell: (r) => <span className={period.periodMonths?.includes(r.month) ? "font-semibold" : ""}>{monthLabel(r.month)}</span> },
-                {
-                  id: "open",
-                  header: "Opening Stock",
-                  align: "right",
-                  cell: (r) => {
-                    const prev = d.ledger[d.ledger.indexOf(r) - 1]
-                    return (
-                      <div className="flex flex-col items-end">
-                        <span className="num">{L(r.opening + r.openingStock)}</span>
-                        {r.openingStock > 0 ? (
-                          <span className="text-xs text-muted-foreground">Opening stock</span>
-                        ) : (
-                          prev && r.opening > 0 && <span className="text-xs text-muted-foreground">Carried forward from {format(parseISO(`${prev.month}-01`), "MMMM")}</span>
-                        )}
-                      </div>
-                    )
-                  },
-                },
-                { id: "in", header: "Purchased", align: "right", cell: (r) => <span className="num">{L(r.purchased)}</span> },
-                { id: "out", header: "Consumed", align: "right", cell: (r) => <span className="num">{L(r.consumed)}</span> },
-                { id: "close", header: "Closing Stock", align: "right", cell: (r) => <span className="num font-semibold">{L(r.closing)}</span> },
-              ]}
-            />
-          </section>
+          <UsageTable
+            title="Bulk Stock Usage"
+            description="AdBlue issued from bulk inventory to vehicles."
+            vendorHeader="Source Vendor"
+            rows={entriesInPeriod.filter((e) => !isDirectAdBlue(e))}
+            regOf={regOf}
+            empty="No AdBlue issued from bulk stock in this period."
+            note="Cost = the purchase rate of the source vendor's batches used, oldest first; a draw across two batches shows their combined rate per litre."
+          />
+          <UsageTable
+            title="Direct Vendor Usage"
+            description="AdBlue purchased directly from a vendor for a vehicle, without entering bulk storage."
+            vendorHeader="Vendor"
+            rows={entriesInPeriod.filter(isDirectAdBlue)}
+            regOf={regOf}
+            empty="No direct vendor purchases for vehicles in this period."
+            note="Cost = litres × the recorded rate. Edit or delete any entry on the vehicle's AdBlue tab."
+          />
         </TabsContent>
       </Tabs>
 
@@ -406,53 +286,6 @@ export function AdBlueInventory() {
         />
       )}
     </div>
-  )
-}
-
-/**
- * AdBlue → Vendor Accounts (owner, 18 Nov 2026): every vendor with its whole history — purchased (incl. GST), paid
- * (settled), outstanding credit and advance credit (never netted), stock left in its batches and litres bought. Archived
- * vendors stay listed when they have history. A row opens the vendor's account.
- */
-function VendorAccountsTable({ f, stockOf }: { f: AdBlueFinance; stockOf: (vendorId: string) => number }) {
-  const rows = f.vendors
-    .filter((v) => v.status === "ACTIVE" || f.accounts.some((a) => a.vendorId === v.id) || stockOf(v.id) > 0)
-    .map((v) => ({ v, a: f.accounts.find((x) => x.vendorId === v.id) ?? { purchased: 0, settled: 0, outstanding: 0, advance: 0, litres: 0, tds: 0, cashPaid: 0 }, stock: stockOf(v.id) }))
-    .sort((x, y) => y.a.outstanding - x.a.outstanding || x.v.name.localeCompare(y.v.name))
-  const t = f.totals
-  return (
-    <section>
-      <h2 className="mb-2 text-sm font-semibold">AdBlue Vendor Accounts · all history</h2>
-      <DataTable
-        data={rows}
-        getRowId={(r) => r.v.id}
-        showFooter
-        cardsBelow="xl"
-        emptyMessage="No AdBlue vendors yet."
-        mobileColumns={["purchased", "paid", "out", "adv"]}
-        columns={[
-          {
-            id: "vendor",
-            header: "Vendor",
-            sortValue: (r) => r.v.name,
-            cell: (r) => (
-              <Link href={`/adblue/vendors/${r.v.id}`} className="font-medium underline-offset-2 hover:underline">
-                {r.v.name}
-                {r.v.status === "ARCHIVED" && <span className="ml-1.5 text-xs font-normal text-muted-foreground">(archived)</span>}
-              </Link>
-            ),
-            footer: "Total",
-          },
-          { id: "purchased", header: "Total Purchased", align: "right", sortValue: (r) => r.a.purchased, cell: (r) => <span className="num">{formatINR(r.a.purchased)}</span>, footer: <span className="num">{formatINR(t.purchased)}</span> },
-          { id: "paid", header: "Total Paid", align: "right", sortValue: (r) => r.a.settled, cell: (r) => <span className="num">{formatINR(r.a.settled)}</span>, footer: <span className="num">{formatINR(t.settled)}</span> },
-          { id: "out", header: "Outstanding Credit", align: "right", sortValue: (r) => r.a.outstanding, cell: (r) => <span className={r.a.outstanding > 0 ? "num font-medium text-rose-700 dark:text-rose-400" : "num"}>{formatINR(r.a.outstanding)}</span>, footer: <span className="num">{formatINR(t.outstanding)}</span> },
-          { id: "adv", header: "Advance Credit", align: "right", sortValue: (r) => r.a.advance, cell: (r) => <span className={r.a.advance > 0 ? "num text-sky-700 dark:text-sky-400" : "num"}>{formatINR(r.a.advance)}</span>, footer: <span className="num">{formatINR(t.advance)}</span> },
-          { id: "stock", header: "Available Stock", align: "right", sortValue: (r) => r.stock, cell: (r) => <span className="num">{L(r.stock)}</span> },
-          { id: "litres", header: "Litres Purchased", align: "right", sortValue: (r) => r.a.litres, cell: (r) => <span className="num">{L(r.a.litres)}</span> },
-        ]}
-      />
-      <p className="mt-1 text-xs text-muted-foreground">Outstanding and advance are shown separately for each vendor — never netted. Open a vendor to add a payment, apply advance or see its ledger.</p>
-    </section>
   )
 }
 
@@ -709,5 +542,84 @@ export function AdBlueDashboardCards() {
       <StatsCard label="AdBlue Inventory Value" icon={IndianRupee} value={formatINR(d.v.stockValue)} hint={d.v.avgRate ? `Avg ${formatINR(d.v.avgRate)} / L` : "No stock"} href="/adblue" />
       <StatsCard label="AdBlue This Month" icon={PackageMinus} value={L(d.m.consumed)} hint={`Consumed · ${formatINR(d.m.consumedCost)}`} href="/adblue" />
     </>
+  )
+}
+
+const UNATTRIBUTED = "unattributed"
+type VendorRow = VendorPurchases & VendorStockUse & { opening?: number }
+
+/**
+ * One purchase type, vendor-wise (highest value first), with a Total row: litres purchased, used, remaining and value.
+ * Bulk: an "Unattributed / Opening stock" row (never a purchase: no count, litres or value of its own) holds opening stock
+ * and stock whose vendor is unknown, so vendors + unattributed = the stock of the period's lots.
+ */
+function VendorPurchasesTable({ title, rows, total, empty, note }: { title: string; rows: VendorRow[]; total: { litres: number; value: number }; empty: string; note?: string }) {
+  const sum = (f: (r: VendorRow) => number) => round2(rows.reduce((t, r) => t + f(r), 0))
+  const dash = <span className="text-muted-foreground">—</span>
+  return (
+    <section>
+      <h2 className="mb-2 text-sm font-semibold">{title}</h2>
+      <DataTable
+        data={rows}
+        getRowId={(r) => r.key}
+        dense
+        showFooter
+        initialSort={{ id: "v", desc: true }}
+        emptyMessage={empty}
+        columns={[
+          {
+            id: "vendor",
+            header: "Vendor",
+            sortValue: (r) => r.vendor,
+            cell: (r) => (
+              <span>
+                <span className={r.key === UNATTRIBUTED ? "font-medium text-muted-foreground" : "font-medium"}>{r.vendor}</span>
+                {r.key === UNATTRIBUTED && <span className="block text-xs text-muted-foreground">Not a purchase · no vendor recorded</span>}
+                {r.moved > 0 && <span className="block text-xs text-muted-foreground">{L(r.moved)} became unattributed (an old draw&apos;s vendor is unknown)</span>}
+              </span>
+            ),
+            footer: "Total",
+          },
+          { id: "n", header: "Purchases", align: "right", sortValue: (r) => r.purchases, cell: (r) => (r.key === UNATTRIBUTED ? dash : <span className="num">{formatNumber(r.purchases)}</span>), footer: formatNumber(rows.reduce((t, r) => t + r.purchases, 0)) },
+          { id: "l", header: "Litres Purchased", align: "right", sortValue: (r) => r.litres, cell: (r) => (r.key === UNATTRIBUTED ? (r.opening ? <span className="num text-muted-foreground">Opening {L(r.opening)}</span> : dash) : <span className="num">{L(r.litres)}</span>), footer: L(total.litres) },
+          { id: "u", header: "Used", align: "right", sortValue: (r) => r.used, cell: (r) => <span className="num">{L(r.used)}</span>, footer: L(sum((r) => r.used)) },
+          { id: "r", header: "Remaining Stock", align: "right", sortValue: (r) => r.remaining, cell: (r) => <span className="num">{L(r.remaining)}</span>, footer: L(sum((r) => r.remaining)) },
+          { id: "v", header: "Purchase Value", align: "right", sortValue: (r) => r.value, cell: (r) => (r.key === UNATTRIBUTED ? dash : <span className="num font-medium">{formatINR(r.value)}</span>), footer: formatINR(total.value) },
+        ]}
+      />
+      {note && <p className="mt-1 text-xs text-muted-foreground">{note}</p>}
+    </section>
+  )
+}
+
+/**
+ * Stock Usage (owner, 24 Nov 2026): one row per vehicle AdBlue entry, as the API values it — bulk draws at their FIFO
+ * cost (`amount`, `sourceVendor`, `costRate` = cost ÷ litres), direct purchases at litres × their recorded rate. Newest
+ * first; the Total row is the sum of the rows shown.
+ */
+function UsageTable({ title, description, vendorHeader, rows, regOf, empty, note }: { title: string; description: string; vendorHeader: string; rows: AdBlueEntry[]; regOf: (vehicleId: string) => string; empty: string; note: string }) {
+  return (
+    <section>
+      <h2 className="text-sm font-semibold">{title}</h2>
+      <p className="mb-2 text-xs text-muted-foreground">{description}</p>
+      <DataTable
+        data={rows}
+        getRowId={(e) => e.id}
+        dense
+        showFooter
+        pageSize={25}
+        initialSort={{ id: "d", desc: true }}
+        emptyMessage={empty}
+        columns={[
+          { id: "d", header: "Date", sortValue: (e) => e.date, cell: (e) => <span className="num">{formatDate(e.date)}</span>, footer: "Total" },
+          { id: "v", header: "Vehicle", sortValue: (e) => regOf(e.vehicleId), cell: (e) => <span className="font-medium">{regOf(e.vehicleId)}</span> },
+          { id: "vendor", header: vendorHeader, sortValue: (e) => e.sourceVendor ?? "", cell: (e) => <span className={e.adblueVendorId || isDirectAdBlue(e) ? "" : "text-muted-foreground"}>{e.sourceVendor || "—"}</span> },
+          { id: "l", header: "Litres", align: "right", sortValue: (e) => e.quantityLitres, cell: (e) => <span className="num">{L(e.quantityLitres)}</span>, footer: L(round2(rows.reduce((t, e) => t + e.quantityLitres, 0))) },
+          { id: "r", header: "Rate / L", align: "right", sortValue: (e) => e.costRate ?? 0, cell: (e) => <span className="num">{e.costRate ? formatINR(e.costRate) : "—"}</span> },
+          { id: "a", header: "Total Cost", align: "right", sortValue: (e) => e.amount, cell: (e) => <span className="num font-medium">{formatINR(e.amount)}</span>, footer: formatINR(round2(rows.reduce((t, e) => t + e.amount, 0))) },
+        ]}
+      />
+      <p className="mt-1 text-xs text-muted-foreground">{note}</p>
+    </section>
   )
 }

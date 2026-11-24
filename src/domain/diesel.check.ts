@@ -13,7 +13,9 @@ import { fillAmount, insufficientTankerMessage, loadsAsStationPurchases, tankerL
 import { fyMonths, fyName, fyRange, fyStartYear, inFY, fyLabel } from "./financial-year"
 import { FUEL_TDS_PERCENT, tdsDate, tdsDue } from "./station-ledger"
 import { isDirectAdBlue, stockDraws } from "./adblue-inventory"
-import { adBlueShortfallMessage, insufficientMessage, insufficientVendorMessage, inventoryLedger, NO_VENDOR, purchasedIn, stockFor, valueInventory, vendorAnalytics, vendorLedger } from "./adblue-inventory"
+import { adBlueTotals, purchaseSummary, totalsFor } from "./adblue-inventory"
+import { bulkStockUse, type VendorStockUse } from "./adblue-inventory"
+import { adBlueShortfallMessage, insufficientMessage, insufficientVendorMessage, inventoryLedger, NO_VENDOR, purchasedIn, stockFor, valueInventory, vendorAnalytics, vendorKey, vendorLedger } from "./adblue-inventory"
 import { inPeriod } from "./consumables"
 import { adBlueStats, withRuns } from "./adblue"
 import { asOfMonth, historyOf, statusOn, withStatus } from "./status-history"
@@ -432,6 +434,96 @@ assert.deepEqual(inEntryOrder([{ id: "pay_000a", date: "2026-09-12", createdAt: 
   // Paise: three 1 L draws from a 3 L batch worth ₹100 cost 33.33 + 33.34 + 33.33 — the batch's value is used exactly.
   const p = valueInventory([lot("x", "2026-11-01", 3, 100 / 3, "A")].map((l) => ({ ...l, totalCost: 100 })), [take("1", "2026-11-02", 1, "A"), take("2", "2026-11-03", 1, "A"), take("3", "2026-11-04", 1, "A")])
   assert.deepEqual(["1", "2", "3"].map((id) => p.costOf.get(id)), [33.33, 33.34, 33.33])
+
+  // The Overview's vendor table: Used / Remaining per vendor, summed from valueInventory's own lots (owner, 24 Nov 2026).
+  const stockUse = (ps: Parameters<typeof valueInventory>[0], ds: Parameters<typeof valueInventory>[1], inPeriod: (x: { date: string }) => boolean = () => true) => {
+    const u = bulkStockUse(ps, ds, inPeriod)
+    const v = valueInventory(ps, ds)
+    for (const [k, x] of u.byVendor) {
+      const bought = round2(ps.filter((x) => inPeriod(x) && x.adblueVendorId === k).reduce((t, x) => t + x.totalLitres, 0))
+      assert.equal(round2(x.used + x.remaining + x.moved), bought, `${k}: Purchased = Used + Remaining (+ became unattributed)`)
+      assert.ok(x.used >= 0 && x.remaining >= 0, "never negative")
+    }
+    const all = [...u.byVendor.values()]
+    const opening = round2(ps.filter((x) => inPeriod(x) && x.opening).reduce((t, x) => t + x.totalLitres, 0))
+    const sum = (f: (x: VendorStockUse) => number) => round2(all.reduce((t, x) => t + f(x), 0))
+    assert.equal(round2(sum((x) => x.used) + u.unattributed.used + sum((x) => x.remaining) + u.unattributed.remaining), round2(ps.filter(inPeriod).reduce((t, x) => t + x.totalLitres, 0)), "every litre of the period's lots once")
+    assert.equal(u.unattributed.opening, opening)
+    if (ps.every(inPeriod)) {
+      assert.equal(round2(sum((x) => x.remaining) + u.unattributed.remaining), v.stockLitres, "all time: vendors + unattributed = bulk stock")
+      for (const [k, x] of u.byVendor) assert.equal(x.remaining, v.vendorStock.get(k)?.litres ?? 0, `${k}: remaining = its stock`)
+      assert.equal(u.unattributed.remaining, v.vendorStock.get(NO_VENDOR)?.litres ?? 0, "unattributed remaining = unattributed stock")
+      assert.equal(round2(sum((x) => x.used) + u.unattributed.used), round2(ds.reduce((t, x) => t + x.quantityLitres, 0)), "used = every draw")
+    }
+    return Object.fromEntries([...[...u.byVendor].map(([k, x]) => [k, [x.used, x.remaining, x.moved]]), ["-", [u.unattributed.opening, u.unattributed.used, u.unattributed.remaining]]])
+  }
+  assert.deepEqual(stockUse(buys, []), { A: [0, 300, 0], B: [0, 500, 0], "-": [0, 0, 0] }, "nothing drawn yet")
+  assert.deepEqual(stockUse(buys, [take("r1", "2026-11-05", 150, "A"), take("r3", "2026-11-07", 80, "B")]), { A: [150, 150, 0], B: [80, 420, 0], "-": [0, 0, 0] }, "A's two lots summed; B on its own")
+  // A period with only A's second lot (3 Nov): the 150 L draw took 100 L from the first lot, 50 L from this one.
+  assert.deepEqual(stockUse(buys, [take("r1", "2026-11-05", 150, "A")], (x) => x.date === "2026-11-03"), { A: [50, 150, 0], "-": [0, 0, 0] }, "only the period's lots")
+  assert.deepEqual(stockUse([{ ...lot("o", "2026-10-31", 10, 40, null), opening: true }, ...buys], [take("r1", "2026-11-05", 150, "A"), take("r5", "2026-11-08", 4, null)]), { A: [150, 150, 0], B: [0, 500, 0], "-": [10, 4, 6] }, "opening stock: unattributed, never a vendor's")
+  // An old draw while A and B held stock: their stock became unattributed — never a vendor's again.
+  assert.deepEqual(stockUse(ab, [oldDraw("h1", "2026-11-03", 300)]), { A: [0, 0, 1000], B: [0, 0, 500], "-": [0, 300, 1200] })
+  stockUse(later, [oldDraw("h1", "2026-11-03", 300), take("n2", "2026-11-11", 100, "A")])
+  stockUse([{ ...lot("o", "2026-10-31", 10, 40, null), opening: true }, ...buys], [take("r1", "2026-11-05", 150, "A"), take("r3", "2026-11-07", 80, "B"), oldDraw("old", "2026-10-31", 5), take("r5", "2026-11-08", 5, null)])
+
+  // Monthly carry-forward (owner, 25 Nov 2026): nothing is stored at a month end — each month end is the same FIFO run cut
+  // at its last day, so every lot keeps its id, vendor and rate into the next month. Returns each month's vendor table.
+  const carry = (ps: Parameters<typeof valueInventory>[0], ds: Parameters<typeof valueInventory>[1], months: string[], keys: string[]) => {
+    const full = valueInventory(ps, ds)
+    const end = (m: string) => `${m}-31`
+    const cut = (m: string) => valueInventory(ps.filter((x) => x.date <= end(m)), ds.filter((x) => x.date <= end(m)))
+    const ledgers = new Map(keys.map((k) => [k, vendorLedger(ps, ds, k, months.at(-1))]))
+    const tables: Record<string, Record<string, number[]>> = {}
+    let open = new Map<string, { vendor: string; litres: number }>()
+    for (const m of months) {
+      const c = cut(m)
+      assert.deepEqual(full.takes.filter((t) => t.date <= end(m)), c.takes, `${m}: later entries never change an earlier month`)
+      const close = new Map(c.lots.map((l) => [l.purchaseId, l]))
+      for (const id of open.keys()) assert.ok(close.has(id), `${m} ${id}: a lot is never dropped at a month end`)
+      for (const [id, l] of close) {
+        const p = ps.find((x) => x.id === id)!
+        const used = round2(full.takes.filter((t) => t.purchaseId === id && t.date.slice(0, 7) === m).reduce((t, x) => t + x.litres, 0))
+        assert.equal(round2((open.get(id)?.litres ?? 0) + (p.date.slice(0, 7) === m ? p.totalLitres : 0) - used), l.litres, `${m} ${id}: closing = opening + purchased − used`)
+        const moved = full.moves.some((x) => x.purchaseId === id && x.date <= end(m))
+        assert.equal(l.vendor, moved ? NO_VENDOR : vendorKey(p), `${m} ${id}: keeps its vendor (unattributed only once moved)`)
+        if (l.litres > 1e-9) assert.ok(Math.abs(l.value - (p.totalCost * l.litres) / p.totalLitres) <= 0.02, `${m} ${id}: keeps its purchase rate`)
+      }
+      tables[m] = {}
+      for (const k of keys) {
+        const s = stockFor(ledgers.get(k)!, [m])
+        const lotsLeft = round2(c.lots.filter((l) => l.vendor === k).reduce((t, l) => t + l.litres, 0))
+        assert.equal(s.closing, lotsLeft, `${m} ${k || "unattributed"}: closing = its lots left`)
+        tables[m][k || "-"] = [s.opening, round2(s.openingStock + s.purchased), s.consumed, s.closing]
+      }
+      const vendorsClosing = round2(keys.reduce((t, k) => t + stockFor(ledgers.get(k)!, [m]).closing, 0))
+      assert.equal(vendorsClosing, c.stockLitres, `${m}: Σ vendors + unattributed = physical bulk stock`)
+      const company = stockFor(inventoryLedger(ps, ds, months.at(-1)), [m])
+      assert.equal(company.closing, c.stockLitres)
+      assert.equal(company.purchased, purchasedIn(ps, (x) => x.date.slice(0, 7) === m).litres, `${m}: carry-forward is never a purchase`)
+      open = new Map(c.lots.map((l) => [l.purchaseId, l]))
+    }
+    for (const k of keys) for (let i = 1; i < months.length; i++) assert.equal(tables[months[i]][k || "-"][0], tables[months[i - 1]][k || "-"][3], `${k || "unattributed"}: ${months[i]} opening = ${months[i - 1]} closing`)
+    return tables
+  }
+  // Rajaram (R): two lots; Popular (P): one; opening stock 200 L (unattributed). A Nov draw spans R's two lots and two months' stock.
+  const cfBuys = [{ ...lot("o", "2026-09-30", 200, 40, null), opening: true }, lot("R1", "2026-10-01", 1000, 45, "R"), lot("P1", "2026-10-05", 800, 46, "P"), lot("R2", "2026-10-20", 500, 48, "R"), lot("R3", "2026-11-15", 300, 50, "R")]
+  const cfDraws = [take("d1", "2026-10-10", 600, "R"), take("d2", "2026-11-03", 700, "R"), take("d3", "2026-11-04", 200, "P"), take("d4", "2026-11-06", 50, null), take("d5", "2026-12-02", 100, "P")]
+  const cf = carry(cfBuys, cfDraws, ["2026-09", "2026-10", "2026-11", "2026-12"], ["R", "P", NO_VENDOR])
+  // Vendor | Opening | Purchased | Used | Closing
+  assert.deepEqual(cf["2026-10"], { R: [0, 1500, 600, 900], P: [0, 800, 0, 800], "-": [200, 0, 0, 200] }, "October")
+  assert.deepEqual(cf["2026-11"], { R: [900, 300, 700, 500], P: [800, 0, 200, 600], "-": [200, 0, 50, 150] }, "November: each vendor carried on its own")
+  assert.deepEqual(cf["2026-12"], { R: [500, 0, 0, 500], P: [600, 0, 100, 500], "-": [150, 0, 0, 150] }, "December: no purchase, carried stock only")
+  const nov = valueInventory(cfBuys.filter((x) => x.date <= "2026-11-31"), cfDraws.filter((x) => x.date <= "2026-11-31"))
+  assert.deepEqual(nov.lots.map((l) => [l.purchaseId, l.vendor, l.litres]), [["o", NO_VENDOR, 150], ["R1", "R", 0], ["P1", "P", 600], ["R2", "R", 200], ["R3", "R", 300]], "R's lots stay separate")
+  assert.deepEqual(valueInventory(cfBuys, cfDraws).takes.filter((t) => t.consumptionId === "d2").map((t) => [t.purchaseId, t.litres]), [["R1", 400], ["R2", 300]], "700 L in November: R1's last 400 L (carried from October), then 300 L of R2")
+  // The owner's example as recorded: a draw names its vendor, so 1,200 L from Rajaram (1,000 L) is refused, never taken from Popular.
+  assert.deepEqual(valueInventory([lot("A", "2026-10-01", 1000, 45, "R"), lot("B", "2026-10-02", 800, 46, "P")], [take("x", "2026-10-03", 1200, "R")]).shortfall?.available, 1000)
+  // An old draw (before vendor tracking) while both held stock: from then on that stock is unattributed, month after month.
+  const mv = carry([lot("A1", "2026-10-01", 1000, 45, "A"), lot("B1", "2026-10-02", 500, 48, "B"), lot("A2", "2026-12-01", 100, 50, "A")], [oldDraw("h1", "2026-11-03", 300), take("n1", "2026-12-05", 100, "A")], ["2026-10", "2026-11", "2026-12"], ["A", "B", NO_VENDOR])
+  assert.deepEqual(mv["2026-11"], { A: [1000, 0, 0, 0], B: [500, 0, 0, 0], "-": [0, 0, 300, 1200] }, "the relabelled 1,500 L leave A and B (Used 0) and arrive unattributed")
+  assert.deepEqual(mv["2026-12"], { A: [0, 100, 100, 0], B: [0, 0, 0, 0], "-": [1200, 0, 0, 1200] })
+
   assert.equal(p.stockValue, 0)
 }
 
@@ -719,6 +811,36 @@ const recs = (r: Partial<TankerRecords>): TankerRecords => ({ loads: [], fills: 
   assert.deepEqual(m([fill("a", 63075, 150, 14000), fill("b", 63927, 156.67, 14000, { date: "2026-10-09" })]), [null, 5.44])
   assert.deepEqual(m([fill("a", 63075, 150, 14000), fill("b", 63927, 156.67, 14000, { date: "2026-10-09" }), fill("c", 64000, 50, 4700, { date: "2026-10-12", litres: 0 })]), [null, 5.44, null]) // zero litres: —
   assert.deepEqual(m([fill("a", 63075, 150, 14000), { ...fill("b", 0, 150, 14000, { date: "2026-10-09" }), odometerKm: null } as never, fill("c", 64000, 150, 14000, { date: "2026-10-12" })]), [null, null, round2((64000 - 63075) / 150)]) // no odometer: —, and the next fill measures from the last real reading
+}
+
+// AdBlue Overview purchase summary: bulk (taxable + GST) and direct (litres × rate) vendor-wise, never mixed; opening
+// stock is never a purchase; overall = bulk + direct; the period filter applies to both.
+{
+  const buy = (id: string, date: string, vendor: string, litres: number, cost: number, gstRate = 0, opening = false) => ({ id, date, adblueVendorId: opening ? null : vendor, vendorName: vendor, totalLitres: litres, totalCost: cost, gstRate, opening })
+  const purchases = [buy("o", "2026-10-01", "", 50, 2000, 0, true), buy("p1", "2026-10-02", "A", 200, 9000, 18), buy("p2", "2026-10-20", "A", 100, 4800), buy("p3", "2026-11-03", "B", 300, 13500.5)]
+  const direct = (id: string, date: string, vendor: string | null, name: string, litres: number, amount: number) => ({ id, date, quantityLitres: litres, amount, source: "DIRECT" as const, adblueVendorId: vendor, vendorName: name })
+  const entries = [direct("d1", "2026-10-05", "B", "B", 10, 600.25), direct("d2", "2026-11-06", "B", "B", 5, 300), direct("d3", "2026-11-07", null, "Roadside", 2, 130), { id: "s1", date: "2026-10-10", quantityLitres: 20, amount: 900, source: "STOCK" as const, adblueVendorId: "A" }]
+  const oct = purchaseSummary(purchases, entries, (x) => x.date.startsWith("2026-10"))
+  assert.deepEqual(oct.bulk, [{ key: "A", vendor: "A", purchases: 2, litres: 300, value: 15420 }], "bulk: A's two batches, GST included, opening stock left out")
+  assert.deepEqual(oct.direct, [{ key: "B", vendor: "B", purchases: 1, litres: 10, value: 600.25 }], "direct: only DIRECT entries, never a stock draw")
+  assert.deepEqual(oct.totals.overall, { litres: 310, value: 16020.25 }, "overall = bulk + direct")
+  const all = purchaseSummary(purchases, entries, () => true)
+  assert.deepEqual(all.direct.map((r) => [r.vendor, r.litres, r.value]), [["B", 15, 900.25], ["Roadside", 2, 130]], "a typed vendor name on an older direct purchase keeps its own row")
+  assert.equal(all.totals.overall.value, round2(all.totals.bulk.value + all.totals.direct.value))
+  assert.equal(all.totals.bulk.value, round2(all.bulk.reduce((s, r) => s + r.value, 0)), "the section total is its rows")
+  const none = purchaseSummary(purchases, entries, (x) => x.date.startsWith("2026-12"))
+  assert.deepEqual([none.bulk, none.direct, none.totals.overall], [[], [], { litres: 0, value: 0 }], "an empty period: no rows, zero totals")
+  // Overview stock position: consumed = bulk draws (the FIFO ledger) + direct purchases, each once; current stock = bulk
+  // storage today (opening stock included, direct purchases never in it).
+  const t = adBlueTotals(purchases, entries, "2026-11")
+  const bulkUsed = (m?: string[]) => stockFor(t.ledger, m).consumed
+  const directUsed = (m?: string[]) => totalsFor(t, m, null).directLitres
+  assert.deepEqual([bulkUsed(["2026-10"]), directUsed(["2026-10"])], [20, 10], "October: the 20 L draw and the 10 L direct purchase, apart")
+  assert.deepEqual([bulkUsed(), directUsed()], [20, 17], "all time")
+  assert.equal(bulkUsed(), round2(stockDraws(entries).reduce((x, e) => x + e.quantityLitres, 0)), "bulk consumed = Σ stock draws (no direct purchase)")
+  assert.equal(round2(bulkUsed() + directUsed()), round2(entries.reduce((x, e) => x + e.quantityLitres, 0)), "every vehicle entry counted once")
+  assert.equal(t.current.stockLitres, valueInventory(purchases, stockDraws(entries)).stockLitres, "current stock = the FIFO valuation")
+  assert.equal(t.current.stockLitres, 50 + 600 - 20, "opening 50 L + bulk 600 L − 20 L drawn; direct litres never in stock")
 }
 
 console.log("diesel calculations: all checks passed")

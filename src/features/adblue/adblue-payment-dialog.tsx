@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react"
 import Link from "next/link"
-import { Lock } from "lucide-react"
+import { Lock, Pencil, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -18,7 +18,7 @@ import { SimpleSelect } from "@/components/shared/simple-select"
 import { deletionReasonError } from "@/domain/audit"
 import { monthLabel } from "@/domain/diesel"
 import { canEditMonth } from "@/domain/month-lock"
-import { ADBLUE_PAYMENT_MODES, ADBLUE_TDS_PERCENT, ALLOCATION_STATUS_LABEL, allocateOldestFirst, allocationStatus, PAYABLE_KIND_LABEL, payableLabel, type Payable, paymentProblem, referenceLabel, settledOf, tdsProblem, tdsSplit, unallocated, type AllocationStatus } from "@/domain/adblue-payments"
+import { ADBLUE_PAYMENT_MODES, ADBLUE_TDS_PERCENT, ALLOCATION_STATUS_LABEL, allocateOldestFirst, allocationStatus, PAYABLE_KIND_LABEL, payableLabel, PURCHASE_PAY_LABEL, type Payable, paymentProblem, referenceLabel, settledOf, tdsProblem, tdsSplit, unallocated, type AllocationStatus } from "@/domain/adblue-payments"
 import { useAllocateAdBluePayment, useApplyAdBlueAdvance, useCreateAdBluePayment, useSettings, useUpdateAdBluePayment } from "@/lib/api/hooks"
 import { useRole } from "@/lib/app-state"
 import { formatDate, formatINR, formatLitres, formatNumber, round2, todayISO } from "@/lib/format"
@@ -450,20 +450,34 @@ export function DeleteAdBluePaymentDialog({ payment: p, vendor, bills, pending, 
 }
 
 /** One payment, read only: amounts, TDS, reference, allocations, status, history. */
-export function AdBluePaymentDetailsDialog({ payment: p, onClose }: { payment: AdBluePayment; onClose: () => void }) {
+export function AdBluePaymentDetailsDialog({ payment: p, onClose, onEdit, onDelete }: { payment: AdBluePayment; onClose: () => void; onEdit?: () => void; onDelete?: () => void }) {
   const d = useAdBlueFinance()
-  const rows: [string, React.ReactNode][] = [
+  const basic: [string, React.ReactNode][] = [
     ["Vendor", <Link key="v" href={`/adblue/vendors/${p.vendorId}`} className="underline-offset-2 hover:underline">{d.vendorName(p.vendorId)}</Link>],
     ["Payment date", formatDate(p.date)],
-    ["Mode", p.mode],
     [referenceLabel(p.mode), <span key="r" className="num break-all">{p.utr}</span>],
-    ["Total settled", <span key="s" className="num font-medium">{formatINR(settledOf(p))}</span>],
-    ["TDS", p.tdsAmount > 0 ? <span key="t" className="num">{formatINR(p.tdsAmount)} ({formatNumber(p.tdsRate ?? 0, 4)}%)</span> : p.tdsRate === 0 ? "0%" : "Not deducted"],
-    ["Actual amount paid", <span key="p" className="num">{formatINR(p.amount)}</span>],
-    ["Advance left", <span key="a" className="num">{formatINR(unallocated(p))}</span>],
+    ["Payment mode", p.mode],
     ["Paid by", p.companyCode ?? "Not recorded"],
     ["Notes", p.notes || "—"],
   ]
+  // Settled = actual amount paid + TDS (settledOf) — the figures as recorded, never recalculated here.
+  const breakdown: [string, React.ReactNode][] = [
+    ["Total settled", <span key="s" className="num font-medium">{formatINR(settledOf(p))}</span>],
+    ["TDS %", p.tdsRate != null && p.tdsAmount > 0 ? <span key="tr" className="num">{formatNumber(p.tdsRate, 4)}%</span> : p.tdsRate === 0 ? "0%" : "Not deducted"],
+    ["TDS amount", <span key="t" className="num">{formatINR(p.tdsAmount)}</span>],
+    ["Actual amount paid", <span key="p" className="num">{formatINR(p.amount)}</span>],
+    ["Advance left", <span key="a" className="num">{formatINR(unallocated(p))}</span>],
+  ]
+  const list = (rows: [string, React.ReactNode][]) => (
+    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-sm">
+      {rows.map(([k, v]) => (
+        <div key={k} className="contents">
+          <dt className="text-muted-foreground">{k}</dt>
+          <dd className="text-right">{v}</dd>
+        </div>
+      ))}
+    </dl>
+  )
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
@@ -473,34 +487,52 @@ export function AdBluePaymentDetailsDialog({ payment: p, onClose }: { payment: A
           </DialogTitle>
           <DialogDescription>{`${d.vendorName(p.vendorId)} · ${formatDate(p.date)}`}</DialogDescription>
         </DialogHeader>
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-sm">
-          {rows.map(([k, v]) => (
-            <div key={k} className="contents">
-              <dt className="text-muted-foreground">{k}</dt>
-              <dd className="text-right">{v}</dd>
-            </div>
-          ))}
-        </dl>
-        <div className="space-y-1">
-          <h3 className="text-sm font-semibold">Allocated to</h3>
+        <section className="space-y-1.5">
+          <h3 className="text-sm font-semibold">Basic information</h3>
+          {list(basic)}
+        </section>
+        <section className="space-y-1.5">
+          <h3 className="text-sm font-semibold">Payment breakdown</h3>
+          {list(breakdown)}
+        </section>
+        <section className="space-y-1.5">
+          <h3 className="text-sm font-semibold">Purchase allocations</h3>
           {p.allocations.length ? (
             <ul className="divide-y rounded-md border text-sm">
-              {p.allocations.map((a, n) => (
-                <li key={n} className="flex items-center justify-between gap-3 px-3 py-1.5">
-                  <span>{d.payableOf(a.purchaseId) ? payableLabel(d.payableOf(a.purchaseId)!, formatDate) : "Purchase"}</span>
-                  <span className="num">{formatINR(a.amount)}</span>
-                </li>
-              ))}
+              {p.allocations.map((a, n) => {
+                const x = d.payableOf(a.purchaseId)
+                return (
+                  <li key={n} className="flex items-center justify-between gap-3 px-3 py-1.5">
+                    <span className="min-w-0">
+                      <span className="block">{x ? payableLabel(x, formatDate) : "Purchase"}</span>
+                      {x && <span className="text-xs text-muted-foreground">{PURCHASE_PAY_LABEL[d.payOfPayable(x).status]}</span>}
+                    </span>
+                    <span className="num shrink-0">{formatINR(a.amount)}</span>
+                  </li>
+                )
+              })}
             </ul>
           ) : (
             <p className="text-sm text-muted-foreground">No purchase — the whole payment is advance credit.</p>
           )}
-        </div>
+        </section>
         <DialogFooter className="items-center sm:justify-between">
           <HistoryButton id={p.id} />
-          <Button variant="outline" onClick={onClose}>
-            Close
-          </Button>
+          <div className="flex flex-wrap justify-end gap-2">
+            {onDelete && (
+              <Button variant="outline" className="text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={onDelete}>
+                <Trash2 /> Delete
+              </Button>
+            )}
+            {onEdit && (
+              <Button variant="outline" onClick={onEdit}>
+                <Pencil /> Edit
+              </Button>
+            )}
+            <Button variant="outline" onClick={onClose}>
+              Close
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

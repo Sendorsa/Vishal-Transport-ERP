@@ -38,7 +38,7 @@ export const PurchaseStatusBadge = ({ status }: { status: PurchasePayStatus }) =
 const ratePerLitre = (p: AdBluePurchase) => (p.totalLitres > 0 ? round2(p.totalCost / p.totalLitres) : 0)
 
 /**
- * AdBlue → Vendor Accounts → one vendor (owner, 18 Nov 2026): what we bought, paid and still owe, and the stock left of
+ * AdBlue → one vendor (owner, 18 Nov 2026; opened from a vendor name on the Payments tab or a payment's details): what we bought, paid and still owe, and the stock left of
  * its batches. Purchase history · Stock history (FIFO, unchanged) · Payments (Add Payment, Apply advance, Edit, Delete)
  * · Vendor ledger (purchase = debit, payment = credit; balance + Payable / − Advance). The Owner, Dev and Employee.
  */
