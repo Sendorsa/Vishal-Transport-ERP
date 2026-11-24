@@ -7,6 +7,7 @@
 import { buildInvoice, type InvoiceDraftInput } from "@/domain/invoicing"
 import { calculateTripRevenue, fyLabel } from "@/domain/pricing"
 import { settlementIndex } from "@/domain/analytics"
+import { cleanLicenceNo, currentDriverIds, resolvedByEdit, withDriverAdded, withDriverRemoved } from "@/domain/compliance"
 import { adBlueNeighbours } from "@/domain/adblue"
 import { allocationProblem, industrialAmount, industrialProblem, sortedAllocations, type TankerAllocation } from "@/domain/industrial"
 import { odometerConflict } from "@/domain/diesel"
@@ -909,13 +910,23 @@ async function setTankerStatus(id: string, status: "ACTIVE" | "ARCHIVED") {
   return after
 }
 
-function checkTransfer(input: TankerTransferInput) {
+/** `existing` (an edit): a tanker the record already names may since have been archived; a newly chosen one must be open. */
+function checkTransfer(input: TankerTransferInput, existing?: TankerTransfer) {
   if (input.fromTankerId === input.toTankerId) throw new Error("Choose two different tankers")
-  assertTankerOpen(input.fromTankerId, "Choose the tanker the diesel comes out of")
-  assertTankerOpen(input.toTankerId, "Choose the tanker the diesel goes into")
+  if (existing?.fromTankerId !== input.fromTankerId) assertTankerOpen(input.fromTankerId, "Choose the tanker the diesel comes out of")
+  if (existing?.toTankerId !== input.toTankerId) assertTankerOpen(input.toTankerId, "Choose the tanker the diesel goes into")
   if (!(input.litres > 0)) throw new Error("Litres transferred must be greater than 0")
   if (input.date > todayISO()) throw new Error("A transfer can't be dated in the future.")
   return { ...input, litres: round2(input.litres), notes: input.notes.trim() }
+}
+
+function checkAdjustment(input: TankerAdjustmentInput, existing?: TankerAdjustment) {
+  const reasonError = deletionReasonError(input.reason, "adjusting stock")
+  if (reasonError) throw new Error(reasonError)
+  if (existing?.tankerId !== input.tankerId) assertTankerOpen(input.tankerId)
+  if (!input.litres) throw new Error("Enter the litres to add (+) or remove (−)")
+  if (input.date > todayISO()) throw new Error("An adjustment can't be dated in the future.")
+  return { ...input, litres: round2(input.litres), reason: input.reason.trim() }
 }
 
 /* ------------------------------------------------------------------ AdBlue inventory */
@@ -1297,8 +1308,11 @@ async function transferVehicle(id: string, customerId: string | null, effectiveD
   return after
 }
 
-async function updateVehicle(id: string, patch: Partial<NewEntity<Vehicle>>) {
+async function updateVehicle(id: string, input: Partial<NewEntity<Vehicle>>) {
   assertCan("vehicles", "edit")
+  // Resolved document alerts are history the API alone appends (below) — never taken from the caller.
+  let patch: Partial<NewEntity<Vehicle>> = { ...input }
+  delete patch.documentAlertHistory
   let current = await vehicles.get(id)
   if (patch.assignedCustomerId && patch.assignedCustomerId !== current?.assignedCustomerId) assertCustomerOpen(patch.assignedCustomerId, todayISO())
   if (current && patch.status && patch.status !== current.status) patch = { ...patch, statusHistory: withStatus(current, patch.status, todayISO()) }
@@ -1309,6 +1323,9 @@ async function updateVehicle(id: string, patch: Partial<NewEntity<Vehicle>>) {
     current = await vehicles.get(id) // the transfer has its own event; this one covers the other fields
     patch = rest
   }
+  // Changing an expiry date resolves that document's active alert; it is kept, with the old date (owner, 22 Nov 2026).
+  const resolved = current ? resolvedByEdit(current, { ...current, ...patch }, todayISO(), new Date().toISOString(), () => newId("vda")) : []
+  if (resolved.length) patch = { ...patch, documentAlertHistory: [...(current!.documentAlertHistory ?? []), ...resolved] }
   const after = await vehicles.update(id, patch)
   audit({ action: statusAction(current, after), ...meta.vehicle(after), before: current, after })
   return after
@@ -1331,8 +1348,18 @@ async function setVendorStatus(id: string, status: AdBlueVendor["status"]) {
   return after
 }
 
+/** A DL number as stored (cleanLicenceNo); refused when another driver already has it — one licence, one person. */
+function licenceOf(no: string, driverId: string | null) {
+  const clean = cleanLicenceNo(no)
+  if (clean.length > 30) throw new Error("A DL number is at most 30 characters.")
+  const other = clean && readCollection("drivers").find((d) => d.id !== driverId && cleanLicenceNo(d.licenseNo ?? "") === clean)
+  if (other) throw new Error(`DL number ${clean} is already recorded for ${other.name}.`)
+  return clean
+}
+
 async function updateDriver(id: string, patch: Partial<NewEntity<Driver>>) {
   assertDriverAccess()
+  if (patch.licenseNo !== undefined) patch = { ...patch, licenseNo: licenceOf(patch.licenseNo, id) }
   const before = await drivers.get(id)
   const after = await drivers.update(id, patch)
   audit({ action: statusAction(before, after), ...meta.driver(after), before, after })
@@ -1341,8 +1368,7 @@ async function updateDriver(id: string, patch: Partial<NewEntity<Driver>>) {
 
 /** POST /api/payments — validates allocations against outstanding. */
 async function createPayment(input: Omit<NewEntity<Payment>, "paymentNo">) {
-  // A vehicle's maintenance expense is logged from its page by whoever may edit the vehicle (vehicles:edit).
-  if (!(input.direction === "OUT" && input.vehicleId && can(currentRole(), "vehicles", "edit"))) assertCan("payments", "create")
+  assertCan("payments", "create")
   ensureSeeded()
   assertMonthEditable(input.date)
   assertStationPaymentDate(input)
@@ -1660,6 +1686,7 @@ export const api = {
       tx(async () => {
         assertCan("vehicles", "create")
         const { assignedSince: since, ...data } = input
+        delete data.documentAlertHistory // a new vehicle has no alert history
         const start = since || todayISO()
         if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) throw new Error("Enter the date the vehicle was assigned since")
         if (start > todayISO()) throw new Error("Assigned since can't be in the future.")
@@ -1673,6 +1700,38 @@ export const api = {
     /** A status change appends to statusHistory; past months keep the status they had. */
     update: (id: string, patch: Partial<NewEntity<Vehicle>>) => tx(() => updateVehicle(id, patch)),
     transfer: (id: string, customerId: string | null, effectiveDate: string, reason?: string) => tx(() => transferVehicle(id, customerId, effectiveDate, reason)),
+    /**
+     * POST /api/vehicles/:id/drivers (owner, 21 Nov 2026) — a driver starts driving this vehicle `since` (default today;
+     * may be back-dated, never in the future). `vehicles:edit`. Dated, so who drove it in any period stays known
+     * (withDriverAdded). An audited vehicle edit (UPDATED, before / after driverPeriods). The DL number stays on the driver.
+     */
+    addDriver: (id: string, driverId: string, since: string) =>
+      tx(async () => {
+        assertCan("vehicles", "edit")
+        const v = await vehicles.get(id)
+        if (!v) throw new NotFoundError("Vehicle", id)
+        const d = readCollection("drivers").find((x) => x.id === driverId)
+        if (!d) throw new NotFoundError("Driver", driverId)
+        if (d.status === "ARCHIVED") throw new Error(`${d.name} is archived — restore the driver first.`)
+        return updateVehicle(id, { driverPeriods: withDriverAdded(v.driverPeriods ?? [], driverId, since, todayISO(), () => newId("vdp")) })
+      }),
+    /**
+     * DELETE /api/vehicles/:id/drivers/:driverId — the driver stops driving this vehicle; `lastDay` is their last day on
+     * it (withDriverRemoved: the period closes, kept as history; one started today is removed). Removing the default
+     * driver also clears the default (trip pre-fill). The driver record is untouched.
+     */
+    removeDriver: (id: string, driverId: string, lastDay: string) =>
+      tx(async () => {
+        assertCan("vehicles", "edit")
+        const v = await vehicles.get(id)
+        if (!v) throw new NotFoundError("Vehicle", id)
+        const current = currentDriverIds(v).includes(driverId)
+        if (!current && v.defaultDriverId !== driverId) throw new Error("This driver isn't on this vehicle now.")
+        return updateVehicle(id, {
+          ...(current ? { driverPeriods: withDriverRemoved(v.driverPeriods ?? [], driverId, lastDay, todayISO()) } : {}),
+          ...(v.defaultDriverId === driverId ? { defaultDriverId: null } : {}),
+        })
+      }),
     /** Soft delete from today: kept in every report; no new diesel / AdBlue entries dated from today on. */
     archive: (id: string) => tx(() => updateVehicle(id, { status: "ARCHIVED" })),
     restore: (id: string) => tx(() => updateVehicle(id, { status: "ACTIVE" })),
@@ -1967,7 +2026,7 @@ export const api = {
     create: (input: NewEntity<Driver>) =>
       tx(async () => {
         assertDriverAccess()
-        const after = await drivers.create(input)
+        const after = await drivers.create({ ...input, licenseNo: licenceOf(input.licenseNo ?? "", null) })
         audit({ action: "CREATED", ...meta.driver(after), after })
         return after
       }),
@@ -2602,6 +2661,20 @@ export const api = {
         audit({ action: "CREATED", ...meta.transfer(after), after })
         return after
       }),
+    /** Correct a transfer (owner, 18 Nov 2026: every role that may add one may correct it; deleting stays Owner / Dev). */
+    update: (id: string, input: TankerTransferInput, reason?: string) =>
+      tx(async () => {
+        assertCan("diesel", "edit")
+        const before = await tankerTransfers.get(id)
+        if (!before) throw new NotFoundError("Tanker transfer", id)
+        assertMonthEditable(before.date)
+        assertMonthEditable(input.date)
+        const next = checkTransfer(input, before)
+        assertTankerStock(tankerRecords({ transfers: readCollection("tanker_transfers").map((t) => (t.id === id ? { ...t, ...next } : t)) }), [before.fromTankerId, before.toTankerId, next.fromTankerId, next.toTankerId])
+        const after = await tankerTransfers.update(id, next)
+        audit({ action: "UPDATED", ...meta.transfer(after), before, after, reason })
+        return after
+      }),
     remove: (id: string, reason: string) =>
       tx(async () => {
         assertCan("diesel", "delete")
@@ -2626,15 +2699,24 @@ export const api = {
         ensureSeeded()
         assertCan("diesel", "edit")
         assertMonthEditable(input.date)
-        const reasonError = deletionReasonError(input.reason, "adjusting stock")
-        if (reasonError) throw new Error(reasonError)
-        assertTankerOpen(input.tankerId)
-        if (!input.litres) throw new Error("Enter the litres to add (+) or remove (−)")
-        if (input.date > todayISO()) throw new Error("An adjustment can't be dated in the future.")
-        const a = { ...input, litres: round2(input.litres), reason: input.reason.trim() }
+        const a = checkAdjustment(input)
         assertTankerStock(tankerRecords({ adjustments: [...readCollection("tanker_adjustments"), { ...a, id: "new", createdAt: new Date().toISOString() }] }), [a.tankerId])
         const after = await tankerAdjustments.create(a)
         audit({ action: "CREATED", ...meta.adjustment(after), after, reason: a.reason })
+        return after
+      }),
+    /** Correct an adjustment — tanker, date, ± litres, its reason (owner, 18 Nov 2026; deleting stays Owner / Dev). */
+    update: (id: string, input: TankerAdjustmentInput, changeReason?: string) =>
+      tx(async () => {
+        assertCan("diesel", "edit")
+        const before = await tankerAdjustments.get(id)
+        if (!before) throw new NotFoundError("Tanker stock adjustment", id)
+        assertMonthEditable(before.date)
+        assertMonthEditable(input.date)
+        const next = checkAdjustment(input, before)
+        assertTankerStock(tankerRecords({ adjustments: readCollection("tanker_adjustments").map((a) => (a.id === id ? { ...a, ...next } : a)) }), [before.tankerId, next.tankerId])
+        const after = await tankerAdjustments.update(id, next)
+        audit({ action: "UPDATED", ...meta.adjustment(after), before, after, reason: changeReason })
         return after
       }),
     remove: (id: string, reason: string) =>

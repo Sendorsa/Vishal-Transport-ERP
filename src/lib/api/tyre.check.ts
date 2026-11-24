@@ -28,6 +28,7 @@
 import assert from "node:assert/strict"
 import { failure, loadCheckDemoData, setRole } from "./test-browser"
 import type { TyreInvoiceInput, TyreItemInput } from "./index"
+import type { TyrePayment } from "@/lib/types"
 
 let NOW = new Date("2026-11-10T04:30:00.000Z").getTime() // moved forward in section 8 (month / year / FY changes)
 const RealDate = Date
@@ -45,7 +46,7 @@ globalThis.Date = FixedDate as DateConstructor
 
 async function main() {
   const { api } = await import("./index")
-  const { todayISO } = await import("@/lib/format")
+  const { todayISO, round2 } = await import("@/lib/format")
   const { attributionSplit, companyKey, currentMonthInvoices, DEFAULT_REPAIR_TYPES, monthLines, pickSheetMonth, sheetMonths, sheetTotals, sheetYears, spendBy, financialChanges, invoiceMatches, kmRun, lineAmounts, NO_FILTERS, OFFICE_FILTER, OFFICE_LABEL, sameBill, tyreTotals } = await import("@/domain/tyre")
   const { profileCall } = await import("@/lib/server/erp/profiles")
   const { readCollection } = await import("@/lib/storage/local-store")
@@ -558,6 +559,29 @@ async function main() {
     // 18. Every payment recorded before this section is exactly as it was.
     const now = (await pays()).map(plain)
     assert.deepEqual(JSON.parse(history).map((p: { id: string }) => now.find((x) => x.id === p.id)), JSON.parse(history), "historical payments unchanged")
+  }
+
+  /* ---------------------------------------------------------------- 11. Vehicle page → Dues (owner, 22 Nov 2026) */
+  {
+    const { vehicleOutstanding } = await import("@/domain/tyre")
+    setRole("OWNER")
+    const dues = async (vehicleId: string) => vehicleOutstanding(await api.tyreInvoices.list(), await pays(), vehicleId)
+    const [a0, b0] = [await dues(vA.id), await dues(vB.id)]
+    const due = await vinv("2026-11-09", 1000, { paymentMode: "Credit", billNo: "DUES-1" }) // ₹1,180 on vA
+    assert.deepEqual([await dues(vA.id), await dues(vB.id)], [round2(a0 + 1180), b0], "an unpaid invoice is this vehicle's due, never another's")
+    await api.audit.list() // viewing changes nothing
+    assert.equal(await dues(vA.id), round2(a0 + 1180), "viewing never clears dues")
+    await pay(500, "DUES-UTR-1", [{ invoiceId: due.id, amount: 500 }])
+    assert.equal(await dues(vA.id), round2(a0 + 680), "partly paid: still due")
+    await pay(680, "DUES-UTR-2", [{ invoiceId: due.id, amount: 680 }])
+    assert.equal(await dues(vA.id), a0, "fully paid: this invoice leaves the vehicle's dues")
+    // Pure: none, partial, settled.
+    const items = [{ baseValue: 1000, cgst: 90, sgst: 90, igst: 0, totalValue: 1180 }]
+    const pmt = (amount: number) => ({ allocations: [{ invoiceId: "x", amount }] }) as unknown as TyrePayment
+    assert.equal(vehicleOutstanding([{ id: "x", vehicleId: "v1", items }], [], "v1"), 1180)
+    assert.equal(vehicleOutstanding([{ id: "x", vehicleId: "v1", items }], [pmt(1000)], "v1"), 180)
+    assert.equal(vehicleOutstanding([{ id: "x", vehicleId: "v1", items }], [pmt(1000), pmt(180)], "v1"), 0)
+    assert.equal(vehicleOutstanding([{ id: "x", vehicleId: "v1", items }], [], "v2"), 0, "another vehicle: no dues")
   }
 
   console.log("tyre data: masters, invoice lines and amounts (CGST / SGST / IGST, paise), company from the assignment, validation, atomic failure, edit, month lock, permissions, delete / restore, filters, the Monthly Sheet and the current-month Tyre page (month, year and FY changes), vendor payments (credit / full / partial / instalments / several invoices / advance and its use, UTR rules, reconciliation, edits, permanent delete, month lock, permissions, audit), TDS on payments, corrections and deletion: all checks passed")

@@ -274,6 +274,27 @@ async function main() {
   await api.audit.markReviewed(deletions.map((e) => e.id))
   assert.equal(await count(), 0)
   assert.equal((await api.audit.list()).filter((e) => e.action === "DELETED").length, c0 + 2)
+  // 10a. Vehicle page indicator (owner, 22 Nov 2026): the same review records, per vehicle.
+  {
+    const { vehicleDeletionsToReview } = await import("@/domain/audit")
+    const other = vehicles.find((v) => v.id !== vehicle.id && v.status === "ACTIVE")!
+    const flagged = async (id: string) => vehicleDeletionsToReview(await api.audit.list(), id)
+    assert.equal((await flagged(vehicle.id)).length, 0, "reviewed deletions never show on the vehicle")
+    const del = await api.diesel.create(fill(43, odo0 + 2500))
+    await api.diesel.remove(del.id, "Wrong vehicle")
+    const shown = await flagged(vehicle.id)
+    assert.deepEqual(shown.map((e) => [e.recordId, e.reason]), [[del.id, "Wrong vehicle"]], "a new deletion shows on its vehicle")
+    assert.equal((await flagged(other.id)).length, 0, "…and never on another vehicle")
+    await api.audit.list()
+    assert.equal((await flagged(vehicle.id)).length, 1, "opening the log or the list reviews nothing")
+    assert.equal(await api.audit.markReviewed(shown.map((e) => e.id)), 1)
+    assert.equal((await flagged(vehicle.id)).length, 0, "Mark as reviewed clears it")
+    assert.ok((await api.audit.list()).some((e) => e.id === shown[0].id && e.action === "DELETED"), "the deletion stays in the Audit Log")
+    const del2 = await api.diesel.create(fill(44, odo0 + 2600))
+    await api.diesel.remove(del2.id, "Entered twice")
+    assert.deepEqual((await flagged(vehicle.id)).map((e) => e.recordId), [del2.id], "a later deletion shows it again — only the new one")
+    await api.audit.markReviewed((await flagged(vehicle.id)).map((e) => e.id))
+  }
   // A new deletion shows again; reviews survive a data reset.
   const late = await api.diesel.create(fill(42, odo0 + 2700))
   await api.diesel.remove(late.id, "Wrong fuel station")

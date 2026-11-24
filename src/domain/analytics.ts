@@ -479,30 +479,4 @@ export function receivablesAging(ds: Dataset, views: InvoiceView[], todayIso: st
   return { rows, totals, total: round2(sum(rows, (r) => r.total)) }
 }
 
-/* ------------------------------------------------------------------ Compliance */
-
-export interface ComplianceAlert {
-  vehicle: Vehicle
-  document: "Insurance" | "Road tax" | "Fitness" | "Permit"
-  validTill: string
-  daysLeft: number
-}
-
-export function complianceAlerts(ds: Dataset, todayIso: string, withinDays = 30): ComplianceAlert[] {
-  const out: ComplianceAlert[] = []
-  const t = parseISO(todayIso)
-  for (const v of ds.vehicles) {
-    if (v.status === "INACTIVE" || v.status === "ARCHIVED") continue
-    const docs: [ComplianceAlert["document"], string][] = [
-      ["Insurance", v.insurance.validTill],
-      ["Road tax", v.roadTax.validTill],
-      ["Fitness", v.fitnessValidTill],
-      ["Permit", v.permitValidTill],
-    ]
-    for (const [document, validTill] of docs) {
-      const daysLeft = differenceInCalendarDays(parseISO(validTill), t)
-      if (daysLeft <= withinDays) out.push({ vehicle: v, document, validTill, daysLeft })
-    }
-  }
-  return out.sort((a, b) => a.daysLeft - b.daysLeft)
-}
+/* Compliance alerts: activeDocumentAlerts in ./compliance (one source for the Dashboard and Vehicles). */

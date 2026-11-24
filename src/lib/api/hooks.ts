@@ -276,6 +276,27 @@ export function useSetDriverStatus() {
   })
 }
 
+/** A driver's details (the vehicle page's DL number). */
+export function useUpdateDriver() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, patch, version }: { id: string; patch: Partial<NewEntity<Driver>>; version?: string }) => v(id, version, () => api.drivers.update(id, patch)),
+    onSuccess: () => invalidate("drivers"),
+    onError,
+  })
+}
+
+/** A driver starts / stops driving a vehicle (vehicle page → Drivers & DL numbers). */
+export function useVehicleDriver() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, driverId, date, remove, version }: { id: string; driverId: string; date: string; remove?: boolean; version?: string }) =>
+      v(id, version, () => (remove ? api.vehicles.removeDriver(id, driverId, date) : api.vehicles.addDriver(id, driverId, date))),
+    onSuccess: () => invalidate("vehicles"),
+    onError,
+  })
+}
+
 export function useSaveDriver() {
   const invalidate = useInvalidate()
   return useMutation({
@@ -521,18 +542,19 @@ export function useArchiveTanker() {
   return useMutation({ mutationFn: ({ id, restore, version }: { id: string; restore?: boolean; version?: string }) => v(id, version, () => (restore ? api.tankers.restore(id) : api.tankers.archive(id))), onSuccess: () => invalidate("tankers"), onError })
 }
 /** Diesel moved between tankers (never a purchase). */
-export function useCreateTankerTransfer() {
+/** Add a transfer, or correct one (`id`: diesel:edit — Owner, Dev, Employee). */
+export function useSaveTankerTransfer() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: (data: TankerTransferInput) => api.tankerTransfers.create(data), onSuccess: () => invalidate("tanker_transfers", "diesel_entries"), onError })
+  return useMutation({ mutationFn: ({ id, data, reason, version }: { id?: string; data: TankerTransferInput; reason?: string; version?: string }) => v(id, version, () => (id ? api.tankerTransfers.update(id, data, reason) : api.tankerTransfers.create(data))), onSuccess: () => invalidate("tanker_transfers", "diesel_entries"), onError })
 }
 export function useDeleteTankerTransfer() {
   const invalidate = useInvalidate()
   return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.tankerTransfers.remove(id, reason)), onSuccess: () => invalidate("tanker_transfers", "diesel_entries"), onError })
 }
-/** Stock corrections with a mandatory reason. */
-export function useCreateTankerAdjustment() {
+/** Stock corrections with a mandatory reason — added, or corrected (`id`). */
+export function useSaveTankerAdjustment() {
   const invalidate = useInvalidate()
-  return useMutation({ mutationFn: (data: TankerAdjustmentInput) => api.tankerAdjustments.create(data), onSuccess: () => invalidate("tanker_adjustments", "diesel_entries"), onError })
+  return useMutation({ mutationFn: ({ id, data, reason, version }: { id?: string; data: TankerAdjustmentInput; reason?: string; version?: string }) => v(id, version, () => (id ? api.tankerAdjustments.update(id, data, reason) : api.tankerAdjustments.create(data))), onSuccess: () => invalidate("tanker_adjustments", "diesel_entries"), onError })
 }
 export function useDeleteTankerAdjustment() {
   const invalidate = useInvalidate()

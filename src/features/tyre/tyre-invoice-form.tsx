@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { AlertTriangle, ChevronDown, Lock, Plus, Trash2 } from "lucide-react"
+import { AlertTriangle, ChevronDown, Gauge, Lock, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -19,7 +19,8 @@ import { deletionReasonError } from "@/domain/audit"
 import { CREDIT, financialChanges, isTyreWork, itemProblem, kmRun, lineAmounts, masterOptions, OFFICE_LABEL, referenceLabel, referenceNoun, sameBill, tdsProblem, TYRE_PAYMENT_TYPES, TYRE_TDS_PERCENT, tyreTdsSplit, tyreTotals } from "@/domain/tyre"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Switch } from "@/components/ui/switch"
-import { useCreateTyreMaster, useSaveTyreInvoice } from "@/lib/api/hooks"
+import { useCreateTyreMaster, useDieselEntries, useSaveTyreInvoice } from "@/lib/api/hooks"
+import { currentOdometer } from "@/domain/vehicle-summary"
 import { useCan, useRole } from "@/lib/app-state"
 import { formatDate, formatINR, formatNumber, round2, todayISO } from "@/lib/format"
 import type { TyreInvoice, TyreTaxType } from "@/lib/types"
@@ -126,6 +127,9 @@ function Form({ invoice, onClose, blocked }: { invoice?: TyreInvoice; onClose: (
 
   // The company comes from the vehicle's assignment on the invoice date — never typed.
   const vehicle = d.vehicles.find((v) => v.id === f.vehicleId)
+  // Reference only, for typing a line's Opening / Closing KM: the vehicle's latest recorded odometer (never fills a field).
+  const fills = useDieselEntries()
+  const odometer = vehicle ? currentOdometer(vehicle, fills.data ?? []) : null
   const customerId = d.customerOn(f.vehicleId, f.date)
   // No customer on the date: the invoice can still be recorded, but only as an explicit Office / No Customer choice.
   const noCustomer = !!vehicle && !!f.date && !customerId
@@ -372,6 +376,20 @@ function Form({ invoice, onClose, blocked }: { invoice?: TyreInvoice; onClose: (
                           <Field label="Tyre Number(s)" className="lg:col-span-2">
                             <Input value={l.tyreNumber} onChange={(e) => setLine(l.key, { tyreNumber: e.target.value })} placeholder="Serial numbers, e.g. B0426 / 0427" />
                           </Field>
+                          {vehicle && (
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-md border bg-muted/40 px-3 py-1.5 text-xs sm:col-span-2 lg:col-span-4" role="note">
+                              <Gauge className="size-3.5 shrink-0 text-muted-foreground" />
+                              <span className="text-muted-foreground">Current vehicle odometer</span>
+                              {odometer ? (
+                                <>
+                                  <span className="num text-sm font-semibold">{formatNumber(odometer.km)} km</span>
+                                  <span className="text-muted-foreground">{odometer.date ? `Last updated ${formatDate(odometer.date)}` : "From the vehicle record"} · a reference for the KM below, never filled in</span>
+                                </>
+                              ) : (
+                                <span className="font-medium">No odometer reading recorded</span>
+                              )}
+                            </div>
+                          )}
                           <Field label="Opening KM">
                             <Input type="number" inputMode="numeric" min={0} value={l.openingKm} onChange={(e) => setLine(l.key, { openingKm: e.target.value })} className="num" />
                           </Field>

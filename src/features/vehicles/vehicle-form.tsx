@@ -50,6 +50,8 @@ const schema = z
     roadTax: z.object({ validTill: date, amount: money, period: z.enum(["QUARTERLY", "ANNUAL"]) }),
     fitnessValidTill: date,
     permitValidTill: date,
+    /** Optional: older vehicles have no PUC date recorded ("" = not recorded). */
+    pucValidTill: z.string().regex(/^(\d{4}-\d{2}-\d{2})?$/, "Pick a date"),
     emiAmount: money,
   })
   .refine((v) => v.ownership === "OWNED" || v.ownerName.length > 0, { path: ["ownerName"], message: "Owner name required for attached vehicles" })
@@ -79,6 +81,7 @@ function defaults(v: Vehicle | undefined, company: "VT" | "VTHPL"): FormValues {
     roadTax: v?.roadTax ?? { validTill: nextYear, amount: 0, period: "QUARTERLY" },
     fitnessValidTill: v?.fitnessValidTill ?? nextYear,
     permitValidTill: v?.permitValidTill ?? nextYear,
+    pucValidTill: v?.pucValidTill ?? "",
     emiAmount: v?.emiAmount ?? 0,
   }
 }
@@ -101,11 +104,14 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
   const company = useWatch({ control, name: "companyCode" })
   const ownership = useWatch({ control, name: "ownership" })
   const assignedCustomerId = useWatch({ control, name: "assignedCustomerId" })
+  const fuelType = useWatch({ control, name: "fuelType" })
   const num = { valueAsNumber: true } as const
 
-  const onSubmit = handleSubmit(async ({ assignedSince, ...values }) => {
+  const onSubmit = handleSubmit(async ({ assignedSince, pucValidTill, ...values }) => {
     const data = {
       ...values,
+      // A PUC date never entered stays absent (no "changed" field in the vehicle's history for a blank left blank).
+      ...(pucValidTill || vehicle?.pucValidTill !== undefined ? { pucValidTill } : {}),
       // An existing vehicle changes customer through Transfer (dated); a new one starts on its "Assigned since" date.
       ...(vehicle || values.assignedCustomerId === NONE ? {} : { assignedSince }),
       ownerName: values.ownership === "ATTACHED" ? values.ownerName : null,
@@ -185,7 +191,11 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
             <Field label="Seats">
               <Input type="number" {...register("seats", { setValueAs: (v) => (v === "" || v === null ? null : Number(v)) })} />
             </Field>
-            <Field label="Expected mileage (kmpl)" error={errors.mileageKmpl?.message} hint="The mileage this vehicle is expected to give">
+            <Field
+              label={fuelType === "EV" ? "Expected efficiency (km/kWh)" : "Expected mileage (km/L)"}
+              error={errors.mileageKmpl?.message}
+              hint={fuelType === "EV" ? "Kilometres per unit charged this vehicle is expected to give" : "The mileage this vehicle is expected to give"}
+            >
               <Input type="number" step="0.1" {...register("mileageKmpl", num)} />
             </Field>
             <Field label="Odometer (km)" error={errors.odometerKm?.message}>
@@ -283,6 +293,9 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
             </Field>
             <Field label="Permit valid till" required error={errors.permitValidTill?.message}>
               <Input type="date" {...register("permitValidTill")} min={todayISO().slice(0, 4) + "-01-01"} />
+            </Field>
+            <Field label="PUC valid till" error={errors.pucValidTill?.message} hint="Pollution Under Control certificate — leave blank if not known">
+              <Input type="date" {...register("pucValidTill")} />
             </Field>
           </FormSection>
         </CardContent>

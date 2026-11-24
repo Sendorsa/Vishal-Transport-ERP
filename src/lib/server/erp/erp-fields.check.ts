@@ -96,6 +96,13 @@ async function main() {
     { id: "tpy_field1", createdAt: at, updatedAt: at, date: "2026-10-08", supplierId: "tym_f_sup", amount: 1499, tdsAmount: 1.5, tdsRate: 0.1, mode: "IMPS", utr: "UTR 4455", reference: "003/26-27", companyCode: "VT", notes: "Part advance", allocations: [{ invoiceId: "tyr_field1", amount: 1000.25 }, { invoiceId: "tyr_field2", amount: 400 }] },
     { id: "tpy_field2", createdAt: at, updatedAt: at, date: "2026-10-08", supplierId: "tym_f_sup", amount: 10, mode: "Cash", utr: "R-9", reference: "", companyCode: null, notes: "", allocations: [], tdsAmount: 0, tdsRate: null },
   ])
+  // PUC and several drivers per vehicle (21 Nov 2026): the demo data has neither — one vehicle with driver periods (closed and open, two drivers, one re-assigned) and
+  // a PUC date, one with a PUC date only.
+  {
+    const [d1, d2] = readCollection("drivers")
+    const vs = readCollection("vehicles")
+    writeCollection("vehicles", vs.map((v, i) => (i === 0 ? { ...v, pucValidTill: "2027-01-15", driverPeriods: [{ id: "vdp_field1", driverId: d1.id, startDate: "2026-09-01", endDate: "2026-10-15" }, { id: "vdp_field2", driverId: d2.id, startDate: "2026-10-01", endDate: null }, { id: "vdp_field3", driverId: d1.id, startDate: "2026-11-01", endDate: null }], documentAlertHistory: [{ id: "vda_field1", document: "Insurance", regNo: v.regNo, expiryDate: "2026-11-20", alertDate: "2026-11-13", newExpiryDate: "2027-11-20", resolvedAt: "2026-11-15T05:12:09.123Z" }, { id: "vda_field2", document: "Road tax", regNo: v.regNo, expiryDate: "2026-11-18", alertDate: "2026-11-13", newExpiryDate: null, resolvedAt: "2026-11-16T05:12:09.000Z" }] } : i === 1 ? { ...v, pucValidTill: "2026-11-30" } : v)))
+  }
   const ctx = { extras: new Map(), identity: { profileId: "10000000-0000-0000-0000-0000000000f1", userId: "00000000-0000-0000-0000-0000000000f1", role: "DEV" as const, email: null, name: null } }
 
   // Settings (companies, vehicle types, expense categories, tax): the migrations seed reference rows; write the demo ones over them.

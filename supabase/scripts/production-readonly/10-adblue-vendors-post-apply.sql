@@ -28,7 +28,8 @@ guarded as (  -- the child-row delete guards: edit_delete_guard, Tyre Data's tyr
   from pg_trigger g join pg_class c on c.oid = g.tgrelid join pg_namespace n on n.oid = c.relnamespace
   where g.tgfoid in (to_regprocedure('private.edit_delete_guard()'), coalesce(to_regprocedure('private.tyre_item_delete_guard()'), 0),
                      coalesce(to_regprocedure('private.tyre_allocation_delete_guard()'), 0), -- tyre payment corrections (20261117000300)
-                     coalesce(to_regprocedure('private.adblue_allocation_delete_guard()'), 0)) -- AdBlue supplier payments (20261118000000)
+                     coalesce(to_regprocedure('private.adblue_allocation_delete_guard()'), 0), -- AdBlue supplier payments (20261118000000)
+                     coalesce(to_regprocedure('private.vehicle_driver_period_delete_guard()'), 0)) -- vehicle driver periods (20261121000000)
 ),
 cls as (
   select d.t, case
@@ -66,7 +67,9 @@ from (values
         (case when to_regprocedure('private.tyre_allocation_delete_guard()') is not null then 'ops.tyre_payment_allocations=owner/dev + audited edit' end),
         (case when to_regprocedure('private.tyre_allocation_delete_guard()') is not null then 'ops.tyre_payments=owner/dev' end),
         (case when to_regclass('fuel.adblue_payments') is not null then 'fuel.adblue_payment_allocations=owner/dev + audited edit' end),
-        (case when to_regclass('fuel.adblue_payments') is not null then 'fuel.adblue_payments=owner/dev' end)
+        (case when to_regclass('fuel.adblue_payments') is not null then 'fuel.adblue_payments=owner/dev' end),
+        -- Vehicle PUC and drivers (20261121000000): once applied
+        (case when to_regclass('core.vehicle_driver_periods') is not null then 'core.vehicle_driver_periods=owner/dev + audited edit' end)
       ) as e(x) where x is not null),
       (select string_agg(t || '=' || c, '; ' order by t) from cls)),
   (11, 'CHECK', 'tables an Employee or AdBlue profile could delete from outside an audited edit', 'none',

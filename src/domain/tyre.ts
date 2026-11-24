@@ -384,6 +384,12 @@ export function invoicePay(total: number, paid: number): InvoicePay {
   return { total, paid, outstanding, status: outstanding === 0 ? "PAID" : paid > 0 ? "PARTIAL" : "UNPAID" }
 }
 
+/** A vehicle's dues (Vehicle page → Dues and Tyres): Σ outstanding to tyre vendors on its invoices, today. */
+export function vehicleOutstanding(invoices: (Pick<TyreInvoice, "id" | "vehicleId"> & { items: Parameters<typeof tyreTotals>[0] })[], payments: TyrePayment[], vehicleId: string) {
+  const paid = paidByInvoice(payments)
+  return round2(invoices.filter((v) => v.vehicleId === vehicleId).reduce((s, v) => s + invoicePay(tyreTotals(v.items).grandTotal, paid.get(v.id) ?? 0).outstanding, 0))
+}
+
 export interface VendorAccount {
   supplierId: string
   /** Σ invoice grand totals. */

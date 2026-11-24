@@ -10,8 +10,8 @@ import type {
   TyreMaster,
   TyrePayment,
   AdBlueVendor,
-  AdBlueEntry, AdBluePayment, AdBluePurchase, AuditEvent, AuditReview, CollectionKey, CompanyProfile, Customer, DieselEntry, Driver,
-  ExpenseCategory, FuelStation, IndustrialSupply, Invoice, MonthLock, Payment, Settings, StatusPeriod, Tanker, TankerAdjustment, TankerLoad,
+  AdBlueEntry, AdBluePayment, AdBluePurchase, AuditEvent, AuditReview, CollectionKey, CompanyProfile, Customer, DieselEntry, Driver, DriverPeriod,
+  ExpenseCategory, FuelStation, IndustrialSupply, Invoice, MonthLock, Payment, ResolvedDocumentAlert, Settings, StatusPeriod, Tanker, TankerAdjustment, TankerLoad,
   TankerTransfer, Trip, Vehicle, VehicleAssignment, VehicleType,
 } from "@/lib/types"
 import type { RequestIdentity } from "@/lib/request-scope"
@@ -163,6 +163,10 @@ const vehicles: Spec<Vehicle> = {
   async load(sql, ctx) {
     const periods = await loadPeriods(sql, "core.vehicle_status_periods", "vehicle_id")
     ctx.extras.set("vehicle_periods", periods)
+    const drivers = new Map<string, DriverPeriod[]>()
+    for (const j of await rows(sql, "core.vehicle_driver_periods", "vehicle_id, start_date, id collate \"C\""))
+      drivers.set(j.vehicle_id as string, [...(drivers.get(j.vehicle_id as string) ?? []), { id: j.id, driverId: j.driver_id as string, startDate: j.start_date as string, endDate: (j.end_date as string) ?? null }])
+    const alerts = await loadAlertHistory(sql)
     return (await rows(sql, "core.vehicles")).map((j) => ({
       ...base(j), regNo: str(j.reg_no), companyCode: j.company_code as Vehicle["companyCode"], typeCode: str(j.type_code), make: str(j.make), model: str(j.model),
       year: num(j.year), seats: numOrNull(j.seats), fuelType: j.fuel_type as Vehicle["fuelType"], mileageKmpl: num(j.mileage_kmpl), ownership: j.ownership as Vehicle["ownership"],
@@ -170,7 +174,9 @@ const vehicles: Spec<Vehicle> = {
       odometerKm: num(j.odometer_km), assignedCustomerId: (j.assigned_customer_id as string) ?? null, defaultDriverId: (j.default_driver_id as string) ?? null,
       insurance: { provider: str(j.insurance_provider), policyNo: str(j.insurance_policy_no), validTill: str(j.insurance_valid_till), premium: num(j.insurance_premium) },
       roadTax: { validTill: str(j.road_tax_valid_till), amount: num(j.road_tax_amount), period: (j.road_tax_period as "QUARTERLY" | "ANNUAL") ?? "ANNUAL" },
-      fitnessValidTill: str(j.fitness_valid_till), permitValidTill: str(j.permit_valid_till), emiAmount: num(j.emi_amount), notes: str(j.notes),
+      fitnessValidTill: str(j.fitness_valid_till), permitValidTill: str(j.permit_valid_till), pucValidTill: str(j.puc_valid_till), driverPeriods: drivers.get(j.id) ?? [],
+      ...opt("documentAlertHistory", alerts.get(j.id)),
+      emiAmount: num(j.emi_amount), notes: str(j.notes),
       openingOdometerKm: numOrNull(j.opening_odometer_km), openingOdometerDate: (j.opening_odometer_date as string) ?? null,
     }))
   },
@@ -180,16 +186,68 @@ const vehicles: Spec<Vehicle> = {
     assigned_customer_id: v.assignedCustomerId ?? null, default_driver_id: v.defaultDriverId ?? null,
     insurance_provider: v.insurance?.provider ?? "", insurance_policy_no: v.insurance?.policyNo ?? "", insurance_valid_till: dateOrNull(v.insurance?.validTill), insurance_premium: v.insurance?.premium ?? 0,
     road_tax_valid_till: dateOrNull(v.roadTax?.validTill), road_tax_amount: v.roadTax?.amount ?? 0, road_tax_period: v.roadTax?.period ?? "ANNUAL",
-    fitness_valid_till: dateOrNull(v.fitnessValidTill), permit_valid_till: dateOrNull(v.permitValidTill), emi_amount: v.emiAmount ?? 0, notes: v.notes ?? "",
+    fitness_valid_till: dateOrNull(v.fitnessValidTill), permit_valid_till: dateOrNull(v.permitValidTill), puc_valid_till: dateOrNull(v.pucValidTill), emi_amount: v.emiAmount ?? 0, notes: v.notes ?? "",
     opening_odometer_km: v.openingOdometerKm ?? null, opening_odometer_date: dateOrNull(v.openingOdometerDate),
   }),
   async afterInsert(sql, v) {
     await syncPeriods(sql, "core.vehicle_status_periods", "vehicle_id", v.id, [], [], v.statusHistory ?? [])
+    await syncDrivers(sql, v.id, [], v.driverPeriods ?? [])
+    await syncAlertHistory(sql, v.id, [], v.documentAlertHistory ?? [])
   },
   async afterUpdate(sql, before, after, ctx) {
     const p = (ctx.extras.get("vehicle_periods") as Periods).byEntity.get(after.id)
     await syncPeriods(sql, "core.vehicle_status_periods", "vehicle_id", after.id, p?.ids ?? [], before.statusHistory ?? [], after.statusHistory ?? [])
+    await syncDrivers(sql, after.id, before.driverPeriods ?? [], after.driverPeriods ?? [])
+    await syncAlertHistory(sql, after.id, before.documentAlertHistory ?? [], after.documentAlertHistory ?? [])
   },
+}
+/**
+ * Resolved document alerts (core.vehicle_document_alerts), per vehicle, oldest first. RLS returns none to a role without
+ * vehicles:view. resolved_at is read as millisecond ISO UTC text — the exact string the API wrote.
+ */
+async function loadAlertHistory(sql: Sql) {
+  const byVehicle = new Map<string, ResolvedDocumentAlert[]>()
+  const list = await sql<{ id: string; vehicle_id: string; document: ResolvedDocumentAlert["document"]; reg_no: string; expiry_date: string; alert_date: string; new_expiry_date: string | null; resolved_at: string }>(
+    `select id, vehicle_id, document, reg_no, expiry_date::text, alert_date::text, new_expiry_date::text,
+            to_char(resolved_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as resolved_at
+       from core.vehicle_document_alerts order by vehicle_id, resolved_at, id collate "C"`
+  )
+  for (const r of list)
+    byVehicle.set(r.vehicle_id, [...(byVehicle.get(r.vehicle_id) ?? []), { id: r.id, document: r.document, regNo: r.reg_no, expiryDate: r.expiry_date, alertDate: r.alert_date, newExpiryDate: r.new_expiry_date, resolvedAt: r.resolved_at }])
+  return byVehicle
+}
+/**
+ * Append-only: new records are inserted; changing or removing a kept one is refused (the table has no update / delete
+ * grant). Each row carries the vehicle's updated_at as this save wrote it (vehicle_version): one row per document per
+ * save, and the database checks at COMMIT that this save really changed that date (vehicle_document_alert_guard).
+ */
+async function syncAlertHistory(sql: Sql, vehicleId: string, before: ResolvedDocumentAlert[], after: ResolvedDocumentAlert[]) {
+  const now = new Map(after.map((r) => [r.id, JSON.stringify(r)]))
+  if (before.some((r) => now.get(r.id) !== JSON.stringify(r))) throw new Error("Resolved document alerts are kept as history and can't be changed or removed. Nothing was saved.")
+  const was = new Set(before.map((r) => r.id))
+  for (const r of after.filter((x) => !was.has(x.id)))
+    await sql(
+      `insert into core.vehicle_document_alerts (id, vehicle_id, document, reg_no, expiry_date, alert_date, new_expiry_date, resolved_at, vehicle_version)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, (select updated_at from core.vehicles where id = $2))`,
+      [r.id, vehicleId, r.document, r.regNo, r.expiryDate, r.alertDate, r.newExpiryDate, r.resolvedAt]
+    )
+}
+/**
+ * The vehicle's driver periods (core.vehicle_driver_periods), matched by id: removed ones deleted, changed ones updated
+ * (a period closes before another opens), new ones inserted. A change RLS refuses (0 rows) is never silent.
+ */
+async function syncDrivers(sql: Sql, vehicleId: string, before: DriverPeriod[], after: DriverPeriod[]) {
+  const refused = () => {
+    throw new Error("The database refused this change (your role or the month lock doesn't allow it). Nothing was saved.")
+  }
+  const was = new Map(before.map((p) => [p.id, p]))
+  const now = new Set(after.map((p) => p.id))
+  for (const p of before.filter((x) => !now.has(x.id)))
+    if (!(await sql(`delete from core.vehicle_driver_periods where id = $1 returning id`, [p.id])).length) refused()
+  for (const p of after.filter((x) => was.has(x.id) && JSON.stringify(was.get(x.id)) !== JSON.stringify(x)))
+    if (!(await sql(`update core.vehicle_driver_periods set driver_id = $2, start_date = $3, end_date = $4 where id = $1 returning id`, [p.id, p.driverId, p.startDate, p.endDate])).length) refused()
+  for (const p of after.filter((x) => !was.has(x.id)))
+    await sql(`insert into core.vehicle_driver_periods (id, vehicle_id, driver_id, start_date, end_date) values ($1, $2, $3, $4, $5)`, [p.id, vehicleId, p.driverId, p.startDate, p.endDate])
 }
 
 const drivers: Spec<Driver> = {

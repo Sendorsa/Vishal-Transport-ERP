@@ -10,7 +10,7 @@ import { readdirSync, readFileSync } from "node:fs"
 import { PGlite } from "@electric-sql/pglite"
 import { btree_gist } from "@electric-sql/pglite/contrib/btree_gist"
 import type { RequestIdentity } from "@/lib/request-scope"
-import type { AdBlueEntry, AdBluePurchase, AuditEvent, Customer, DieselEntry, IndustrialSupply } from "@/lib/types"
+import type { AdBlueEntry, AdBluePurchase, AuditEvent, Customer, DieselEntry, Driver, IndustrialSupply, TankerAdjustment, TankerTransfer, Vehicle } from "@/lib/types"
 import type { AdBlueTotals } from "@/domain/adblue-inventory"
 
 const U = { DEV: "00000000-0000-0000-0000-0000000000d1", OWNER: "00000000-0000-0000-0000-0000000000d2", EMP: "00000000-0000-0000-0000-0000000000d3", TATA: "00000000-0000-0000-0000-0000000000d4", ADB: "00000000-0000-0000-0000-0000000000d5", TATA2: "00000000-0000-0000-0000-0000000000d6" }
@@ -912,10 +912,240 @@ async function main() {
     await call(EMP, "industrialSupplies.update", sup.id, supply(alpha.id, today, 10, 95, [{ tankerId: TB, litres: 10 }]), "All from tanker B")
     assert.deepEqual(await allocRows(sup.id), [{ tanker_id: TB, litres: "10.000" }], "the Employee replaces a supply's tankers (allocation rows removed inside the audited supply edit)")
     const supplyId = sup.id
+    // A vehicle's drivers, dated (21 Nov 2026): the Employee adds drivers (one back-dated), removes one added today (the
+    // period is deleted — same-day undo, inside the audited vehicle edit), closes another on its last day and re-adds it
+    // later (a second period). DL numbers stay on the driver; PUC saved and read back.
+    type DP = { driver_id: string; start: string; end: string | null }
+    const periodRows = async (id: string) => (await db.query<DP>(`select driver_id, start_date::text as start, end_date::text as "end" from core.vehicle_driver_periods where vehicle_id = '${id}' order by start_date, driver_id`)).rows
+    const dRavi = await call<Driver>(EMP, "drivers.create", { name: "Ravi", phone: "", licenseNo: " tn70  20110001234 ", licenseValidTill: "", companyCode: "VT", status: "ACTIVE" })
+    const dMani = await call<Driver>(EMP, "drivers.create", { name: "Mani", phone: "", licenseNo: "", licenseValidTill: "", companyCode: "VT", status: "ACTIVE" })
+    assert.equal((await db.query<{ l: string }>(`select license_no as l from core.drivers where id = '${dRavi.id}'`)).rows[0].l, "TN70 20110001234", "the DL number is stored once, on the driver, cleaned")
+    await assert.rejects(call(EMP, "drivers.update", dMani.id, { licenseNo: "TN70 20110001234" }), /already recorded for Ravi/, "one DL number, one driver")
+    await call(EMP, "drivers.update", dMani.id, { licenseNo: "KA05 20190004321" })
+    await call(EMP, "vehicles.addDriver", vE.id, dRavi.id, day(20))
+    await call(EMP, "vehicles.addDriver", vE.id, dMani.id, today)
+    assert.deepEqual(await periodRows(vE.id), [{ driver_id: dRavi.id, start: day(20), end: null }, { driver_id: dMani.id, start: today, end: null }], "the Employee adds two drivers, one back-dated")
+    await call(EMP, "vehicles.removeDriver", vE.id, dMani.id, today)
+    await call(EMP, "vehicles.removeDriver", vE.id, dRavi.id, day(5))
+    await call(EMP, "vehicles.addDriver", vE.id, dRavi.id, day(2))
+    assert.deepEqual(await periodRows(vE.id), [{ driver_id: dRavi.id, start: day(20), end: day(5) }, { driver_id: dRavi.id, start: day(2), end: null }], "same-day undo removes the period; a closed period stays as history; re-added = a second period")
+    await call(EMP, "vehicles.update", vE.id, { pucValidTill: day(-30) })
+    const vE2 = (await call<Vehicle[]>(EMP, "vehicles.list")).find((x) => x.id === vE.id)!
+    assert.deepEqual([vE2.driverPeriods!.map((p) => [p.driverId, p.startDate, p.endDate]), vE2.pucValidTill], [[[dRavi.id, day(20), day(5)], [dRavi.id, day(2), null]], day(-30)], "driver periods and PUC read back through the engine")
+    await assert.rejects(call(TATA, "vehicles.addDriver", vE.id, dMani.id, today), /refused by the method list/, "the AdBlue profiles can't change a vehicle's drivers")
+    await assert.rejects(call(ADB, "vehicles.removeDriver", vE.id, dRavi.id, today), /refused by the method list/)
+    // The database's own rules: one driver's periods never overlap; two drivers never share a DL number (blanks allowed).
+    await assert.rejects(sqlAs(OWNER, `insert into core.vehicle_driver_periods (vehicle_id, driver_id, start_date) values ('${vE.id}', '${dRavi.id}', '${day(10)}'); insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), 'UPDATED', 'Vehicles', 'Vehicle', '${vE.id}')`), /vehicle_driver_periods_no_overlap/, "overlapping periods refused by the database")
+    await assert.rejects(sqlAs(OWNER, `update core.drivers set license_no = 'tn70   20110001234 ' where id = '${dMani.id}'; insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), 'UPDATED', 'Drivers', 'Driver', '${dMani.id}')`), /drivers_license_no_key/, "a duplicate DL number (spaces / case ignored) refused by the database")
+    // Document expiry alerts (22 Nov 2026): an active alert is calculated, never stored; updating the expiry date resolves
+    // it — one append-only row, written with the vehicle's audited edit, read back in later requests (a restart) by the
+    // Owner, Dev and Employee, never by the AdBlue profiles; nobody updates or deletes it through a session.
+    {
+      type DA = { vehicle_id: string; document: string; e: string; a: string; n: string | null }
+      const alertRows = async () => (await db.query<DA>(`select vehicle_id, document, expiry_date::text e, alert_date::text a, new_expiry_date::text n from core.vehicle_document_alerts order by resolved_at, id`)).rows
+      await call(EMP, "vehicles.update", vE.id, { insurance: { ...vE2.insurance, validTill: day(-3) } }) // 3 days left: active
+      assert.deepEqual(await alertRows(), [], "an active alert is never stored")
+      await call(EMP, "vehicles.update", vE.id, { insurance: { ...vE2.insurance, validTill: day(-3) }, notes: "seen" }) // viewing / unrelated edits
+      assert.deepEqual(await alertRows(), [], "an edit that keeps the expiry date resolves nothing")
+      await call(EMP, "vehicles.update", vE.id, { insurance: { ...vE2.insurance, validTill: day(-365) } })
+      const resolvedRow = { vehicle_id: vE.id, document: "Insurance", e: day(-3), a: day(4), n: day(-365) }
+      assert.deepEqual(await alertRows(), [resolvedRow], "the Employee's update resolves it: one row, the old date, when its alert began, the new date")
+      for (const id of [OWNER, DEV, EMP]) {
+        const h = (await call<Vehicle[]>(id, "vehicles.list")).find((x) => x.id === vE.id)!.documentAlertHistory!
+        assert.deepEqual(h.map((r) => [r.document, r.expiryDate, r.alertDate, r.newExpiryDate, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(r.resolvedAt)]), [["Insurance", day(-3), day(4), day(-365), true]], `${id.role} reads the history back`)
+      }
+      const adb = (await call<Vehicle[]>(ADB, "vehicles.list")).find((x) => x.id === vE.id)
+      assert.ok(adb && !("documentAlertHistory" in adb), "Adblue: the vehicle without its alert history")
+      for (const id of [TATA, ADB]) assert.deepEqual(await rowsAs(id, `select 1 from core.vehicle_document_alerts`), [], `RLS: ${id.role} reads no alert history`)
+      const ev = `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), 'UPDATED', 'Vehicles', 'Vehicle', '${vE.id}');`
+      for (const id of [OWNER, DEV, EMP, TATA, ADB])
+        for (const sql of [`update core.vehicle_document_alerts set expiry_date = '2020-01-01'; ${ev}`, `delete from core.vehicle_document_alerts; ${ev}`, `delete from core.vehicle_document_alerts`]) {
+          await assert.rejects(sqlAs(id, sql), /permission denied/, `${id.role}: history never changed or removed (no grant): ${sql.slice(0, 50)}`)
+          assert.deepEqual(await alertRows(), [resolvedRow])
+        }
+      const ver = `(select updated_at from core.vehicles where id = '${vE.id}')`
+      const ins = `insert into core.vehicle_document_alerts (vehicle_id, document, reg_no, expiry_date, alert_date, vehicle_version) values ('${vE.id}', 'PUC', 'X', '${day(0)}', '${day(30)}', ${ver});`
+      await assert.rejects(sqlAs(OWNER, ins), /no audit event|recorded only by the vehicle save/, "a row without the vehicle's save and audit event is refused")
+      await assert.rejects(sqlAs(TATA, `${ins} ${ev}`), /row-level security|permission denied/, "the AdBlue profiles can't add one")
+      await assert.rejects(sqlAs(OWNER, `${ins.replace(`'${day(30)}', ${ver});`, `'${day(-1)}', ${ver});`)} ${ev}`), /vehicle_document_alerts_dates/, "an alert can't begin after its expiry date")
+      assert.deepEqual(await alertRows(), [resolvedRow])
+
+      // Duplicate history (one row per expiry cycle), whatever the route:
+      const insurance = (d: string) => `{"provider": "", "policyNo": "", "validTill": "${d}", "premium": 0}`
+      const dupOf = (version: string) => `insert into core.vehicle_document_alerts (vehicle_id, document, reg_no, expiry_date, alert_date, new_expiry_date, vehicle_version) values ('${vE.id}', 'Insurance', 'X', '${day(-3)}', '${day(4)}', '${day(-365)}', ${version});`
+      const evBA = (b: string, a: string) => `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id, before, after) values ('SESSION', private.current_profile_id(), private.erp_role(), 'UPDATED', 'Vehicles', 'Vehicle', '${vE.id}', '{"insurance": ${insurance(b)}}'::jsonb, '{"insurance": ${insurance(a)}}'::jsonb);`
+      //  * the same cycle again, with no new save (the version the first row already holds)
+      await assert.rejects(sqlAs(OWNER, `${dupOf(ver)} ${evBA(day(-3), day(-365))}`), /vehicle_document_alerts_once|recorded only by the vehicle save|must record exactly/, "a repeated row for the same save is refused")
+      //  * a later save that doesn't change the date (notes only — its event shows the date unchanged, as the app writes it)
+      await assert.rejects(sqlAs(OWNER, `update core.vehicles set notes = 'retry' where id = '${vE.id}'; ${dupOf(ver)} ${evBA(day(-365), day(-365))}`), /recorded only by the vehicle save|must record exactly/, "a save that didn't change the date can't resolve its old cycle again")
+      //  * …nor a save that changed it to something else
+      await assert.rejects(sqlAs(OWNER, `update core.vehicles set insurance_valid_till = '${day(-366)}' where id = '${vE.id}'; ${dupOf(ver)} ${evBA(day(-365), day(-366))}`), /recorded only by the vehicle save|must record exactly/, "a row must match the change the save made")
+      //  * a row whose vehicle wasn't saved in this transaction (its version is from an earlier save)
+      await assert.rejects(sqlAs(OWNER, `${dupOf(`'${(await db.query<{ v: string }>(`select updated_at::text as v from core.vehicles where id = '${vE.id}'`)).rows[0].v}'`)} ${evBA(day(-3), day(-365))}`), /vehicle_document_alerts_once|recorded only by the vehicle save|must record exactly/, "no save, no row")
+      //  * two rows for one save
+      await assert.rejects(sqlAs(OWNER, `update core.vehicles set insurance_valid_till = '${day(-366)}' where id = '${vE.id}'; ${dupOf(ver).replace(`'${day(-365)}'`, `'${day(-366)}'`)} ${dupOf(ver).replace(`'${day(-365)}'`, `'${day(-366)}'`)} ${evBA(day(-3), day(-366))}`), /vehicle_document_alerts_once/, "one row per document per save")
+      //  * a retried request (the version the screen read is stale): refused before anything is written
+      const seen = (await call<Vehicle[]>(EMP, "vehicles.list")).find((x) => x.id === vE.id)!
+      await call(EMP, "vehicles.update", vE.id, { insurance: { ...vE2.insurance, validTill: day(-3) } }) // back to the original date: a new cycle begins
+      await assert.rejects(as(EMP, () => api.vehicles.update(vE.id, { insurance: { ...vE2.insurance, validTill: day(-3) } }), true, { [vE.id]: seen.updatedAt }), (e: unknown) => e instanceof ConflictError, "a retry with the old version is refused")
+      assert.deepEqual(await alertRows(), [resolvedRow], "…nothing added (the 1-year date never alerted, so nothing to resolve)")
+      //  * the genuine new cycle for the same expiry date is resolved again, and kept as its own row
+      await call(EMP, "vehicles.update", vE.id, { insurance: { ...vE2.insurance, validTill: day(-2) } })
+      assert.deepEqual(await alertRows(), [resolvedRow, { ...resolvedRow, n: day(-2) }], "changed back and resolved again: a second cycle, history kept")
+      await call(EMP, "vehicles.update", vE.id, { insurance: { ...vE2.insurance, validTill: day(-2) } }) // saved again, same date
+      assert.equal((await alertRows()).length, 2, "saving the same date again adds nothing")
+      //  * every document at once (the guard's paths = the app's fields), from one save: one row each
+      await call(EMP, "vehicles.update", vE.id, { roadTax: { ...vE2.roadTax, validTill: day(-4) }, fitnessValidTill: day(-20), pucValidTill: day(-25) })
+      assert.deepEqual((await alertRows()).slice(2).map((r) => [r.document, r.e, r.n]), [["PUC", day(-30), day(-25)]], "the PUC already in its window (30 days ahead) is resolved by this save too")
+      await call(EMP, "vehicles.update", vE.id, { insurance: { ...vE2.insurance, validTill: "" }, roadTax: { ...vE2.roadTax, validTill: day(-370) }, fitnessValidTill: day(-400), pucValidTill: day(-200) })
+      const all4 = (await alertRows()).slice(3)
+      assert.deepEqual(all4.map((r) => [r.document, r.e, r.n]).sort(), [["Fitness", day(-20), day(-400)], ["Insurance", day(-2), null], ["PUC", day(-25), day(-200)], ["Road tax", day(-4), day(-370)]], "Insurance (removed), Road tax, Fitness and PUC resolved by one save")
+      assert.equal((await db.query<{ n: number }>(`select count(distinct vehicle_version)::int as n from core.vehicle_document_alerts`)).rows[0].n, 4, "four saves, four versions (the four documents of the last save share one)")
+      await call(EMP, "vehicles.update", vE.id, { insurance: vE2.insurance, roadTax: vE2.roadTax, fitnessValidTill: vE2.fitnessValidTill, pucValidTill: vE2.pucValidTill }) // as before (dates outside their windows)
+      assert.equal((await alertRows()).length, 7)
+      // The stage-3 verifier (22-vehicle-document-alerts-activation-preflight.sql) agrees with the real app: every alert
+      // the engine's saves resolved has its row in the same transaction, and no row is unexplained (row 2 says
+      // "applied" here — every migration, stage 4 included, is loaded).
+      {
+        const activation = readFileSync(new URL("../../../../supabase/scripts/production-readonly/22-vehicle-document-alerts-activation-preflight.sql", import.meta.url), "utf8")
+        const rows22 = (await db.query<Record<string, string>>(activation)).rows
+        assert.deepEqual(rows22.filter((r) => r.status === "STOP").map((r) => r.check_no), [2], "22 on the app's own saves: only row 2 (stage 4 already loaded here)")
+        assert.match(rows22.find((r) => r.check_no === (4 as never))!.actual, /^\d+ · 7 · 7$/, "22: the seven alerts the app resolved, seven rows")
+      }
+
+      // Raw SQL can't bypass the lifecycle (core.vehicles trigger vehicles_document_alerts, 22 Nov 2026): every save of a
+      // vehicle must carry EXACTLY the history rows for the alerts it resolved — no fewer (a bypass), no more (a duplicate
+      // or invented one). Each statement below runs as the Owner in one transaction, as the SQL editor would.
+      {
+        const DOC = { Insurance: ["insurance_valid_till", "insurance"], "Road tax": ["road_tax_valid_till", "roadTax"], Fitness: ["fitness_valid_till", "fitnessValidTill"], PUC: ["puc_valid_till", "pucValidTill"] } as const
+        type Doc = keyof typeof DOC
+        const snap = (dates: Partial<Record<Doc, string | null>>) =>
+          JSON.stringify(Object.fromEntries(Object.entries(dates).map(([d, v]) => (DOC[d as Doc][1] === "insurance" || DOC[d as Doc][1] === "roadTax" ? [DOC[d as Doc][1], { validTill: v ?? "" }] : [DOC[d as Doc][1], v ?? ""]))))
+        const sqlDay = (d: string | null) => (d === null ? "null" : `'${d}'`)
+        // One save: UPDATE the dates (from → to), optional history rows, then its audit event recording before → after.
+        // (pg_sleep: PGlite's clock ticks in milliseconds — Postgres's in microseconds — so two raw saves in a row could
+        // otherwise share one updated_at here. Through the app every save takes several round trips anyway.)
+        const save = (from: Partial<Record<Doc, string | null>>, to: Partial<Record<Doc, string | null>>, rows = "", extra = "") =>
+          `select pg_sleep(0.002); update core.vehicles set ${Object.entries(to).map(([d, v]) => `${DOC[d as Doc][0]} = ${sqlDay(v)}`).join(", ") || "notes = notes || '.'"} where id = '${vE.id}'; ${rows} ${extra}
+           insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id, before, after) values ('SESSION', private.current_profile_id(), private.erp_role(), 'UPDATED', 'Vehicles', 'Vehicle', '${vE.id}', '${snap(from)}'::jsonb, '${snap(to)}'::jsonb);`
+        const row = (doc: Doc, expiry: string, alert: string, next: string | null, version = ver) =>
+          `insert into core.vehicle_document_alerts (vehicle_id, document, reg_no, expiry_date, alert_date, new_expiry_date, vehicle_version) values ('${vE.id}', '${doc}', 'X', '${expiry}', '${alert}', ${sqlDay(next)}, ${version});`
+        const dates = async () => (await db.query<Record<string, string | null>>(`select insurance_valid_till::text i, road_tax_valid_till::text r, fitness_valid_till::text f, puc_valid_till::text p, status::text s from core.vehicles where id = '${vE.id}'`)).rows[0]
+        const count = async () => (await alertRows()).length
+        const REFUSED = /must record exactly|recorded only by the vehicle save|vehicle_document_alerts_once/
+        const refusedRaw = async (sql: string, msg: string) => {
+          const [d0, n0] = [await dates(), await count()]
+          await assert.rejects(sqlAs(OWNER, sql), REFUSED, msg)
+          assert.deepEqual([await dates(), await count()], [d0, n0], `${msg}: nothing changed`)
+        }
+        // A known start, every date outside its warning period (nothing to resolve: no row needed, none allowed).
+        const far = { Insurance: day(-100), "Road tax": day(-100), Fitness: day(-100), PUC: day(-100) }
+        // (Through the app: the PUC is 30 days ahead — in its window — so this save resolves it and writes its row.)
+        await call(EMP, "vehicles.update", vE.id, { insurance: { ...vE2.insurance, validTill: far.Insurance }, roadTax: { ...vE2.roadTax, validTill: far["Road tax"] }, fitnessValidTill: far.Fitness, pucValidTill: far.PUC })
+        const n0 = await count()
+
+        // 1. Regression (the guard's "saved in this transaction" test): a legitimate row whose vehicle version is EARLIER
+        //    than the moment it is inserted — always so, the save stamps updated_at first — is accepted. Here 50 ms earlier.
+        await sqlAs(OWNER, save({ Insurance: far.Insurance }, { Insurance: day(-5) })) // into its window: nothing resolved yet
+        await sqlAs(OWNER, save({ Insurance: day(-5) }, { Insurance: day(-200) }, `select pg_sleep(0.05); ${row("Insurance", day(-5), day(2), day(-200))}`))
+        const [gap] = (await db.query<{ ok: boolean }>(`select resolved_at > vehicle_version + interval '40 milliseconds' as ok from core.vehicle_document_alerts order by resolved_at desc limit 1`)).rows
+        assert.deepEqual([gap.ok, await count()], [true, n0 + 1], "a valid row with a version earlier than now() / clock_timestamp() commits")
+
+        // 2. The bypass: an alerting date changed by raw SQL (or by the previous app, which writes no row) without its row.
+        await sqlAs(OWNER, save({ Insurance: day(-200), "Road tax": far["Road tax"] }, { Insurance: day(-3), "Road tax": day(-2) })) // both into their windows
+        await refusedRaw(save({ Insurance: day(-3) }, { Insurance: day(-300) }), "an active alert's date changed without its history row is refused")
+        await refusedRaw(save({ Insurance: day(-3) }, { Insurance: null }), "…so is removing the date (Not recorded)")
+
+        // 3. Several documents in one save: one row each, all of them.
+        await refusedRaw(save({ Insurance: day(-3), "Road tax": day(-2) }, { Insurance: day(-300), "Road tax": day(-301) }, row("Insurance", day(-3), day(4), day(-300))), "two alerts resolved, one row: refused")
+        await sqlAs(OWNER, save({ Insurance: day(-3), "Road tax": day(-2) }, { Insurance: day(-300), "Road tax": day(-301) }, row("Insurance", day(-3), day(4), day(-300)) + row("Road tax", day(-2), day(3), day(-301))))
+        assert.equal(await count(), n0 + 3, "two alerts resolved by one save: two rows, accepted")
+
+        // 4. Notes-only save, even with a forged audit event claiming the old change: the save resolved nothing.
+        await refusedRaw(`update core.vehicles set notes = 'notes only' where id = '${vE.id}'; ${row("Insurance", day(-3), day(4), day(-300))} ${evBA(day(-3), day(-300))}`, "a notes-only save can't re-record a resolved cycle (forged event)")
+
+        // 5. Invalid rows for a real change: wrong alert date, wrong old date, a date that wasn't in its window, an Inactive date.
+        await sqlAs(OWNER, save({ Insurance: day(-300) }, { Insurance: day(-1) }))
+        await refusedRaw(save({ Insurance: day(-1) }, { Insurance: day(-400) }, row("Insurance", day(-1), day(1), day(-400))), "wrong alert date (Insurance begins 7 days before)")
+        await refusedRaw(save({ Insurance: day(-2) }, { Insurance: day(-400) }, row("Insurance", day(-2), day(5), day(-400))), "an old date the vehicle never held (forged event and row agree)")
+        await refusedRaw(save({ Fitness: far.Fitness }, { Fitness: day(-200) }, row("Fitness", far.Fitness, day(-70), day(-200))), "a date not yet in its warning period resolves nothing")
+        await sqlAs(OWNER, save({ Fitness: far.Fitness }, { Fitness: day(-200) })) // …and needs no row
+
+        // 6. Stale versions: a row stamped with an earlier save's version — with or without a new save in this transaction.
+        const [{ v: oldVersion }] = (await db.query<{ v: string }>(`select updated_at::text v from core.vehicles where id = '${vE.id}'`)).rows
+        await refusedRaw(`${row("Fitness", far.Fitness, day(-70), day(-200), `'${oldVersion}'`)} insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id, before, after) values ('SESSION', private.current_profile_id(), private.erp_role(), 'UPDATED', 'Vehicles', 'Vehicle', '${vE.id}', '{"fitnessValidTill": "${far.Fitness}"}'::jsonb, '{"fitnessValidTill": "${day(-200)}"}'::jsonb);`, "the vehicle's current version, but saved by an earlier transaction: refused")
+        await refusedRaw(save({ Insurance: day(-1) }, { Insurance: day(-400) }, row("Insurance", day(-1), day(6), day(-400), `'${oldVersion}'`)), "a stale version with a new save: refused")
+
+        //    Why the guard tests the row's xmin, not "updated_at < now()": a version is not proof of a save in this
+        //    transaction. A vehicle INSERT may set updated_at itself (the touch trigger stamps updates only): one stamped
+        //    in the future passed the old clock test forever after; it never passes the xmin test.
+        await sqlAs(OWNER, `insert into core.vehicles (id, reg_no, company_code, type_code, fuel_type, insurance_valid_till, updated_at) values ('veh_future', 'TN70FUT0001', 'VT', 'BUS_41', 'DIESEL', '${day(-200)}', '2099-01-01T00:00:00Z');
+          insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', private.current_profile_id(), private.erp_role(), 'CREATED', 'Vehicles', 'Vehicle', 'veh_future');`)
+        await assert.rejects(sqlAs(OWNER, `insert into core.vehicle_document_alerts (vehicle_id, document, reg_no, expiry_date, alert_date, new_expiry_date, vehicle_version) values ('veh_future', 'Insurance', 'X', '${day(-5)}', '${day(2)}', '${day(-200)}', '2099-01-01T00:00:00Z');
+          insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id, before, after) values ('SESSION', private.current_profile_id(), private.erp_role(), 'UPDATED', 'Vehicles', 'Vehicle', 'veh_future', '{"insurance": {"validTill": "${day(-5)}"}}'::jsonb, '{"insurance": {"validTill": "${day(-200)}"}}'::jsonb);`), REFUSED, "a future-stamped version saved by an earlier transaction: refused (the old clock test let it through)")
+        assert.equal((await db.query(`select 1 from core.vehicle_document_alerts where vehicle_id = 'veh_future'`)).rows.length, 0)
+
+        // 7. Changing a date back. In one transaction: the first change's row can't be the latest save's — refused either way.
+        await refusedRaw(save({ Insurance: day(-1) }, { Insurance: day(-500) }, row("Insurance", day(-1), day(6), day(-500)), `update core.vehicles set insurance_valid_till = '${day(-1)}' where id = '${vE.id}';`), "A → B → A in one transaction, with a row: refused")
+        await refusedRaw(save({ Insurance: day(-1) }, { Insurance: day(-500) }, "", `update core.vehicles set insurance_valid_till = '${day(-1)}' where id = '${vE.id}';`), "A → B → A in one transaction, without: refused")
+        //    Across saves: resolved, set back (outside its window: nothing), resolved again — a second cycle, its own row.
+        await sqlAs(OWNER, save({ Insurance: day(-1) }, { Insurance: day(-500) }, row("Insurance", day(-1), day(6), day(-500))))
+        await sqlAs(OWNER, save({ Insurance: day(-500) }, { Insurance: day(-1) }))
+        await sqlAs(OWNER, save({ Insurance: day(-1) }, { Insurance: day(-600) }, row("Insurance", day(-1), day(6), day(-600))))
+        assert.deepEqual((await alertRows()).slice(-2).map((r) => [r.document, r.e, r.n]), [["Insurance", day(-1), day(-500)], ["Insurance", day(-1), day(-600)]], "changed back and resolved again: two cycles kept")
+
+        // 8. A vehicle created with a history row: a new vehicle resolved nothing.
+        await assert.rejects(sqlAs(OWNER, `insert into core.vehicles (id, reg_no, company_code, type_code, fuel_type, insurance_valid_till) values ('veh_rawnew', 'TN70RAW0001', 'VT', 'BUS_41', 'DIESEL', '${day(-3)}');
+          insert into core.vehicle_document_alerts (vehicle_id, document, reg_no, expiry_date, alert_date, new_expiry_date, vehicle_version) values ('veh_rawnew', 'Insurance', 'X', '${day(-9)}', '${day(-2)}', '${day(-3)}', (select updated_at from core.vehicles where id = 'veh_rawnew'));
+          insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id, before, after) values ('SESSION', private.current_profile_id(), private.erp_role(), 'UPDATED', 'Vehicles', 'Vehicle', 'veh_rawnew', '{"insurance": {"validTill": "${day(-9)}"}}'::jsonb, '{"insurance": {"validTill": "${day(-3)}"}}'::jsonb);`), REFUSED, "a new vehicle with an invented history row is refused")
+        assert.equal((await db.query(`select 1 from core.vehicles where id = 'veh_rawnew'`)).rows.length, 0)
+
+        // 9. Archive / restore through the app (the Employee): an archive that changes an alerting date resolves it; an
+        //    Archived vehicle raises no alerts, so its date changes — and the restore's — resolve nothing (resolvedByEdit).
+        const ins = (d: string) => ({ insurance: { ...vE2.insurance, validTill: d } })
+        await call(EMP, "vehicles.update", vE.id, ins(day(-2)))
+        const nA = await count()
+        await call(EMP, "vehicles.update", vE.id, { status: "ARCHIVED", ...ins(day(-700)) })
+        assert.deepEqual([(await dates()).s, await count(), (await alertRows()).at(-1)!.n], ["ARCHIVED", nA + 1, day(-700)], "archived in the same save that changed an alerting date: resolved, kept")
+        await call(EMP, "vehicles.update", vE.id, ins(day(-3)))
+        await call(EMP, "vehicles.update", vE.id, ins(day(-800)))
+        await call(EMP, "vehicles.update", vE.id, ins(day(-3)))
+        await refusedRaw(save({ Insurance: day(-3) }, { Insurance: day(-900) }, row("Insurance", day(-3), day(4), day(-900))), "an Archived vehicle raises no alert: a row for it is refused")
+        await call(EMP, "vehicles.update", vE.id, { status: "ACTIVE", ...ins(day(-900)) })
+        assert.deepEqual([(await dates()).s, (await dates()).i, await count()], ["ACTIVE", day(-900), nA + 1], "Archived edits and the restore (with a date change) resolve nothing, and save")
+        await call(EMP, "vehicles.update", vE.id, ins(day(-4)))
+        await call(EMP, "vehicles.update", vE.id, { notes: "after restore" })
+        await call(EMP, "vehicles.update", vE.id, ins(day(-950)))
+        assert.equal(await count(), nA + 2, "restored: notes-only saves add nothing; the next alerting change is resolved again")
+        await call(EMP, "vehicles.update", vE.id, { insurance: vE2.insurance, roadTax: vE2.roadTax, fitnessValidTill: vE2.fitnessValidTill, pucValidTill: vE2.pucValidTill })
+      }
+    }
+    // With every migration applied, the Production post-apply verifier still shows every row OK: edit_delete_guard() and
+    // its tables unchanged, the new table classified "owner/dev + audited edit", no table deletable outside an audited edit.
+    {
+      const post10 = readFileSync(new URL("../../../../supabase/scripts/production-readonly/10-adblue-vendors-post-apply.sql", import.meta.url), "utf8")
+      const stops = (await db.query<Record<string, string>>(post10)).rows.filter((r) => r.status === "STOP").map((r) => `${r.check_no} ${r.check_name}: ${r.actual}`)
+      assert.deepEqual(stops, [], "10-adblue-vendors-post-apply: every row OK after 20261121000000")
+    }
+    // The DL migration on data that already has a duplicate: it stops, names both drivers, and changes nothing.
+    {
+      const dlSql = readFileSync(new URL("20261121000100_driver_licence_unique.sql", dir), "utf8")
+      const fix = (dl: string) => `update core.drivers set license_no = '${dl}' where id = '${dMani.id}'; insert into audit.events (actor_kind, action, module, record_type, record_id) values ('SYSTEM', 'UPDATED', 'Drivers', 'Fixture', '${dMani.id}');`
+      await db.exec(`begin; drop index core.drivers_license_no_key; ${fix(" tn70 20110001234")} commit;`)
+      await assert.rejects(db.exec(dlSql), /these drivers share a DL number — TN70 20110001234: (Mani|Ravi) .*, (Mani|Ravi) /, "duplicates reported by name and id")
+      await db.exec("rollback").catch(() => undefined)
+      assert.equal((await db.query(`select 1 from pg_indexes where indexname = 'drivers_license_no_key'`)).rows.length, 0, "…nothing created")
+      assert.equal((await db.query<{ l: string }>(`select license_no as l from core.drivers where id = '${dMani.id}'`)).rows[0].l, " tn70 20110001234", "…no driver changed")
+      await db.exec(`begin; ${fix("KA05 20190004321")} commit;`)
+      await db.exec(dlSql)
+      assert.equal((await db.query(`select 1 from pg_indexes where indexname = 'drivers_license_no_key'`)).rows.length, 1, "applies once the duplicate is corrected")
+      await assert.rejects(db.exec(dlSql), /already applied/)
+      await db.exec("rollback").catch(() => undefined)
+    }
 
     // Direct DELETE statements, by each role, on every table whose rows an edit removes. Nothing may change for the
     // Employee and the AdBlue profiles — with no audit event, with an event that doesn't record the row, or on history.
-    const childTables = ["core.vehicle_assignments", "core.vehicle_status_periods", "core.customer_status_periods", "core.customer_pricing", "core.customer_route_rates", "fuel.industrial_supply_allocations"]
+    const childTables = ["core.vehicle_assignments", "core.vehicle_status_periods", "core.customer_status_periods", "core.customer_pricing", "core.customer_route_rates", "fuel.industrial_supply_allocations", "core.vehicle_driver_periods"]
     const childState = async () => JSON.stringify(await Promise.all(childTables.map(async (t) => (await db.query(`select to_jsonb(x) - 'updated_at' as r from ${t} x order by 1`)).rows)))
     const evAs = (action: string, module: string, type: string, rid: string, before: unknown) =>
       `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id, before, after) values ('SESSION', private.current_profile_id(), private.erp_role(), '${action}', '${module}', '${type}', '${rid}', '${JSON.stringify(before)}'::jsonb, '{}'::jsonb);`
@@ -925,6 +1155,10 @@ async function main() {
       `delete from core.customer_pricing where customer_id = '${epsilon.id}'; ${evAs("UPDATED", "Customers", "Customer", epsilon.id, { pricing: epsilon.pricing })}`,
       `delete from core.customer_route_rates where customer_id = '${epsilon.id}'; ${evAs("UPDATED", "Customers", "Customer", epsilon.id, {})}`, // an event that doesn't record the row
       `delete from fuel.industrial_supply_allocations where supply_id = '${supplyId}'; ${evAs("UPDATED", "Diesel", "Industrial supply", supplyId, {})}`,
+      // Driver history: closed or older periods can't be deleted, reopened or re-dated by them — even with an event recording them.
+      `delete from core.vehicle_driver_periods where vehicle_id = '${vE.id}'; ${evAs("UPDATED", "Vehicles", "Vehicle", vE.id, { driverPeriods: vE2.driverPeriods })}`,
+      `update core.vehicle_driver_periods set end_date = null where vehicle_id = '${vE.id}' and end_date is not null; ${evAs("UPDATED", "Vehicles", "Vehicle", vE.id, { driverPeriods: vE2.driverPeriods })}`,
+      `update core.vehicle_driver_periods set start_date = '2020-01-01' where vehicle_id = '${vE.id}' and end_date is not null; ${evAs("UPDATED", "Vehicles", "Vehicle", vE.id, { driverPeriods: vE2.driverPeriods })}`,
       // History: an old status period, even with an event that records it — only today's latest period is a same-day undo.
       `delete from core.vehicle_status_periods where vehicle_id = '${vA.id}'; ${evAs("RESTORED", "Vehicles", "Vehicle", vA.id, { statusHistory: (await periods("vehicle_status_periods", "vehicle_id", vA.id)).map((p) => ({ status: p.status, startDate: p.start })) })}`,
       // A customer's only period (created today) is never a same-day undo.
@@ -1157,6 +1391,48 @@ async function main() {
         assert.deepEqual(await rowsAs(id, `select id from fuel.adblue_payments union all select id from fuel.adblue_payment_allocations`), [], `RLS: ${id.role} reads no AdBlue payment`)
         await assert.rejects(sqlAs(id, `insert into fuel.adblue_payments (id, date, vendor_id, amount, mode, utr) values ('abp_${id.role}', '${today}', '${vendor.id}', 10, 'Cash', 'R-${id.role}'); ${evA(`abp_${id.role}`, "PAYMENT_RECORDED")}`), /row-level security/, `RLS: ${id.role} records no payment`)
       }
+    }
+
+    /* -------------------------------------------------------------- 12h. tanker transfers / adjustments: edit = diesel:edit, delete = Owner / Dev (owner, 18 Nov 2026) */
+    {
+      const TX = await tk("Edit X", "KA01EDT0001", 400)
+      const TY = await tk("Edit Y", "KA01EDT0002", 100)
+      const tr = await call<TankerTransfer>(EMP, "tankerTransfers.create", { date: today, fromTankerId: TX, toTankerId: TY, litres: 100, notes: "" })
+      const adj = await call<TankerAdjustment>(EMP, "tankerAdjustments.create", { date: today, tankerId: TY, litres: -20, reason: "Dip reading" })
+      assert.deepEqual([await dbStock(TX), await dbStock(TY)], [300, 180])
+      // The Employee corrects both, through the engine (RLS UPDATE policy + every trigger at COMMIT).
+      const edT = await call<TankerTransfer>(EMP, "tankerTransfers.update", tr.id, { date: today, fromTankerId: TX, toTankerId: TY, litres: 150, notes: "Corrected" }, "Wrong litres")
+      const edA = await call<TankerAdjustment>(EMP, "tankerAdjustments.update", adj.id, { date: today, tankerId: TY, litres: 15, reason: "Dip reading: 15 L more" }, "Direction was wrong")
+      assert.deepEqual([edT.id, edT.litres, edA.id, edA.litres], [tr.id, 150, adj.id, 15], "edited in place — same records, no new rows")
+      assert.deepEqual([await dbStock(TX), await dbStock(TY)], [250, 265], "stock recalculated once: X 400 − 150, Y 100 + 150 + 15")
+      const ev = async (rid: string) => (await db.query<{ action: string; actor_role: string; reason: string | null; b: string | null }>(`select action, actor_role::text, reason, before ->> 'litres' as b from audit.events where record_id = '${rid}' order by at, id`)).rows
+      assert.deepEqual((await ev(tr.id)).map((e) => [e.action, e.actor_role, e.reason, e.b]), [["CREATED", "EMPLOYEE", null, null], ["UPDATED", "EMPLOYEE", "Wrong litres", "100"]], "the edit is audited as the Employee, with the original litres")
+      assert.deepEqual((await ev(adj.id)).at(-1), { action: "UPDATED", actor_role: "EMPLOYEE", reason: "Direction was wrong", b: "-20" })
+      // Stock rules still hold on an edit — the API and the database's own trigger.
+      await assert.rejects(call(EMP, "tankerTransfers.update", tr.id, { date: today, fromTankerId: TX, toTankerId: TY, litres: 401, notes: "" }), /Insufficient tanker inventory in Edit X/)
+      await assert.rejects(sqlAs(EMP, `update fuel.tanker_transfers set litres = 401 where id = '${tr.id}'; ${evAs("UPDATED", "Diesel Tanker", "Tanker transfer", tr.id, {})}`), /Insufficient tanker inventory in Edit X/)
+      await assert.rejects(call(EMP, "tankerAdjustments.update", adj.id, { date: today, tankerId: TY, litres: -251, reason: "Dip reading" }), /Insufficient tanker inventory in Edit Y/)
+      await assert.rejects(sqlAs(EMP, `update fuel.tanker_adjustments set litres = 5 where id = '${adj.id}'`), /audit/i, "a direct UPDATE without its audit event is refused at COMMIT")
+      // Deleting: refused to the Employee and the AdBlue profiles everywhere; the AdBlue profiles edit nothing either.
+      const state = async () => JSON.stringify((await db.query(`select litres::text from fuel.tanker_transfers where id = '${tr.id}' union all select litres::text from fuel.tanker_adjustments where id = '${adj.id}'`)).rows)
+      const s0 = await state()
+      await assert.rejects(call(EMP, "tankerTransfers.remove", tr.id, "Entered twice"), /can't delete/)
+      await assert.rejects(call(EMP, "tankerAdjustments.remove", adj.id, "Entered twice"), /can't delete/)
+      for (const id of [EMP, TATA, ADB]) {
+        await sqlAs(id, `delete from fuel.tanker_transfers where id = '${tr.id}'; delete from fuel.tanker_adjustments where id = '${adj.id}'; ${evAs("DELETED", "Diesel Tanker", "Tanker transfer", tr.id, {})}`).catch(() => undefined)
+        assert.equal(await state(), s0, `${id.role}: a direct DELETE changes nothing`)
+      }
+      for (const id of [TATA, ADB]) {
+        await assert.rejects(call(id, "tankerTransfers.update", tr.id, { date: today, fromTankerId: TX, toTankerId: TY, litres: 10, notes: "" }), /refused by the method list/)
+        await sqlAs(id, `update fuel.tanker_transfers set litres = 10 where id = '${tr.id}'; update fuel.tanker_adjustments set litres = 1 where id = '${adj.id}'; ${evAs("UPDATED", "Diesel Tanker", "Tanker transfer", tr.id, {})}`).catch(() => undefined)
+        assert.equal(await state(), s0, `${id.role}: diesel:view only — a direct UPDATE changes nothing`)
+      }
+      // The Owner and Dev delete (reason kept on the DELETED event with the last snapshot); stock goes back.
+      await call(OWNER, "tankerTransfers.remove", tr.id, "Entered twice")
+      await call(DEV, "tankerAdjustments.remove", adj.id, "Entered twice")
+      assert.deepEqual((await ev(tr.id)).at(-1), { action: "DELETED", actor_role: "OWNER", reason: "Entered twice", b: "150" })
+      assert.deepEqual((await ev(adj.id)).at(-1), { action: "DELETED", actor_role: "DEV", reason: "Entered twice", b: "15" })
+      assert.deepEqual([await dbStock(TX), await dbStock(TY)], [400, 100])
     }
 
     // An Owner's direct delete commits with its audit event (the guard doesn't apply); the Employee's same statement doesn't.

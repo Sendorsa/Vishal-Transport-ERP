@@ -11,6 +11,7 @@
  */
 import { previousOdometers } from "@/domain/diesel"
 import { resolveCustomers } from "@/domain/assignments"
+import { vehicleDriverIds } from "@/domain/compliance"
 import { customerScope } from "@/lib/identity"
 import { isAdBlueProfile } from "@/lib/permissions"
 import { readCollection } from "@/lib/storage/local-store"
@@ -85,6 +86,13 @@ function reshape(shape: Shape, result: unknown, scope: ReadonlySet<string> | nul
       delete out.openingBalanceDate
       return out
     })
+  // Vehicle document alert history is Vehicles information (vehicles:view), which neither profile holds.
+  if (shape === "vehicles")
+    result = (result as Vehicle[]).map((v) => {
+      const out = { ...v }
+      delete out.documentAlertHistory
+      return out
+    })
   if (!scope) return result // Adblue: every customer
   const mine = (id: string | null) => id !== null && scope.has(id)
   switch (shape) {
@@ -101,7 +109,7 @@ function reshape(shape: Shape, result: unknown, scope: ReadonlySet<string> | nul
     }
     case "drivers": {
       const ids = vehiclesInScope(mine)
-      const drivers = new Set(readCollection("vehicles").filter((v) => ids.has(v.id)).map((v) => v.defaultDriverId))
+      const drivers = new Set(readCollection("vehicles").filter((v) => ids.has(v.id)).flatMap(vehicleDriverIds))
       return (result as Driver[]).filter((d) => drivers.has(d.id))
     }
     case "diesel": {

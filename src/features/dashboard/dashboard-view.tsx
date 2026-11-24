@@ -10,7 +10,6 @@ import {
   Fuel,
   HandCoins,
   Receipt,
-  ShieldAlert,
   TrendingDown,
   TrendingUp,
   Users,
@@ -22,9 +21,7 @@ import { ChartCard } from "@/components/shared/chart-card"
 import { Money, PageSkeleton, PeriodSelect } from "@/components/shared/misc"
 import { PageHeader } from "@/components/shared/page-header"
 import { StatsCard } from "@/components/shared/stats-card"
-import { StatusBadge } from "@/components/shared/status-badge"
 import {
-  complianceAlerts,
   customerProfitability,
   dieselInRange,
   dieselLitresInRange,
@@ -42,8 +39,9 @@ import { useDataset } from "@/lib/api/hooks"
 import { buildDieselIndex } from "@/domain/diesel"
 import { fuelWise, vehiclesByFuel } from "@/domain/expenditure"
 import { FuelTypeRows } from "@/features/diesel/fuel-type-summary"
+import { DocumentAlertsCard } from "@/features/vehicles/document-alerts"
 import { useCan, useCompanyScope } from "@/lib/app-state"
-import { formatINR, formatDate, formatDateLong, formatNumber, formatPercent, toISODate, todayDate, todayISO } from "@/lib/format"
+import { formatINR, formatDateLong, formatNumber, formatPercent, toISODate, todayDate, todayISO } from "@/lib/format"
 import {
   CustomerProfitChart,
   DieselTrendChart,
@@ -122,7 +120,6 @@ export function DashboardView() {
       series: monthlySeries(ds, monthKeysInRange(trendRange, 6, earliest)),
       customerProfit: customerProfitability(ds, range, views),
       vehicleProfit: vehicleProfitability(ds, range),
-      alerts: complianceAlerts(ds, today),
       unbilledCount: unbilled.length,
       unbilledValue: unbilled.reduce((s, t) => s + t.revenue, 0),
       tripsInRange: ds.trips.filter((t) => t.status === "COMPLETED" && t.date >= range.from && t.date <= range.to),
@@ -253,40 +250,7 @@ export function DashboardView() {
           </Card>
         )}
 
-        <Card size="sm" className="gap-2">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-sm font-semibold">
-              <ShieldAlert className="size-4 text-warning" /> Compliance due (30 days)
-            </CardTitle>
-            <CardAction>
-              <span className="text-xs text-muted-foreground">{m.alerts.length} items</span>
-            </CardAction>
-          </CardHeader>
-          <CardContent className="px-0">
-            {m.alerts.length === 0 ? (
-              <p className="px-4 py-6 text-center text-sm text-muted-foreground">All documents valid</p>
-            ) : (
-              <ul className="divide-y">
-                {m.alerts.slice(0, 6).map((a) => (
-                  <li key={`${a.vehicle.id}-${a.document}`}>
-                    <Link href={`/vehicles/${a.vehicle.id}`} className="flex items-center justify-between gap-2 px-4 py-2 text-sm hover:bg-muted/50">
-                      <div className="min-w-0">
-                        <div className="font-medium">{a.vehicle.regNo}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {a.document} · {formatDate(a.validTill)}
-                        </div>
-                      </div>
-                      <StatusBadge
-                        status={a.daysLeft < 0 ? "EXPIRED" : "EXPIRING"}
-                        label={a.daysLeft < 0 ? `Expired ${-a.daysLeft}d` : `${a.daysLeft}d left`}
-                      />
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardContent>
-        </Card>
+        <DocumentAlertsCard vehicles={ds!.vehicles} today={today} limit={6} />
 
         <Card size="sm" className="gap-2">
           <CardHeader>

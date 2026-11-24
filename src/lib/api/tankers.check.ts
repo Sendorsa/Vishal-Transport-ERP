@@ -128,6 +128,50 @@ async function main() {
   setRole("EMPLOYEE")
   setRole("OWNER")
 
+  /* ---------------------------------------------------------------- 5b. Corrections (owner, 18 Nov 2026): diesel:edit corrects transfers and adjustments; only the Owner / Dev delete */
+  const start5b = await stock()
+  const countOf = async () => [(await api.tankerTransfers.list()).length, (await api.tankerAdjustments.list()).length]
+  setRole("EMPLOYEE")
+  const trE = await api.tankerTransfers.create({ date: "2026-10-01", fromTankerId: a.id, toTankerId: c.id, litres: 100, notes: "" })
+  const adjE = await api.tankerAdjustments.create({ date: "2026-10-01", tankerId: c.id, litres: -10, reason: "Dip reading" })
+  const counts5b = await countOf()
+  await api.tankerTransfers.update(trE.id, { date: "2026-10-01", fromTankerId: a.id, toTankerId: c.id, litres: 120, notes: "Corrected" }, "Wrong litres")
+  await api.tankerAdjustments.update(adjE.id, { date: "2026-10-01", tankerId: c.id, litres: 5, reason: "Dip reading: 5 L more" }, "Direction was wrong")
+  let s5 = await stock()
+  assert.deepEqual([s5.get(a.id)!.litres, s5.get(c.id)!.litres], [start5b.get(a.id)!.litres - 120, start5b.get(c.id)!.litres + 125], "the Employee's corrections: stock from the corrected records, once")
+  assert.deepEqual(await countOf(), counts5b, "edited in place — no record added or removed")
+  const upd = (await api.audit.history(trE.id)).at(-1)!
+  assert.deepEqual([upd.action, upd.actor.role, upd.reason, (upd.before as { litres: number }).litres, (upd.after as { litres: number }).litres], ["UPDATED", "EMPLOYEE", "Wrong litres", 100, 120], "audited with before and after")
+  assert.deepEqual([(await api.audit.history(adjE.id)).at(-1)!.action, ((await api.audit.history(adjE.id)).at(-1)!.before as { litres: number }).litres], ["UPDATED", -10])
+  // Every create rule applies to an edit too.
+  await assert.rejects(api.tankerTransfers.update(trE.id, { date: "2026-10-01", fromTankerId: a.id, toTankerId: c.id, litres: 1_000_000, notes: "" }), /Insufficient tanker inventory/)
+  await assert.rejects(api.tankerAdjustments.update(adjE.id, { date: "2026-10-01", tankerId: c.id, litres: -(s5.get(c.id)!.litres + 1), reason: "Dip reading" }), /Insufficient tanker inventory in Mini Tanker/)
+  await assert.rejects(api.tankerAdjustments.update(adjE.id, { date: "2026-10-01", tankerId: c.id, litres: 5, reason: " " }), /reason for adjusting stock/)
+  await assert.rejects(api.tankerAdjustments.update(adjE.id, { date: "2026-10-01", tankerId: "tnk_default", litres: 5, reason: "Dip reading" }), /Choose the tanker/, "never onto a stock pool")
+  await assert.rejects(api.tankerTransfers.update(trE.id, { date: "2026-10-02", fromTankerId: a.id, toTankerId: c.id, litres: 120, notes: "" }), /future/)
+  await assert.rejects(api.tankerTransfers.update(tr.id, { date: "2026-09-15", fromTankerId: a.id, toTankerId: c.id, litres: 400, notes: "" }), /locked/, "month lock: the Employee can't correct a closed month")
+  await assert.rejects(api.tankerTransfers.update(trE.id, { date: "2026-09-30", fromTankerId: a.id, toTankerId: c.id, litres: 120, notes: "" }), /locked/, "…nor move a record into one")
+  // Deleting stays the Owner's and Dev's.
+  await assert.rejects(api.tankerTransfers.remove(trE.id, "Entered twice"), /can't delete fuel records/)
+  await assert.rejects(api.tankerAdjustments.remove(adjE.id, "Entered twice"), /can't delete fuel records/)
+  setRole("TATA_ADBLUE")
+  await assert.rejects(api.tankerAdjustments.update(adjE.id, { date: "2026-10-01", tankerId: c.id, litres: 5, reason: "Dip reading" }), /can't edit fuel records/, "the AdBlue profiles: Diesel is view only")
+  // An archived tanker keeps its records editable; only a newly chosen tanker must be active.
+  setRole("OWNER")
+  await api.tankers.archive(c.id)
+  setRole("EMPLOYEE")
+  await api.tankerAdjustments.update(adjE.id, { date: "2026-10-01", tankerId: c.id, litres: 5, reason: "Dip reading: 5 L more than the ledger" })
+  await assert.rejects(api.tankerAdjustments.create({ date: "2026-10-01", tankerId: c.id, litres: 5, reason: "Dip reading" }), /archived/)
+  setRole("OWNER")
+  await api.tankers.restore(c.id)
+  setRole("DEV")
+  await api.tankerAdjustments.remove(adjE.id, "Test record")
+  setRole("OWNER")
+  await api.tankerTransfers.remove(trE.id, "Test record")
+  s5 = await stock()
+  assert.deepEqual([s5.get(a.id)!.litres, s5.get(c.id)!.litres], [start5b.get(a.id)!.litres, start5b.get(c.id)!.litres], "the Owner / Dev deleted both: stock back")
+  assert.deepEqual([(await api.audit.history(trE.id)).at(-1)!.action, ((await api.audit.history(trE.id)).at(-1)!.before as { litres: number }).litres], ["DELETED", 120], "the deletion keeps the corrected record")
+
   /* ---------------------------------------------------------------- 6. Archive / restore keeps history */
   await api.tankers.archive(d.id)
   await assert.rejects(api.tankerLoads.create({ tankerId: d.id, date: today, stationId: "dv_lakshmitha", invoiceNo: "", litres: 10, rate: 95, notes: "" }), /archived/)

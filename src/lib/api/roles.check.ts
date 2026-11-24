@@ -60,18 +60,25 @@ async function main() {
     assert.equal(storage.getItem("vt:ui:role"), legacy) // the stored value is left as it was
   }
   setRole("OWNER")
-  // Sidebar (owner, 4 Nov 2026): Dev sees everything; the Owner and the Employee only Fuel + the Audit Log (with permission).
+  // Sidebar (owner, 4 Nov 2026): Dev sees everything; the Owner and the Employee only Vehicles, Fuel, Tyre + the Audit Log (with permission).
   const { NAV_ITEMS, showInNav } = await import("@/components/layout/nav")
   const shown = (role: (typeof ROLES)[number]["value"]) => NAV_ITEMS.filter((i) => can(role, i.resource) && showInNav(role, i)).map((i) => i.title)
   const fuel = NAV_ITEMS.filter((i) => i.group === "Fuel").map((i) => i.title)
   assert.deepEqual(shown("DEV"), NAV_ITEMS.map((i) => i.title))
   // Finance → Payments for the Owner (owner, 18 Nov 2026) — Invoices and Reports stay hidden; the Employee unchanged.
-  assert.deepEqual(shown("OWNER"), [...fuel, "Tyre", "Payments", "Audit Log"], "OWNER sidebar: Fuel + Tyre Data + Finance → Payments + Audit Log; no Settings, no other item")
-  assert.deepEqual(shown("OWNER"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Payments", "Audit Log"])
+  // Operations → Vehicles for the Owner and the Employee (21 Nov 2026) — Customers and Trips stay hidden.
+  assert.deepEqual(shown("OWNER"), ["Vehicles", ...fuel, "Tyre", "Payments", "Audit Log"], "OWNER sidebar: Operations → Vehicles + Fuel + Tyre Data + Finance → Payments + Audit Log; no Settings, no other item")
+  assert.deepEqual(shown("OWNER"), ["Vehicles", "Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Payments", "Audit Log"])
   assert.ok(!shown("OWNER").includes("Invoices") && !shown("OWNER").includes("Reports"), "the Owner's other Finance pages stay out of the sidebar")
   assert.ok(!shown("EMPLOYEE").includes("Payments"), "the Employee's sidebar has no Payments")
-  assert.deepEqual(shown("EMPLOYEE"), [...fuel, "Tyre", "Audit Log"], "EMPLOYEE sidebar: Fuel + Tyre Data + Audit Log (read-only); no Settings, no other section")
-  assert.deepEqual(shown("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Audit Log"])
+  assert.deepEqual(shown("EMPLOYEE"), ["Vehicles", ...fuel, "Tyre", "Audit Log"], "EMPLOYEE sidebar: Operations → Vehicles + Fuel + Tyre Data + Audit Log (read-only); no Settings, no other section")
+  assert.deepEqual(shown("EMPLOYEE"), ["Vehicles", "Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Audit Log"])
+  for (const role of ["OWNER", "EMPLOYEE"] as const) {
+    assert.ok(!shown(role).includes("Customers") && !shown(role).includes("Trips"), `${role}: the other Operations items stay out of the sidebar`)
+  }
+  // Showing Vehicles changes no permission: the Employee keeps view / create / edit and still deletes nothing.
+  assert.deepEqual((["view", "create", "edit", "delete"] as const).map((a) => can("EMPLOYEE", "vehicles", a)), [true, true, true, false], "EMPLOYEE vehicles permissions unchanged")
+  assert.deepEqual((["view", "create", "edit", "delete"] as const).map((a) => can("OWNER", "vehicles", a)), [true, true, true, true], "OWNER vehicles permissions unchanged")
   // Visibility only: the hidden modules keep every permission (direct URLs and the API behave as before).
   for (const r of ["dashboard", "customers", "vehicles", "trips", "invoices", "payments", "reports", "settings", "audit"] as const) assert.ok(can("OWNER", r), `OWNER keeps ${r}`)
   for (const r of ["dashboard", "customers", "vehicles", "trips", "invoices", "payments", "reports", "audit"] as const) assert.ok(can("EMPLOYEE", r), `EMPLOYEE has ${r}`)
@@ -83,6 +90,9 @@ async function main() {
   assert.deepEqual(tabs("DEV"), ["Dashboard", "Trips", "Diesel", "Invoices"], "Dev's tabs")
   assert.deepEqual(tabs("OWNER"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"], "Owner's tabs (Audit Log under More)")
   assert.deepEqual(tabs("EMPLOYEE"), ["Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue"], "Employee's tabs")
+  for (const role of ["OWNER", "EMPLOYEE"] as const) {
+    assert.ok(navFor(role).some((i) => i.href === "/vehicles"), `${role}: Vehicles is in the phone drawer (More)`)
+  }
   // The AdBlue profiles: AdBlue, then Diesel — the whole sidebar, drawer and tab bar.
   for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) {
     assert.deepEqual(navFor(role).map((i) => i.title), ["AdBlue", "Diesel"], `${role} sidebar`)
@@ -220,6 +230,24 @@ async function main() {
         else assert.match(outcome, /can't delete/, `${role}: ${ns}.remove refused`)
       }
     }
+    // Every edit path of the API (owner, 18 Nov 2026): the Owner, Dev and Employee pass the permission check wherever they
+    // hold the module (the Employee: every module but Settings) — an edit never needs the right to delete. The AdBlue
+    // profiles pass only where their own rules allow (AdBlue entries; never Diesel, masters or money).
+    const { PermissionError } = await import("@/lib/api")
+    const editors = Object.entries(api).filter(([, g]) => typeof (g as { update?: unknown }).update === "function").map(([ns]) => ns).filter((ns) => ns !== "settings") // settings.update(patch) takes no id: section 9 pins it
+    assert.ok(["tankerTransfers", "tankerAdjustments", "tankerLoads", "diesel", "adblue", "tyrePayments", "adbluePayments"].every((ns) => editors.includes(ns)), `every edit path found (${editors.join(", ")})`)
+    const editOutcome = async (ns: string) => {
+      const update = (api as unknown as Record<string, { update: (...a: unknown[]) => Promise<unknown> }>)[ns].update
+      return update("rec_does_not_exist", {}, "Edit permission check").then(() => "passed", (e: Error) => (e instanceof PermissionError || /^(Your role can't|Only the Owner)/.test(e.message) ? "refused" : "passed"))
+    }
+    for (const role of ["OWNER", "DEV", "EMPLOYEE"] as const) {
+      setRole(role)
+      for (const ns of editors) assert.equal(await editOutcome(ns), "passed", `${role}: ${ns}.update passes the edit permission`)
+    }
+    for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) {
+      setRole(role)
+      for (const ns of editors) if (ns !== "adblue") assert.equal(await editOutcome(ns), "refused", `${role}: ${ns}.update refused`)
+    }
     setRole("OWNER")
     await api.fuelStationPayments.remove(empPay.id, "Employee correction")
     setRole("EMPLOYEE")
@@ -322,7 +350,6 @@ async function main() {
     const allowed = ["adblue.create", "adblue.update", "adbluePurchases.create"] // adblue.remove: Owner and Dev only (16 Nov 2026)
     // Writes whose permission depends on the input: the inputs the UI's combined flows use.
     const args: Record<string, unknown[]> = {
-      "payments.create": [{ direction: "OUT", vehicleId: (await api.vehicles.list())[0].id, allocations: [] }],
       "settings.update": [{ vehicleTypes: [] }],
       "fuelStations.update": [(await api.fuelStations.list())[0]?.id ?? "x", { name: "Renamed", location: "", creditDays: 30 }],
     }

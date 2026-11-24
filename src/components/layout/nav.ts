@@ -34,12 +34,14 @@ export interface NavItem {
   mobile?: boolean
   /** Shorter label for the phone tab bar. */
   short?: string
+  /** `false`: never fills a phone tab slot — the item stays one tap away under "More". */
+  tab?: false
 }
 
 export const NAV_ITEMS: NavItem[] = [
   { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard, resource: "dashboard", group: "Overview", mobile: true },
   { title: "Customers", href: "/customers", icon: Users, resource: "customers", group: "Operations" },
-  { title: "Vehicles", href: "/vehicles", icon: Bus, resource: "vehicles", group: "Operations" },
+  { title: "Vehicles", href: "/vehicles", icon: Bus, resource: "vehicles", group: "Operations", tab: false },
   { title: "Trips", href: "/trips", icon: Route, resource: "trips", group: "Operations", mobile: true },
   // Fuel: fuel-related modules (future: fuel vendors, analytics, reconciliation, purchase orders).
   { title: "Fuel Stations", short: "Stations", href: "/fuel-stations", icon: Store, resource: "diesel", group: "Fuel" },
@@ -59,14 +61,15 @@ export const NAV_ITEMS: NavItem[] = [
 /**
  * Sidebar visibility only — not a permission (owner, 4 Nov 2026). Dev sees every item its role can use, unchanged.
  * The Owner and the Employee see only the Fuel and Tyre Data sections and the Audit Log (Settings and every other
- * section hidden; Tyre Data added 17 Nov 2026) — plus, for the Owner only, Finance → Payments (owner, 18 Nov 2026);
- * the Audit Log needs the `audit` permission (`navFor`); Settings needs `settings`, which the Employee doesn't have. Hidden modules keep
- * their routes, permissions and API access (src/lib/permissions.ts).
+ * section hidden; Tyre Data added 17 Nov 2026) — plus Operations → Vehicles for both (21 Nov 2026), and, for the Owner
+ * only, Finance → Payments (owner, 18 Nov 2026); the Audit Log needs the `audit` permission (`navFor`); Settings needs
+ * `settings`, which the Employee doesn't have. Hidden modules keep their routes, permissions and API access
+ * (src/lib/permissions.ts).
  */
 export const showInNav = (role: Role, item: NavItem) =>
   isAdBlueProfile(role)
     ? PROFILE_NAV.includes(item.href)
-    : role === "DEV" || item.group === "Fuel" || item.group === "Tyre Data" || item.href === "/audit" || (role === "OWNER" && OWNER_EXTRA_NAV.includes(item.href))
+    : role === "DEV" || item.group === "Fuel" || item.group === "Tyre Data" || item.href === "/audit" || item.href === "/vehicles" || (role === "OWNER" && OWNER_EXTRA_NAV.includes(item.href))
 
 /** Finance pages the Owner sees in the sidebar besides Fuel / Tyre Data / Audit Log (owner, 18 Nov 2026): Payments only. */
 const OWNER_EXTRA_NAV = ["/payments"]
@@ -87,10 +90,11 @@ export function navFor(role: Role) {
 /**
  * The phone tab bar: four of the role's own sidebar items (those marked `mobile` first), in sidebar order. Dev:
  * Dashboard / Trips / Diesel / Invoices; Owner and Employee: Fuel Stations / Diesel / Diesel Tankers / AdBlue.
- * Everything else stays one tap away under "More" (the full drawer). Pinned in `npm run check:roles`.
+ * Everything else — and every `tab: false` item (Vehicles) — stays one tap away under "More" (the full drawer).
+ * Pinned in `npm run check:roles`.
  */
 export function mobileTabs(role: Role) {
   const items = navFor(role)
-  const picked = new Set([...items.filter((i) => i.mobile), ...items.filter((i) => !i.mobile)].slice(0, 4))
+  const picked = new Set([...items.filter((i) => i.mobile), ...items.filter((i) => !i.mobile && i.tab !== false)].slice(0, 4))
   return items.filter((i) => picked.has(i))
 }

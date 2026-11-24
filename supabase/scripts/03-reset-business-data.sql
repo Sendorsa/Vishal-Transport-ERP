@@ -19,7 +19,7 @@ from unnest(array[
   'finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices', 'ops.trips', 'ops.tyre_payment_allocations', 'ops.tyre_payments', 'ops.tyre_invoice_items', 'ops.tyre_invoices', 'ops.tyre_masters', 
   'fuel.adblue_payment_allocations', 'fuel.adblue_payments', 'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.adblue_vendors', 'fuel.diesel_entries', 'fuel.industrial_supply_allocations', 'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
   'fuel.tankers', 'core.vehicle_assignments', 'core.vehicle_status_periods', 'core.customer_route_rates', 'core.customer_pricing',
-  'core.customer_status_periods', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'
+  'core.customer_status_periods', 'core.vehicle_driver_periods', 'core.vehicle_document_alerts', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'
 ]) as t
 where to_regclass(t) is not null;
 
@@ -67,7 +67,7 @@ begin
   foreach t in array array['core.profile_customer_access', 'finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices', 'ops.trips', 'ops.tyre_payment_allocations', 'ops.tyre_payments', 'ops.tyre_invoice_items', 'ops.tyre_invoices', 'ops.tyre_masters', 
     'fuel.adblue_payment_allocations', 'fuel.adblue_payments', 'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.adblue_vendors', 'fuel.diesel_entries', 'fuel.industrial_supply_allocations', 'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
     'fuel.tankers', 'core.vehicle_assignments', 'core.vehicle_status_periods', 'core.customer_route_rates', 'core.customer_pricing',
-    'core.customer_status_periods', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'] loop
+    'core.customer_status_periods', 'core.vehicle_driver_periods', 'core.vehicle_document_alerts', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'] loop
     if to_regclass(t) is null then continue; end if;
     execute format('delete from %s %s', t, case when t = 'fuel.fuel_stations' then 'where not is_tanker_source' else '' end);
     get diagnostics n = row_count;

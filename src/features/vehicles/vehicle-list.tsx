@@ -2,7 +2,6 @@
 
 import { useMemo, useState } from "react"
 import Link from "next/link"
-import { differenceInCalendarDays, parseISO } from "date-fns"
 import { Plus } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { DataTable, type Column } from "@/components/shared/data-table"
@@ -12,23 +11,22 @@ import { PageHeader } from "@/components/shared/page-header"
 import { CompanyBadge, StatusBadge } from "@/components/shared/status-badge"
 import { FuelBadge } from "@/components/shared/fuel-badge"
 import { vehicleProfitability, type VehicleProfit } from "@/domain/analytics"
+import { activeDocumentAlerts, expiryOf, vehicleDocuments, type ExpiryState } from "@/domain/compliance"
 import { rangeForPreset } from "@/domain/periods"
 import { useDataset } from "@/lib/api/hooks"
 import { useCan, useCompanyScope } from "@/lib/app-state"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { DocumentDuesView } from "./document-alerts"
 import { formatNumber, todayISO } from "@/lib/format"
 import type { Vehicle } from "@/lib/types"
 
 /** Earliest-expiring compliance document for a vehicle. */
 export function worstCompliance(v: Vehicle, today = todayISO()) {
-  const docs: [string, string][] = [
-    ["Insurance", v.insurance.validTill],
-    ["Road tax", v.roadTax.validTill],
-    ["Fitness", v.fitnessValidTill],
-    ["Permit", v.permitValidTill],
-  ]
-  const [doc, date] = docs.sort((a, b) => a[1].localeCompare(b[1]))[0]
-  const days = differenceInCalendarDays(parseISO(date), parseISO(today))
-  return { doc, date, days, state: days < 0 ? "EXPIRED" : days <= 30 ? "EXPIRING" : "VALID" }
+  // Dates never entered are skipped (shown as "Not recorded" on the vehicle page); none at all = MISSING.
+  const [first] = vehicleDocuments(v).filter((d) => d.validTill).sort((a, b) => a.validTill.localeCompare(b.validTill))
+  if (!first) return { doc: "", date: "", days: Number.POSITIVE_INFINITY, state: "MISSING" as ExpiryState }
+  const { state, days } = expiryOf(first.validTill, today)
+  return { doc: first.document as string, date: first.validTill, days: days!, state }
 }
 
 type Row = VehicleProfit & { customerName: string; driverName: string; typeName: string; compliance: ReturnType<typeof worstCompliance> }
@@ -57,6 +55,9 @@ export function VehicleList() {
       compliance: worstCompliance(p.vehicle),
     }))
   }, [ds])
+  // Dues tab (owner, 22 Nov 2026): the count of active document alerts (upcoming + overdue), recalculated whenever the vehicles change.
+  const alertCount = useMemo(() => (ds ? activeDocumentAlerts(ds.vehicles, todayISO()).length : 0), [ds])
+  const customerName = (v: Vehicle) => (v.assignedCustomerId ? (ds?.customers.find((c) => c.id === v.assignedCustomerId)?.name ?? "—") : "Spare")
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase().replace(/\s/g, "")
@@ -110,6 +111,8 @@ export function VehicleList() {
       cell: (r) =>
         r.compliance.state === "VALID" ? (
           <StatusBadge status="VALID" label="All valid" />
+        ) : r.compliance.state === "MISSING" ? (
+          <StatusBadge status="MISSING" label="Not recorded" tone="gray" />
         ) : (
           <StatusBadge status={r.compliance.state} label={`${r.compliance.doc} ${r.compliance.days < 0 ? "expired" : `${r.compliance.days}d`}`} />
         ),
@@ -144,53 +147,68 @@ export function VehicleList() {
           )
         }
       />
-      <FilterBar
-        canReset={canReset}
-        onReset={() => {
-          setQ("")
-          setType(ALL)
-          setStatus("ACTIVE")
-          setCompliance(ALL)
-          setOwnership(ALL)
-        }}
-        right={filtered && `${filtered.length} vehicles`}
-      >
-        <SearchBar value={q} onChange={setQ} placeholder="Search reg no, customer, driver…" />
-        <FilterSelect value={type} onChange={setType} placeholder="Types" options={(ds?.settings.vehicleTypes ?? []).map((t) => ({ value: t.code, label: t.name }))} />
-        <FilterSelect
-          value={status}
-          onChange={setStatus}
-          placeholder="Statuses"
-          allLabel="All"
-          options={[
-            { value: "ACTIVE", label: "Active" },
-            { value: "MAINTENANCE", label: "In workshop" },
-            { value: "INACTIVE", label: "Inactive" },
-            { value: "ARCHIVED", label: "Archived" },
-          ]}
-        />
-        <FilterSelect value={ownership} onChange={setOwnership} placeholder="Ownership" allLabel="Owned + attached" options={[{ value: "OWNED", label: "Owned" }, { value: "ATTACHED", label: "Attached" }]} />
-        <FilterSelect
-          value={compliance}
-          onChange={setCompliance}
-          placeholder="Documents"
-          allLabel="Any document status"
-          options={[
-            { value: "EXPIRED", label: "Expired" },
-            { value: "EXPIRING", label: "Expiring ≤ 30 days" },
-            { value: "VALID", label: "All valid" },
-          ]}
-        />
-      </FilterBar>
-      <DataTable
-        columns={columns}
-        data={filtered}
-        isLoading={isLoading}
-        getRowId={(r) => r.vehicle.id}
-        rowHref={(r) => `/vehicles/${r.vehicle.id}`}
-        initialSort={{ id: "reg", desc: false }}
-        pageSize={50}
-      />
+      {/* Opens on Vehicles every time; both views stay on /vehicles. */}
+      <Tabs defaultValue="vehicles">
+        <TabsList className="mb-4">
+          <TabsTrigger value="vehicles">Vehicles</TabsTrigger>
+          <TabsTrigger value="dues" aria-label={alertCount ? `Dues, ${alertCount} document alert${alertCount === 1 ? "" : "s"}` : "Dues"}>
+            Dues
+            {alertCount > 0 && <span className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded-md bg-red-600 px-1 text-xs font-medium text-white tabular-nums">{alertCount}</span>}
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="dues">
+          {ds && <DocumentDuesView vehicles={ds.vehicles} today={todayISO()} customerName={customerName} />}
+        </TabsContent>
+        <TabsContent value="vehicles">
+          <FilterBar
+            canReset={canReset}
+            onReset={() => {
+              setQ("")
+              setType(ALL)
+              setStatus("ACTIVE")
+              setCompliance(ALL)
+              setOwnership(ALL)
+            }}
+            right={filtered && `${filtered.length} vehicles`}
+          >
+            <SearchBar value={q} onChange={setQ} placeholder="Search reg no, customer, driver…" />
+            <FilterSelect value={type} onChange={setType} placeholder="Types" options={(ds?.settings.vehicleTypes ?? []).map((t) => ({ value: t.code, label: t.name }))} />
+            <FilterSelect
+              value={status}
+              onChange={setStatus}
+              placeholder="Statuses"
+              allLabel="All"
+              options={[
+                { value: "ACTIVE", label: "Active" },
+                { value: "MAINTENANCE", label: "In workshop" },
+                { value: "INACTIVE", label: "Inactive" },
+                { value: "ARCHIVED", label: "Archived" },
+              ]}
+            />
+            <FilterSelect value={ownership} onChange={setOwnership} placeholder="Ownership" allLabel="Owned + attached" options={[{ value: "OWNED", label: "Owned" }, { value: "ATTACHED", label: "Attached" }]} />
+            <FilterSelect
+              value={compliance}
+              onChange={setCompliance}
+              placeholder="Documents"
+              allLabel="Any document status"
+              options={[
+                { value: "EXPIRED", label: "Expired" },
+                { value: "EXPIRING", label: "Expiring ≤ 30 days" },
+                { value: "VALID", label: "All valid" },
+              ]}
+            />
+          </FilterBar>
+          <DataTable
+            columns={columns}
+            data={filtered}
+            isLoading={isLoading}
+            getRowId={(r) => r.vehicle.id}
+            rowHref={(r) => `/vehicles/${r.vehicle.id}`}
+            initialSort={{ id: "reg", desc: false }}
+            pageSize={50}
+          />
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

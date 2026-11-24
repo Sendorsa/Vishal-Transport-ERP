@@ -202,7 +202,7 @@ export function VehicleDiesel({ slug, month, reg }: { slug: string; month: strin
               ["Type", d.typeName],
               ["Make / model", [vehicle.make, vehicle.model].filter(Boolean).join(" ") || "—"],
               ["Ownership", vehicle.ownership === "ATTACHED" ? `Attached — ${vehicle.ownerName}` : "Owned"],
-              ["Rated mileage", `${vehicle.mileageKmpl} km/L`],
+              vehicle.fuelType === "EV" ? ["Rated efficiency (km/kWh)", `${vehicle.mileageKmpl} km/kWh`] : ["Rated mileage (km/L)", `${vehicle.mileageKmpl} km/L`],
               ["Odometer", `${formatNumber(vehicle.odometerKm)} km`],
               ["Fuel type", fuelLabel(vehicle.fuelType)],
             ]}

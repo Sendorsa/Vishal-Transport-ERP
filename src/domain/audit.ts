@@ -14,7 +14,8 @@ import { formatDate, formatINR, formatNumber } from "@/lib/format"
 import { roleLabel } from "@/lib/permissions"
 
 /** Not compared: bookkeeping, or a dated history whose meaning shows in `status`. Kept in the snapshot. */
-const IGNORED = new Set(["id", "createdAt", "updatedAt", "statusHistory", "assignmentPeriods", "averageCost"])
+// documentAlertHistory: kept in the snapshot; the expiry date that resolved it is the change shown.
+const IGNORED = new Set(["id", "createdAt", "updatedAt", "statusHistory", "assignmentPeriods", "averageCost", "documentAlertHistory"])
 const SECRET = /password|token|secret|otp/i
 
 /** A structured copy of a record for the audit trail: images reduced to a marker, secrets dropped. */
@@ -118,6 +119,16 @@ export function unreviewedDeletions(events: AuditEvent[], reviews: AuditReview[]
   return events.filter((e) => e.action === "DELETED" && !reviewed.has(e.id) && !restored.has(e.id))
 }
 
+/**
+ * Vehicle page → "deletions to review" indicator (owner, 22 Nov 2026): this vehicle's DELETED events (the snapshot's
+ * `vehicleId`) still needing review — the Audit Log's own review state, after the last reset (ids are reused across
+ * resets). Rows newest first, as `api.audit.list` returns them. Reviewing clears it; a later deletion shows it again.
+ */
+export function vehicleDeletionsToReview<T extends AuditEvent & { review: unknown; restoredBy: unknown }>(rowsNewestFirst: T[], vehicleId: string): T[] {
+  const reset = rowsNewestFirst.findIndex((e) => e.action === "DATA_RESET")
+  return (reset < 0 ? rowsNewestFirst : rowsNewestFirst.slice(0, reset)).filter((e) => e.action === "DELETED" && !e.review && !e.restoredBy && e.before?.vehicleId === vehicleId)
+}
+
 /* ------------------------------------------------------------------ Reading events */
 
 /** Events after the most recent data reset — record ids before it may belong to other records. */
@@ -208,6 +219,9 @@ const FIELD_LABEL: Record<string, string> = {
   stationId: "Fuel station",
   driverId: "Driver",
   defaultDriverId: "Driver",
+  driverPeriods: "Drivers",
+  licenseNo: "DL number",
+  pucValidTill: "PUC valid till",
   litres: "Litres",
   quantityLitres: "Litres",
   totalLitres: "Total litres",
@@ -238,7 +252,7 @@ const FIELD_LABEL: Record<string, string> = {
 const MONEY = new Set(["amount", "rate", "totalCost", "pricePerBucket", "revenue", "baseAmount", "extraKmAmount", "bataAmount", "tollParking", "subtotal", "cgst", "sgst", "igst", "total", "tdsAmount", "emiAmount", "openingBalance"])
 const LITRES = new Set(["litres", "quantityLitres", "totalLitres", "litresPerBucket"])
 const KM = new Set(["odometerKm", "closingKm", "startKm", "endKm", "distanceKm"])
-const DATES = new Set(["date", "startDate", "endDate", "dueDate", "periodFrom", "periodTo", "effectiveDate", "fitnessValidTill", "permitValidTill", "licenseValidTill"])
+const DATES = new Set(["date", "startDate", "endDate", "dueDate", "periodFrom", "periodTo", "effectiveDate", "fitnessValidTill", "permitValidTill", "pucValidTill", "licenseValidTill"])
 /** Fields holding another record's id → resolved to a name for display. */
 export const REF_KIND: Record<string, "vehicle" | "customer" | "station" | "driver"> = {
   vehicleId: "vehicle",
@@ -270,6 +284,10 @@ export function formatAuditValue(field: string, value: unknown, ref?: RefLookup)
     return value
   }
   if (typeof value === "boolean") return value ? "Yes" : "No"
+  if (field === "driverPeriods" && Array.isArray(value))
+    return value.length
+      ? (value as { driverId: string; startDate: string; endDate: string | null }[]).map((p) => `${ref?.("driver", p.driverId) ?? p.driverId} ${p.endDate ? `${formatDate(p.startDate)} – ${formatDate(p.endDate)}` : `from ${formatDate(p.startDate)}`}`).join("; ")
+      : "—"
   return JSON.stringify(value)
 }
 

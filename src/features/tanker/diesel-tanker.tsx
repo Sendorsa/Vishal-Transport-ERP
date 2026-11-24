@@ -25,9 +25,9 @@ import { fillAmount, isStockPool, isTankerFill, tankerLabel, tankerLedger, tanke
 import {
   useArchiveTanker,
   useCreateFuelStation,
-  useCreateTankerAdjustment,
+  useSaveTankerAdjustment,
   useCreateTankerOpening,
-  useCreateTankerTransfer,
+  useSaveTankerTransfer,
   useDeleteTankerAdjustment,
   useDeleteTankerDispense,
   useDeleteTankerLoad,
@@ -109,7 +109,7 @@ export function DieselTanker() {
   const [historyOf, setHistoryOf] = useState<string | null>(null)
   const [openingFor, setOpeningFor] = useState<Tanker | null>(null)
   const [loading, setLoading] = useState<{ load?: TankerLoad } | null>(null)
-  const [moving, setMoving] = useState<"TRANSFER" | "ADJUSTMENT" | null>(null)
+  const [moving, setMoving] = useState<{ kind: "TRANSFER" | "ADJUSTMENT"; transfer?: TankerTransfer; adjustment?: TankerAdjustment } | null>(null)
   const [deleting, setDeleting] = useState<
     { kind: "load"; load: TankerLoad } | { kind: "external"; record: TankerDispense } | { kind: "transfer"; record: TankerTransfer } | { kind: "adjustment"; record: TankerAdjustment } | null
   >(null)
@@ -216,11 +216,11 @@ export function DieselTanker() {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-56">
-                    <DropdownMenuItem disabled={active.length < 2} onSelect={() => setMoving("TRANSFER")}>
+                    <DropdownMenuItem disabled={active.length < 2} onSelect={() => setMoving({ kind: "TRANSFER" })}>
                       <ArrowLeftRight /> Transfer Between Tankers
                     </DropdownMenuItem>
                     {mayEdit && (
-                      <DropdownMenuItem disabled={!active.length} onSelect={() => setMoving("ADJUSTMENT")}>
+                      <DropdownMenuItem disabled={!active.length} onSelect={() => setMoving({ kind: "ADJUSTMENT" })}>
                         <SlidersHorizontal /> Adjust Stock
                       </DropdownMenuItem>
                     )}
@@ -577,7 +577,8 @@ export function DieselTanker() {
                 align: "right",
                 cell: (x) => (
                   <RowActions
-                    lockedReason={mayDelete && !open(x.date) ? monthLockedReason(monthLabel(x.date.slice(0, 7))) : null}
+                    lockedReason={(mayEdit || mayDelete) && !open(x.date) ? monthLockedReason(monthLabel(x.date.slice(0, 7))) : null}
+                    onEdit={mayEdit ? () => setMoving(x.transfer ? { kind: "TRANSFER", transfer: x.transfer } : { kind: "ADJUSTMENT", adjustment: x.adjustment! }) : undefined}
                     onDelete={mayDelete ? () => setDeleting(x.transfer ? { kind: "transfer", record: x.transfer } : { kind: "adjustment", record: x.adjustment! }) : undefined}
                   />
                 ),
@@ -591,7 +592,7 @@ export function DieselTanker() {
       {historyOf && <RecordHistoryDialog recordId={historyOf} onOpenChange={(o) => !o && setHistoryOf(null)} />}
       {openingFor && <OpeningStockDialog tanker={openingFor} onOpenChange={(o) => !o && setOpeningFor(null)} />}
       {loading && <LoadDialog key={loading.load?.id ?? "new"} load={loading.load} tankers={all} defaultTanker={scope} onOpenChange={(o) => !o && setLoading(null)} />}
-      {moving && <MovementDialog kind={moving} tankers={all} defaultTanker={scope} records={d.records} onOpenChange={(o) => !o && setMoving(null)} />}
+      {moving && <MovementDialog key={moving.transfer?.id ?? moving.adjustment?.id ?? moving.kind} kind={moving.kind} transfer={moving.transfer} adjustment={moving.adjustment} tankers={all} defaultTanker={scope} records={d.records} onOpenChange={(o) => !o && setMoving(null)} />}
       {deleting && (
         <DeleteDialog
           title={
@@ -805,12 +806,20 @@ function OpeningStockDialog({ tanker, onOpenChange }: { tanker: Tanker; onOpenCh
 }
 
 /** Transfer between two tankers (never a purchase), or a stock adjustment with a mandatory reason. */
-function MovementDialog({ kind, tankers, defaultTanker, records, onOpenChange }: { kind: "TRANSFER" | "ADJUSTMENT"; tankers: Tanker[]; defaultTanker: string | null; records: TankerRecords; onOpenChange: (o: boolean) => void }) {
-  const transfer = useCreateTankerTransfer()
-  const adjust = useCreateTankerAdjustment()
+function MovementDialog({ kind, transfer: editT, adjustment: editA, tankers, defaultTanker, records: all, onOpenChange }: { kind: "TRANSFER" | "ADJUSTMENT"; transfer?: TankerTransfer; adjustment?: TankerAdjustment; tankers: Tanker[]; defaultTanker: string | null; records: TankerRecords; onOpenChange: (o: boolean) => void }) {
+  const transfer = useSaveTankerTransfer()
+  const adjust = useSaveTankerAdjustment()
   const today = todayISO()
-  const [f, setF] = useState({ from: firstActive(tankers, defaultTanker), to: "", date: today, litres: "", direction: "-" as "+" | "-", text: "" })
+  const editing = editT ?? editA
+  const [f, setF] = useState(() =>
+    editT ? { from: editT.fromTankerId, to: editT.toTankerId, date: editT.date, litres: String(editT.litres), direction: "-" as "+" | "-", text: editT.notes ?? "" }
+    : editA ? { from: editA.tankerId, to: "", date: editA.date, litres: String(Math.abs(editA.litres)), direction: (editA.litres > 0 ? "+" : "-") as "+" | "-", text: editA.reason }
+    : { from: firstActive(tankers, defaultTanker), to: "", date: today, litres: "", direction: "-" as "+" | "-", text: "" }
+  )
+  const [changeReason, setChangeReason] = useState("")
   const [error, setError] = useState<string | null>(null)
+  // An edit: the record's own litres are back in the tanker while it is corrected (the API's rule).
+  const records = useMemo(() => (editing ? { ...all, transfers: all.transfers?.filter((t) => t.id !== editing.id), adjustments: all.adjustments?.filter((a) => a.id !== editing.id) } : all), [all, editing])
   const litres = Number(f.litres)
   // What can leave the tanker ON THE CHOSEN DATE — the API's rule (tankerAvailability): later loads don't count.
   const [openedAt] = useState(() => new Date().toISOString())
@@ -823,12 +832,12 @@ function MovementDialog({ kind, tankers, defaultTanker, records, onOpenChange }:
     if (!(litres > 0)) return setError("Enter the litres")
     if (kind === "TRANSFER") {
       if (!f.from || !f.to) return setError("Choose both tankers")
-      await transfer.mutateAsync({ date: f.date, fromTankerId: f.from, toTankerId: f.to, litres, notes: f.text })
-      toast.success(`Transferred ${L(litres)}`)
+      await transfer.mutateAsync({ id: editT?.id, version: editT?.updatedAt, reason: changeReason.trim() || undefined, data: { date: f.date, fromTankerId: f.from, toTankerId: f.to, litres, notes: f.text } })
+      toast.success(editT ? "Transfer updated" : `Transferred ${L(litres)}`)
     } else {
       if (!f.from) return setError("Choose the tanker")
-      await adjust.mutateAsync({ date: f.date, tankerId: f.from, litres: f.direction === "+" ? litres : -litres, reason: f.text })
-      toast.success("Stock adjusted")
+      await adjust.mutateAsync({ id: editA?.id, version: editA?.updatedAt, reason: changeReason.trim() || undefined, data: { date: f.date, tankerId: f.from, litres: f.direction === "+" ? litres : -litres, reason: f.text } })
+      toast.success(editA ? "Adjustment updated" : "Stock adjusted")
     }
     onOpenChange(false)
   }
@@ -836,9 +845,9 @@ function MovementDialog({ kind, tankers, defaultTanker, records, onOpenChange }:
     <FormModal
       open
       onOpenChange={onOpenChange}
-      title={kind === "TRANSFER" ? "Transfer Between Tankers" : "Adjust Tanker Stock"}
+      title={kind === "TRANSFER" ? (editT ? "Edit Transfer" : "Transfer Between Tankers") : editA ? "Edit Stock Adjustment" : "Adjust Tanker Stock"}
       description={kind === "TRANSFER" ? "Moves diesel from one tanker to another. Not a purchase — company stock doesn't change." : "Corrects a tanker's stock (dip reading, leak, spillage). Recorded in the audit log with its reason."}
-      submitLabel={kind === "TRANSFER" ? "Transfer" : "Save adjustment"}
+      submitLabel={editing ? "Save changes" : kind === "TRANSFER" ? "Transfer" : "Save adjustment"}
       pending={transfer.isPending || adjust.isPending}
       onSubmit={submit}
       className="sm:max-w-2xl"
@@ -865,6 +874,7 @@ function MovementDialog({ kind, tankers, defaultTanker, records, onOpenChange }:
         <Field label={kind === "TRANSFER" ? "Notes" : "Reason"} required={kind === "ADJUSTMENT"} className="sm:col-span-2">
           <Textarea rows={2} value={f.text} placeholder={kind === "ADJUSTMENT" ? "e.g. Dip reading 30 Sep 2026 — 42 L less than the ledger" : undefined} onChange={(e) => setF({ ...f, text: e.target.value })} />
         </Field>
+        {editing && <ReasonField value={changeReason} onChange={setChangeReason} className="sm:col-span-2" />}
       </div>
     </FormModal>
   )

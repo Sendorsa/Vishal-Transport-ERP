@@ -20,7 +20,7 @@ npm run check      # every business-rule check (diesel, audit, actions, restore,
 |---|---|
 | Dashboard | `/dashboard` (`/` opens Fuel Stations): KPIs, revenue/expense trends, customer and vehicle profitability, overdue, compliance, ready-to-bill |
 | Customers | `/customers`, `/customers/new`, `/customers/[id]`: pricing terms, invoices, trips, profitability |
-| Vehicles | `/vehicles`, `/vehicles/new`, `/vehicles/[id]`: insurance, road tax, maintenance, diesel, profitability |
+| Vehicles | `/vehicles`, `/vehicles/new`, `/vehicles/[id]`: insurance, road tax, diesel, profitability |
 | Trips | `/trips`, `/trips/new`, `/trips/[id]`: revenue priced from the customer's pricing model |
 | Diesel | Diesel → Month → Customer → Vehicle → Entries (see `../CLAUDE.md`). `/diesel`: month selector, KPI cards, Add Customer, customer cards. `/diesel/[customer]`: customer summary, monthly summary, vehicle list (+ Add vehicle). `/diesel/[customer]/[month]/[vehicle]`: vehicle information, diesel entries + **Add Diesel Entry**, monthly history. `/diesel/[customer]/[month]` redirects to the customer page in that month. `/diesel/ledger`: all fills + vendor payables (from the dashboard Payables card). `/diesel/monthly-master` and `/diesel/yearly-master`: master sheets by customer, vehicle and pump (design in `../CLAUDE.md`) |
 | Invoices | `/invoices`, `/invoices/new`, `/invoices/[id]`: bill unbilled trips, GST split, receipts, print |

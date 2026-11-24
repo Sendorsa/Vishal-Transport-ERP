@@ -130,6 +130,21 @@ export interface Vehicle extends BaseEntity {
   roadTax: { validTill: string; amount: number; period: "QUARTERLY" | "ANNUAL" }
   fitnessValidTill: string
   permitValidTill: string
+  /** PUC (Pollution Under Control) certificate valid till (owner, 21 Nov 2026); "" or absent = not recorded. */
+  pucValidTill?: string
+  /**
+   * Who drove this vehicle and when (owner, 21 Nov 2026; core.vehicle_driver_periods) — not the customer assignment.
+   * Inclusive dates; endDate null = drives it now. Name and DL number live on the Driver record, never here. The default
+   * driver is always listed with the current drivers (vehicleDrivers in src/domain/compliance.ts).
+   */
+  driverPeriods?: DriverPeriod[]
+  /**
+   * Resolved document expiry alerts (owner, 22 Nov 2026; core.vehicle_document_alerts), oldest first. Append-only:
+   * written only by the API when an edit changes a document's expiry date while its alert is active — never by the
+   * caller, never changed or removed. Active alerts are not stored: they follow from the current dates
+   * (activeDocumentAlerts in src/domain/compliance.ts).
+   */
+  documentAlertHistory?: ResolvedDocumentAlert[]
   emiAmount: number
   notes?: string
   /**
@@ -138,6 +153,30 @@ export interface Vehicle extends BaseEntity {
    */
   openingOdometerKm?: number | null
   openingOdometerDate?: string | null
+}
+
+/** A document expiry alert that ended because the document's expiry date was updated (kept as history). */
+export interface ResolvedDocumentAlert {
+  id: string
+  document: "Insurance" | "Road tax" | "Fitness" | "PUC"
+  /** Registration when the alert was resolved. */
+  regNo: string
+  /** The expiry date the alert was for. */
+  expiryDate: string
+  /** The day the alert began (expiry date − the document's warning period). */
+  alertDate: string
+  /** The date it was updated to; null = removed (Not recorded). */
+  newExpiryDate: string | null
+  /** When the update was saved (ISO UTC; shown in IST). Who did it is the vehicle's UPDATED audit event. */
+  resolvedAt: string
+}
+
+/** One driver's time on one vehicle (yyyy-MM-dd, inclusive; endDate null = current). */
+export interface DriverPeriod {
+  id: string
+  driverId: string
+  startDate: string
+  endDate: string | null
 }
 
 export interface Driver extends BaseEntity {

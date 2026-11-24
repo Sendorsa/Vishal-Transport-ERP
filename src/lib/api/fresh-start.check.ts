@@ -8,7 +8,7 @@
  *      takes litres out of that tanker only, at the source rate on the fill, and is never another purchase.
  *   3. Edit / delete reverse and re-apply the stock; refused or failed writes change nothing; month lock; audit.
  *   4. No bank balance tracking; fuel station payments (every mode, VT / VTHPL) still reach that station's ledger.
- *   5. Security settings: Next.js ≥ 16.4.3 installed, dev server bound to 127.0.0.1.
+ *   5. Security settings: Next.js ≥ 16.4.5 installed, dev server bound to 127.0.0.1.
  */
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
@@ -305,7 +305,7 @@ async function main() {
   /* ---------------------------------------------------------------- 8. Security settings */
   const nextVersion = JSON.parse(readFileSync("node_modules/next/package.json", "utf8")).version as string
   const [maj, min, pat] = nextVersion.split(".").map(Number)
-  assert.ok(maj === 16 && (min > 4 || (min === 4 && pat >= 3)), `Next.js ${nextVersion} is patched (≥ 16.4.3, still 16.x)`)
+  assert.ok(maj === 16 && (min > 4 || (min === 4 && pat >= 5)), `Next.js ${nextVersion} is patched (≥ 16.4.5, still 16.x)`)
   const pkg = JSON.parse(readFileSync("package.json", "utf8"))
   assert.equal(pkg.dependencies.next, nextVersion)
   assert.equal(pkg.devDependencies["eslint-config-next"], nextVersion)
