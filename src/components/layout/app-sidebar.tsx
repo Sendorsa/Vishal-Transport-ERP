@@ -24,6 +24,7 @@ import { NAV_GROUPS, isActive, navFor } from "./nav"
 import { landingFor } from "@/lib/auth/gate"
 import { hasOwnerAuthority } from "@/lib/permissions"
 import { isSharedBackend } from "@/lib/api/client"
+import { useDocumentAlertCount } from "@/features/vehicles/document-alerts"
 
 const GROUPS = NAV_GROUPS
 
@@ -74,6 +75,7 @@ export function AppSidebar() {
                           {badgeFor(item.href)}
                         </SidebarMenuBadge>
                       )}
+                      {item.href === "/vehicles" && <VehicleDuesBadge />}
                     </SidebarMenuItem>
                   ))}
                 </SidebarMenu>
@@ -89,5 +91,19 @@ export function AppSidebar() {
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>
+  )
+}
+
+/**
+ * Vehicles item: the Dues tab's count of active document alerts (hidden at 0). Rendered only where the role sees
+ * Vehicles (`navFor`), so no other role loads vehicles for it. On phones the item sits in the "More" drawer — this sidebar.
+ */
+function VehicleDuesBadge() {
+  const count = useDocumentAlertCount()
+  if (!count) return null
+  return (
+    <SidebarMenuBadge className="bg-red-600 text-white peer-hover/menu-button:text-white peer-data-active/menu-button:text-white" aria-label={`${count} document due${count === 1 ? "" : "s"}`}>
+      {count}
+    </SidebarMenuBadge>
   )
 }

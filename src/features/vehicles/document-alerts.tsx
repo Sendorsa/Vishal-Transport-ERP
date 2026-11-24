@@ -10,7 +10,9 @@ import { DataTable } from "@/components/shared/data-table"
 import { EmptyState } from "@/components/shared/misc"
 import { activeDocumentAlerts, type ActiveDocumentAlert } from "@/domain/compliance"
 import { formatAuditTime } from "@/domain/audit"
-import { formatDate } from "@/lib/format"
+import { formatDate, todayISO } from "@/lib/format"
+import { useVehicles } from "@/lib/api/hooks"
+import { useCompanyScope } from "@/lib/app-state"
 import type { ResolvedDocumentAlert, Vehicle } from "@/lib/types"
 
 const vehicleName = (v: Vehicle) => `${v.make ?? ""} ${v.model ?? ""}`.trim()
@@ -20,6 +22,20 @@ function activeText(a: ActiveDocumentAlert) {
   if (a.daysLeft > 0) return { title: `${a.document} expiring soon`, when: `Expiry ${formatDate(a.expiryDate)}`, badge: `${plural(a.daysLeft, "day")} remaining`, tone: "amber" as const }
   if (a.daysLeft === 0) return { title: `${a.document} expires today`, when: `Expiry ${formatDate(a.expiryDate)}`, badge: "Expires today", tone: "red" as const }
   return { title: `${a.document} expired`, when: `Expired ${formatDate(a.expiryDate)}`, badge: `${plural(-a.daysLeft, "day")} overdue`, tone: "red" as const }
+}
+
+/**
+ * The count of active document alerts (upcoming + overdue) — the one number behind the Dues tab on /vehicles and the
+ * sidebar's Vehicles badge. Same vehicles query and company scope as the Vehicles page (`useDataset` / `scopeDataset`).
+ */
+export function useDocumentAlertCount() {
+  const vehicles = useVehicles().data
+  const [scope] = useCompanyScope()
+  const today = todayISO()
+  return useMemo(
+    () => (vehicles ? activeDocumentAlerts(scope === "GROUP" ? vehicles : vehicles.filter((v) => v.companyCode === scope), today).length : 0),
+    [vehicles, scope, today]
+  )
 }
 
 export const ALERT_RULE_NOTE = "Alerts begin 7 days before Insurance, 5 before Road tax and 30 before PUC and Fitness expire. Permits: not yet."

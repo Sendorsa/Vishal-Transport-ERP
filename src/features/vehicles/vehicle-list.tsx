@@ -11,12 +11,12 @@ import { PageHeader } from "@/components/shared/page-header"
 import { CompanyBadge, StatusBadge } from "@/components/shared/status-badge"
 import { FuelBadge } from "@/components/shared/fuel-badge"
 import { vehicleProfitability, type VehicleProfit } from "@/domain/analytics"
-import { activeDocumentAlerts, expiryOf, vehicleDocuments, type ExpiryState } from "@/domain/compliance"
+import { expiryOf, vehicleDocuments, type ExpiryState } from "@/domain/compliance"
 import { rangeForPreset } from "@/domain/periods"
 import { useDataset } from "@/lib/api/hooks"
 import { useCan, useCompanyScope } from "@/lib/app-state"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { DocumentDuesView } from "./document-alerts"
+import { DocumentDuesView, useDocumentAlertCount } from "./document-alerts"
 import { formatNumber, todayISO } from "@/lib/format"
 import type { Vehicle } from "@/lib/types"
 
@@ -56,7 +56,7 @@ export function VehicleList() {
     }))
   }, [ds])
   // Dues tab (owner, 22 Nov 2026): the count of active document alerts (upcoming + overdue), recalculated whenever the vehicles change.
-  const alertCount = useMemo(() => (ds ? activeDocumentAlerts(ds.vehicles, todayISO()).length : 0), [ds])
+  const alertCount = useDocumentAlertCount() // shared with the sidebar's Vehicles badge
   const customerName = (v: Vehicle) => (v.assignedCustomerId ? (ds?.customers.find((c) => c.id === v.assignedCustomerId)?.name ?? "—") : "Spare")
 
   const filtered = useMemo(() => {
