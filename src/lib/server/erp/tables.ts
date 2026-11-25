@@ -595,13 +595,15 @@ const payments: Spec<Payment> = {
 }
 
 /** External dispenses have no table (D-15: none since 31 Oct 2026, nothing imported): an empty, read-only list. */
+/** Expense (Phase 1): browser backend only — no table yet; the API refuses every write on the server (api.expenses). */
+const expenses: Spec<{ id: string; updatedAt: string; createdAt: string }> = { table: null, load: async () => [] }
 const tankerDispenses: Spec<{ id: string; updatedAt: string; createdAt: string }> = { table: null, load: async () => [] }
 
 /** Every collection the API reads, with how it is stored. FK order: parents first (deletes run in reverse). */
 export const SPECS: Record<CollectionKey, Spec<never>> = {
   customers, drivers, vehicles, vehicle_assignments: assignments, month_locks: monthLocks, fuel_stations: fuelStations, tankers,
   diesel_entries: diesel, tanker_loads: tankerLoads, tanker_transfers: tankerTransfers, tanker_adjustments: tankerAdjustments,
-  industrial_supplies: industrialSupplies, tyre_masters: tyreMasters, tyre_invoices: tyreInvoices, tyre_payments: tyrePayments, adblue_vendors: adblueVendors, adblue_purchases: adbluePurchases, adblue_payments: adbluePayments, adblue_entries: adblueEntries, tanker_dispenses: tankerDispenses, invoices, trips, payments,
+  industrial_supplies: industrialSupplies, tyre_masters: tyreMasters, tyre_invoices: tyreInvoices, tyre_payments: tyrePayments, expenses, adblue_vendors: adblueVendors, adblue_purchases: adbluePurchases, adblue_payments: adbluePayments, adblue_entries: adblueEntries, tanker_dispenses: tankerDispenses, invoices, trips, payments,
 } as unknown as Record<CollectionKey, Spec<never>>
 export const WRITE_ORDER: CollectionKey[] = ["customers", "drivers", "vehicles", "vehicle_assignments", "month_locks", "fuel_stations", "tankers", "diesel_entries", "tanker_loads", "tanker_transfers", "tanker_adjustments", "industrial_supplies", "adblue_vendors", "adblue_purchases", "adblue_entries", "adblue_payments", "tyre_masters", "tyre_invoices", "tyre_payments", "invoices", "trips", "payments", "tanker_dispenses"]
 

@@ -18,7 +18,7 @@ import { PageHeader } from "@/components/shared/page-header"
 import { AdBlueOpeningDialog } from "@/features/go-live/opening-dialogs"
 import { canChangeAdBluePurchases, hasOwnerAuthority } from "@/lib/permissions"
 import { StatsCard } from "@/components/shared/stats-card"
-import { bulkStockUse, inventoryLedger, isDirectAdBlue, type VendorStockUse, purchaseSummary, stockDraws, stockFor, totalsFor, valueInventory, type VendorPurchases } from "@/domain/adblue-inventory"
+import { bulkStockUse, drawBills, inventoryLedger, isDirectAdBlue, type VendorStockUse, purchaseSummary, stockDraws, stockFor, totalsFor, valueInventory, type VendorPurchases } from "@/domain/adblue-inventory"
 import { CreatableSelect } from "@/components/shared/creatable-select"
 import { useAdBlueFinance } from "./adblue-data"
 import { AdBluePaymentsPanel } from "./adblue-payments"
@@ -103,6 +103,8 @@ export function AdBlueInventory() {
   const used = { bulk: stockFor(d.totals.ledger, period.periodMonths).consumed, direct: totalsFor(d.totals, period.periodMonths, null).directLitres }
   const p = period.label
   const entriesInPeriod = d.all.filter(period.match)
+  // Stock Usage → Indent / Bill No.: each bulk draw's supplier bills, from the FIFO run over every purchase and draw.
+  const bills = drawBills(purchases.data ?? [], stockDraws(d.all))
   const regOf = (id: string) => idx?.vehicles.get(id)?.regNo ?? regs.data?.find((v) => v.id === id)?.regNo ?? "Unknown"
   const open = (p: AdBluePurchase) => canEditMonth(role, p.date.slice(0, 7), todayISO(), locks.data ?? [])
   const mayEdit = canChangeAdBluePurchases(role, "edit")
@@ -241,8 +243,9 @@ export function AdBlueInventory() {
             vendorHeader="Source Vendor"
             rows={entriesInPeriod.filter((e) => !isDirectAdBlue(e))}
             regOf={regOf}
+            bills={bills}
             empty="No AdBlue issued from bulk stock in this period."
-            note="Cost = the purchase rate of the source vendor's batches used, oldest first; a draw across two batches shows their combined rate per litre."
+            note="Cost = the purchase rate of the source vendor's batches used, oldest first; a draw across two batches shows their combined rate per litre. Bill = the purchase bill of the batches used (none for opening or unattributed stock); Ref = the entry's own reference / job card."
           />
           <UsageTable
             title="Direct Vendor Usage"
@@ -250,8 +253,9 @@ export function AdBlueInventory() {
             vendorHeader="Vendor"
             rows={entriesInPeriod.filter(isDirectAdBlue)}
             regOf={regOf}
+            bills={bills}
             empty="No direct vendor purchases for vehicles in this period."
-            note="Cost = litres × the recorded rate. Edit or delete any entry on the vehicle's AdBlue tab."
+            note="Cost = litres × the recorded rate. Bill = the invoice / receipt number recorded on the purchase. Edit or delete any entry on the vehicle's AdBlue tab."
           />
         </TabsContent>
       </Tabs>
@@ -597,7 +601,15 @@ function VendorPurchasesTable({ title, rows, total, empty, note }: { title: stri
  * cost (`amount`, `sourceVendor`, `costRate` = cost ÷ litres), direct purchases at litres × their recorded rate. Newest
  * first; the Total row is the sum of the rows shown.
  */
-function UsageTable({ title, description, vendorHeader, rows, regOf, empty, note }: { title: string; description: string; vendorHeader: string; rows: AdBlueEntry[]; regOf: (vehicleId: string) => string; empty: string; note: string }) {
+function UsageTable({ title, description, vendorHeader, rows, regOf, bills, empty, note }: { title: string; description: string; vendorHeader: string; rows: AdBlueEntry[]; regOf: (vehicleId: string) => string; bills: Map<string, string[]>; empty: string; note: string }) {
+  // Indent / Bill No.: a direct purchase's own invoice / receipt no. is its bill; a bulk draw's bills are its source
+  // batches' (drawBills) and its own number is a reference / job card. Nothing known: "—" (never made up).
+  const refs = (e: AdBlueEntry) => {
+    const own = e.invoiceNo?.trim() ?? ""
+    const billNos = isDirectAdBlue(e) ? (own ? [own] : []) : (bills.get(e.id) ?? [])
+    return { billNos, ref: isDirectAdBlue(e) ? "" : own }
+  }
+  const refText = (e: AdBlueEntry) => [...refs(e).billNos, refs(e).ref].join(" ")
   return (
     <section>
       <h2 className="text-sm font-semibold">{title}</h2>
@@ -610,9 +622,26 @@ function UsageTable({ title, description, vendorHeader, rows, regOf, empty, note
         pageSize={25}
         initialSort={{ id: "d", desc: true }}
         emptyMessage={empty}
+        mobileColumns={["v", "ref", "l", "a"]}
         columns={[
           { id: "d", header: "Date", sortValue: (e) => e.date, cell: (e) => <span className="num">{formatDate(e.date)}</span>, footer: "Total" },
           { id: "v", header: "Vehicle", sortValue: (e) => regOf(e.vehicleId), cell: (e) => <span className="font-medium">{regOf(e.vehicleId)}</span> },
+          {
+            id: "ref",
+            header: "Indent / Bill No.",
+            sortValue: refText,
+            cell: (e) => {
+              const { billNos, ref } = refs(e)
+              if (!billNos.length && !ref) return <span className="text-muted-foreground">—</span>
+              return (
+                <span className="num">
+                  {billNos.length > 0 && <span>{billNos.length > 1 ? "Bills" : "Bill"} {billNos.join(", ")}</span>}
+                  {billNos.length > 0 && ref && <span className="text-muted-foreground"> · </span>}
+                  {ref && <span className="text-muted-foreground">Ref {ref}</span>}
+                </span>
+              )
+            },
+          },
           { id: "vendor", header: vendorHeader, sortValue: (e) => e.sourceVendor ?? "", cell: (e) => <span className={e.adblueVendorId || isDirectAdBlue(e) ? "" : "text-muted-foreground"}>{e.sourceVendor || "—"}</span> },
           { id: "l", header: "Litres", align: "right", sortValue: (e) => e.quantityLitres, cell: (e) => <span className="num">{L(e.quantityLitres)}</span>, footer: L(round2(rows.reduce((t, e) => t + e.quantityLitres, 0))) },
           { id: "r", header: "Rate / L", align: "right", sortValue: (e) => e.costRate ?? 0, cell: (e) => <span className="num">{e.costRate ? formatINR(e.costRate) : "—"}</span> },

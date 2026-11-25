@@ -9,7 +9,7 @@ import { checkTanker, setRole, storage } from "./test-browser"
 
 async function main() {
   const { api } = await import("./index")
-  const { can, RESOURCES, DEV_ONLY, ROLES, roleLabel, hasOwnerAuthority, canBypassMonthLock, canSetMonthLock, canChangeAdBluePurchases, isAdBlueProfile, canDelete } = await import("@/lib/permissions")
+  const { can, RESOURCES, DEV_ONLY, UNRELEASED, ROLES, roleLabel, hasOwnerAuthority, canBypassMonthLock, canSetMonthLock, canChangeAdBluePurchases, isAdBlueProfile, canDelete } = await import("@/lib/permissions")
   const { currentRole } = await import("@/lib/app-state")
   const { canEditMonth } = await import("@/domain/month-lock")
   const { actorLabel } = await import("@/domain/audit")
@@ -20,12 +20,17 @@ async function main() {
   for (const r of RESOURCES)
     for (const a of actions) {
       assert.ok(can("DEV", r, a), `DEV has ${r}:${a}`) // Dev: everything
-      // The Owner: every business module, never a Dev-only resource (account / system administration).
-      assert.equal(can("OWNER", r, a), !DEV_ONLY.includes(r), `OWNER ${r}:${a}`)
+      // The Owner: every business module, never a Dev-only resource (account / system administration) and not yet an
+      // unreleased module (Expense, Dev only — owner, 25 Nov 2026).
+      assert.equal(can("OWNER", r, a), !DEV_ONLY.includes(r) && !UNRELEASED.includes(r), `OWNER ${r}:${a}`)
       // The Employee (owner, 5 Nov 2026): exactly the Owner, except Settings — and (16 Nov 2026) deleting nothing.
       assert.equal(can("EMPLOYEE", r, a), can("OWNER", r, a) && r !== "settings" && a !== "delete", `EMPLOYEE ${r}:${a}`)
     }
   assert.deepEqual([...DEV_ONLY], ["accounts", "system"])
+  assert.deepEqual([...UNRELEASED], ["expenses"], "Expense: Dev only until released")
+  for (const role of ["OWNER", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"] as const) for (const a of actions) assert.equal(can(role, "expenses", a), false, `${role} has no expenses:${a}`)
+  // Taking Expense off the payments permission changed nothing for Payments.
+  assert.deepEqual((["view", "create", "edit", "delete"] as const).map((a) => [can("OWNER", "payments", a), can("EMPLOYEE", "payments", a)]), [[true, true], [true, true], [true, true], [true, false]])
   for (const role of ["OWNER", "EMPLOYEE"] as const) for (const r of DEV_ONLY) assert.equal(can(role, r, "view"), false, `${role} never reaches ${r}`)
   assert.ok(hasOwnerAuthority("OWNER") && hasOwnerAuthority("DEV") && hasOwnerAuthority("EMPLOYEE"))
   assert.ok(can("OWNER", "audit") && can("DEV", "audit") && can("EMPLOYEE", "audit"))
@@ -64,14 +69,18 @@ async function main() {
   const { NAV_ITEMS, showInNav } = await import("@/components/layout/nav")
   const shown = (role: (typeof ROLES)[number]["value"]) => NAV_ITEMS.filter((i) => can(role, i.resource) && showInNav(role, i)).map((i) => i.title)
   const fuel = NAV_ITEMS.filter((i) => i.group === "Fuel").map((i) => i.title)
+  // Expense (owner, 25 Nov 2026): five sections, Dev only while unreleased (permission `expenses`).
+  const expense = NAV_ITEMS.filter((i) => i.group === "Expense").map((i) => i.title)
   assert.deepEqual(shown("DEV"), NAV_ITEMS.map((i) => i.title))
   // Finance → Payments for the Owner (owner, 18 Nov 2026) — Invoices and Reports stay hidden; the Employee unchanged.
   // Operations → Vehicles for the Owner and the Employee (21 Nov 2026) — Customers and Trips stay hidden.
-  assert.deepEqual(shown("OWNER"), ["Vehicles", ...fuel, "Tyre", "Payments", "Audit Log"], "OWNER sidebar: Operations → Vehicles + Fuel + Tyre Data + Finance → Payments + Audit Log; no Settings, no other item")
+  assert.deepEqual(shown("OWNER"), ["Vehicles", ...fuel, "Tyre", "Payments", "Audit Log"], "OWNER sidebar: Operations → Vehicles + Fuel + Tyre Data + Finance → Payments + Audit Log; no Expense (Dev only), no Settings, no other item")
   assert.deepEqual(shown("OWNER"), ["Vehicles", "Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Payments", "Audit Log"])
   assert.ok(!shown("OWNER").includes("Invoices") && !shown("OWNER").includes("Reports"), "the Owner's other Finance pages stay out of the sidebar")
   assert.ok(!shown("EMPLOYEE").includes("Payments"), "the Employee's sidebar has no Payments")
-  assert.deepEqual(shown("EMPLOYEE"), ["Vehicles", ...fuel, "Tyre", "Audit Log"], "EMPLOYEE sidebar: Operations → Vehicles + Fuel + Tyre Data + Audit Log (read-only); no Settings, no other section")
+  assert.deepEqual(expense, ["Road Tax", "Insurance", "Fitness", "Fines", "Broker Charges"], "Expense: five sections, in order")
+  assert.deepEqual(shown("DEV").filter((t) => expense.includes(t)), expense, "DEV sees all five Expense sections")
+  assert.deepEqual(shown("EMPLOYEE"), ["Vehicles", ...fuel, "Tyre", "Audit Log"], "EMPLOYEE sidebar: Operations → Vehicles + Fuel + Tyre Data + Audit Log (read-only); no Expense (Dev only), no Settings, no other section")
   assert.deepEqual(shown("EMPLOYEE"), ["Vehicles", "Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Audit Log"])
   for (const role of ["OWNER", "EMPLOYEE"] as const) {
     assert.ok(!shown(role).includes("Customers") && !shown(role).includes("Trips"), `${role}: the other Operations items stay out of the sidebar`)
@@ -226,7 +235,8 @@ async function main() {
       for (const ns of removers) {
         const remove = (api as unknown as Record<string, { remove: (id: string, reason: string) => Promise<unknown> }>)[ns].remove
         const outcome = await remove("rec_does_not_exist", "Delete permission check").then(() => "ok", (e: Error) => e.message)
-        if (role === "OWNER" || role === "DEV") assert.ok(!/can't delete/.test(outcome), `${role}: ${ns}.remove passes the delete permission (${outcome})`)
+        // Expense is Dev only while unreleased (owner, 25 Nov 2026): the Owner is refused there too.
+        if (role === "DEV" || (role === "OWNER" && ns !== "expenses")) assert.ok(!/can't delete/.test(outcome), `${role}: ${ns}.remove passes the delete permission (${outcome})`)
         else assert.match(outcome, /can't delete/, `${role}: ${ns}.remove refused`)
       }
     }
@@ -242,7 +252,8 @@ async function main() {
     }
     for (const role of ["OWNER", "DEV", "EMPLOYEE"] as const) {
       setRole(role)
-      for (const ns of editors) assert.equal(await editOutcome(ns), "passed", `${role}: ${ns}.update passes the edit permission`)
+      // Expense: Dev only while unreleased (owner, 25 Nov 2026).
+      for (const ns of editors) assert.equal(await editOutcome(ns), ns === "expenses" && role !== "DEV" ? "refused" : "passed", `${role}: ${ns}.update ${ns === "expenses" && role !== "DEV" ? "refused" : "passes the edit permission"}`)
     }
     for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) {
       setRole(role)

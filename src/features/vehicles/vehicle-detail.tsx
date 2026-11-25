@@ -18,7 +18,8 @@ import { FillPaymentBadge, MileageHeader, mileageText } from "@/features/diesel/
 import { buildDieselIndex, fillRow } from "@/domain/diesel"
 import { categoryName } from "@/domain/analytics"
 import { vehicleFyFuel } from "@/domain/vehicle-summary"
-import { useDataset } from "@/lib/api/hooks"
+import { useDataset, useExpenses } from "@/lib/api/hooks"
+import { latestPayment } from "@/domain/expenses"
 import { useCan } from "@/lib/app-state"
 import { formatINR, formatDate, formatNumber, todayISO } from "@/lib/format"
 import { VehicleDriversCard } from "./vehicle-drivers"
@@ -35,6 +36,7 @@ export function VehicleDetail({ id }: { id: string }) {
   const can = useCan()
   const finance = can("finance", "view")
   const { data: ds, isLoading } = useDataset()
+  const expenses = useExpenses()
   const [editing, setEditing] = useState(false)
   const [tab, setTab] = useState("overview")
   const today = todayISO()
@@ -89,10 +91,15 @@ export function VehicleDetail({ id }: { id: string }) {
   const incomplete = gapIssues.filter(([x]) => x.fills > 0)
   const shortBy = incomplete.reduce((t, [x]) => t + x.fills, 0)
   const unreliable = f.incomplete.lower.fills > 0 // a lower reading can push the figure either way
+  // The latest Road Tax / Insurance / Fitness payment from Expense (this vehicle's own records), when the role sees Expense.
+  const paidLine = (section: "ROAD_TAX" | "INSURANCE" | "FITNESS") => {
+    const x = can("expenses") ? latestPayment(expenses.data ?? [], v.id, section) : null
+    return x ? `last paid ${formatINR(x.amount)} on ${formatDate(x.date)}${x.description ? ` (${x.description})` : ""}` : ""
+  }
   const docs: [string, string, string][] = [
-    ["Insurance", v.insurance.validTill, [v.insurance.provider, v.insurance.policyNo, v.insurance.premium ? `premium ${formatINR(v.insurance.premium)}` : ""].filter(Boolean).join(" · ") || "Vehicle insurance"],
-    ["Road tax", v.roadTax.validTill, `${v.roadTax.period === "QUARTERLY" ? "Quarterly" : "Annual"}${v.roadTax.amount ? ` · ${formatINR(v.roadTax.amount)}` : ""}`],
-    ["Fitness (FC)", v.fitnessValidTill, "RTO fitness certificate"],
+    ["Insurance", v.insurance.validTill, [v.insurance.provider, v.insurance.policyNo, paidLine("INSURANCE") || (v.insurance.premium ? `premium ${formatINR(v.insurance.premium)}` : "")].filter(Boolean).join(" · ") || "Vehicle insurance"],
+    ["Road tax", v.roadTax.validTill, [v.roadTax.period === "QUARTERLY" ? "Quarterly" : "Annual", paidLine("ROAD_TAX") || (v.roadTax.amount ? formatINR(v.roadTax.amount) : "")].filter(Boolean).join(" · ")],
+    ["Fitness (FC)", v.fitnessValidTill, paidLine("FITNESS") || "RTO fitness certificate"],
     ["Permit", v.permitValidTill, v.typeCode.startsWith("TRUCK") || v.typeCode === "PICKUP" ? "Goods carriage permit" : "Contract carriage permit"],
     ["PUC", v.pucValidTill ?? "", "Pollution Under Control certificate"],
   ]

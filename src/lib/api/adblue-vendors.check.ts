@@ -27,7 +27,7 @@ globalThis.Date = FixedDate as DateConstructor
 async function main() {
   const { api } = await import("./index")
   const { todayISO } = await import("@/lib/format")
-  const { valueInventory, vendorLedger, inventoryLedger, stockDraws, stockFor, NO_VENDOR } = await import("@/domain/adblue-inventory")
+  const { valueInventory, vendorLedger, inventoryLedger, stockDraws, stockFor, NO_VENDOR, drawBills } = await import("@/domain/adblue-inventory")
   const { readCollection, writeCollection, migrateStorage, readAuditEvents } = await import("@/lib/storage/local-store")
   assert.equal(todayISO(), "2026-11-10")
   setRole("OWNER")
@@ -191,6 +191,25 @@ async function main() {
   assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"], "serialised: the second sees the first")
   assert.match(String((results.find((r) => r.status === "rejected") as PromiseRejectedResult).reason), /Insufficient AdBlue stock from Vendor D\. Available: 5L/)
   assert.ok([...valueInventory(await api.adbluePurchases.list(), stockDraws(await api.adblue.list())).vendorStock.values()].every((s) => s.litres >= 0), "no vendor below zero")
+
+  /* Stock Usage → Indent / Bill No. (owner, 25 Nov 2026): each bulk draw's bills = its FIFO source batches' bill numbers */
+  {
+    const at = "2026-11-01T00:00:00.000Z"
+    const pur = (id: string, date: string, litres: number, vendor: string | null, invoiceNo: string, opening = false) => ({ id, date, createdAt: at, totalLitres: litres, totalCost: litres * 50, adblueVendorId: vendor, invoiceNo, opening })
+    const drw = (id: string, date: string, litres: number, vendor: string | null, old = false) => ({ id, date, createdAt: at, quantityLitres: litres, adblueVendorId: vendor, beforeVendorTracking: old })
+    const purchases = [pur("p_open", "2026-10-31", 50, null, "", true), pur("p_a1", "2026-11-02", 100, "v_a", "INV-A1"), pur("p_a2", "2026-11-03", 100, "v_a", "INV-A2"), pur("p_b1", "2026-11-04", 80, "v_b", " "), pur("p_b2", "2026-11-05", 80, "v_b", "INV-B2")]
+    const draws = [
+      drw("d1", "2026-11-06", 60, "v_a"), // all from INV-A1
+      drw("d2", "2026-11-07", 60, "v_a"), // 40 L of INV-A1 + 20 L of INV-A2: both bills
+      drw("d3", "2026-11-08", 10, null), // unattributed (opening) stock: no bill
+      drw("d4", "2026-11-09", 80, "v_b"), // a batch saved without a bill number: none shown, nothing made up
+      drw("d5", "2026-11-10", 30, "v_b"), // INV-B2
+      drw("d6", "2026-11-11", 30, null, true), // old draw while A, B and opening stock held litres: source unknown → no bill
+    ]
+    const bills = drawBills(purchases, draws)
+    assert.deepEqual(["d1", "d2", "d3", "d4", "d5", "d6"].map((id) => bills.get(id)), [["INV-A1"], ["INV-A1", "INV-A2"], [], [], ["INV-B2"], []], "each draw shows only its own batches' bills, in the order taken")
+    assert.notDeepEqual(bills.get("d1"), bills.get("d5"), "rows differ — never one number for every row")
+  }
 
   console.log("AdBlue vendors: master, attribution, FIFO costing, vendor ledger, edits / deletes / restore, direct purchases, history, month lock, permissions and concurrency: all checks passed")
 }

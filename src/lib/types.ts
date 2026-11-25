@@ -188,6 +188,55 @@ export interface Driver extends BaseEntity {
   status: EntityStatus
 }
 
+/* ----------------------------------------------------------------------------- Expense (Phase 1, browser only) */
+
+/** Expense → Road Tax, Insurance, Fitness, Fines, Broker Charges (owner, 25 Nov 2026). */
+export type ExpenseSection = "ROAD_TAX" | "INSURANCE" | "FITNESS" | "FINE" | "BROKER"
+/** Broker Charges only: a new charge (expense), a payment to the broker, or the opening balance brought forward (neither is an expense). */
+export type BrokerEntryType = "CHARGE" | "PAYMENT" | "BROUGHT_FORWARD"
+
+/**
+ * One expense record (collection `expenses`, browser backend only — not on the shared database yet). One flat shape for
+ * the five sections; a field a section doesn't use stays "" / 0 / null. Vehicles come from the vehicle master (ids only).
+ */
+export interface Expense extends BaseEntity {
+  section: ExpenseSection
+  /** Transaction date (Fines: the fine date). */
+  date: string
+  /** One vehicle (Road Tax, Insurance, Fitness, Fines); none or several (Broker Charges). */
+  vehicleIds: string[]
+  /** The vehicle's customer on `date`, stamped by the API (single-vehicle sections); null = none that day. */
+  customerId: string | null
+  /** Account payable / paid by (VT or VTHPL); null = not recorded. */
+  companyCode: CompanyCode | null
+  description: string
+  /** Amount / premium / fine / broker charge (Broker payment: 0). */
+  amount: number
+  remarks: string
+  /** Validity period (inclusive); "" = the payment covers no period. */
+  validFrom: string
+  validTill: string
+  /** Road Tax: tax type (Same state, Interstate…). Fines: fine type. */
+  taxType: string
+  /** Insurance. */
+  provider: string
+  policyNo: string
+  /** Payment information (Insurance, Fines, Broker). */
+  paymentMode: string
+  paymentReference: string
+  /** Fines: PAID / UNPAID. */
+  paymentStatus: "PAID" | "UNPAID" | null
+  /** Fines: the day it was paid. Broker: the cleared date. */
+  paymentDate: string
+  /** Broker Charges. */
+  entryType: BrokerEntryType | null
+  broker: string
+  purpose: string
+  operatingCompany: string
+  vehicleCount: number
+  paidAmount: number
+}
+
 /* ----------------------------------------------------------------------------- Trips */
 
 export type TripStatus = "PLANNED" | "COMPLETED" | "CANCELLED"
@@ -837,6 +886,7 @@ export interface CollectionMap {
   tyre_masters: TyreMaster
   tyre_invoices: TyreInvoice
   tyre_payments: TyrePayment
+  expenses: Expense
   month_locks: MonthLock
   invoices: Invoice
   payments: Payment

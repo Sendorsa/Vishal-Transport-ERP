@@ -9,13 +9,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { api } from "./client"
 import { withVersions } from "@/lib/versions"
-import { useCompanyScope, useRole } from "@/lib/app-state"
+import { useCan, useCompanyScope, useRole } from "@/lib/app-state"
 import { canEditMonth, monthLockInfo } from "@/domain/month-lock"
 import { canSetMonthLock } from "@/lib/permissions"
 import { todayISO } from "@/lib/format"
 import { scopeDataset, type Dataset } from "@/domain/analytics"
 import { withRuns } from "@/domain/adblue"
 import type { InvoiceDraftInput } from "@/domain/invoicing"
+import type { ExpenseInput } from "@/domain/expenses"
 import type { CollectionKey, Customer, Driver, EntityStatus, NewEntity, Payment, Settings, Vehicle } from "@/lib/types"
 import type { AdBlueInput, AdBluePaymentInput, AdBluePurchaseInput, AdBlueVendorInput, IndustrialSupplyInput, TyreInvoiceInput, TyreMasterInput, TyrePaymentInput, TankerAdjustmentInput, TankerInput, TankerLoadInput, TankerTransferInput, TripInput } from "@/lib/api"
 
@@ -40,6 +41,7 @@ export const queryKeys = {
   tyre_masters: ["tyre_masters"] as const,
   tyre_invoices: ["tyre_invoices"] as const,
   tyre_payments: ["tyre_payments"] as const,
+  expenses: ["expenses"] as const,
   adblue_payments: ["adblue_payments"] as const,
   invoices: ["invoices"] as const,
   payments: ["payments"] as const,
@@ -65,6 +67,7 @@ const MODULE_KEYS: Record<string, (keyof typeof queryKeys)[]> = {
   Settings: ["settings"],
   "Month Lock": ["month_locks"],
   Tyre: ["tyre_invoices", "tyre_masters", "tyre_payments"],
+  Expense: ["expenses"],
 }
 export function keysForModules(modules: string[]) {
   return [...new Set([...modules.flatMap((m) => MODULE_KEYS[m] ?? []), "audit" as const])]
@@ -756,6 +759,28 @@ export function useDeleteTyrePayment() {
 export function useDeleteTyreInvoice() {
   const invalidate = useInvalidate()
   return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.tyreInvoices.remove(id, reason)), onSuccess: () => invalidate("tyre_invoices"), onError })
+}
+
+/* ------------------------------------------------------------------ Expense (Phase 1: browser backend only) */
+
+/** Only for roles that may view Expense (Dev while it is unreleased) — the API refuses the others. */
+export function useExpenses() {
+  const can = useCan()
+  return useQuery({ queryKey: queryKeys.expenses, queryFn: () => api.expenses.list(), enabled: can("expenses") })
+}
+
+export function useSaveExpense() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, data, reason, version }: { id?: string; data: ExpenseInput; reason?: string; version?: string }) => v(id, version, () => (id ? api.expenses.update(id, data, reason) : api.expenses.create(data))),
+    onSuccess: () => invalidate("expenses"),
+    onError,
+  })
+}
+
+export function useDeleteExpense() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: ({ id, reason, version }: { id: string; reason: string; version?: string }) => v(id, version, () => api.expenses.remove(id, reason)), onSuccess: () => invalidate("expenses"), onError })
 }
 
 /* ------------------------------------------------------------------ Go-live openings (owner, 3 Nov 2026) — Owner / Dev */

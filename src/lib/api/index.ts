@@ -25,12 +25,13 @@ import { cleanName, CREDIT, financialChanges, itemProblem, lineAmounts, masterKe
 import { assignmentIndex, assignmentOn, correctedPeriods, handedOverBy, inferAssignments, isCalendarDate, movedRecords, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type AttributedRecords, type MovedRecord, type StartDateProblem } from "@/domain/assignments"
 import { formatDate, formatINR, formatNumber, round2, todayISO, formatLitres } from "@/lib/format"
 import { appendAuditEvent, appendAuditReviews, readAuditEvents, readAuditReviews, readCollection, readSettings, runInTransaction, writeCollection, writeSettings } from "@/lib/storage/local-store"
-import type { AdBlueEntry, AdBluePayment, AdBluePurchase, AdBlueVendor, AuditEvent, CompanyCode, Customer, DieselEntry, Driver, FuelStation, IndustrialSupply, Invoice, NewEntity, TyreInvoice, TyreInvoiceItem, TyreMaster, TyreMasterKind, TyrePayment, TyreTaxType, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
+import type { AdBlueEntry, AdBluePayment, AdBluePurchase, AdBlueVendor, AuditEvent, CompanyCode, Expense, Customer, DieselEntry, Driver, FuelStation, IndustrialSupply, Invoice, NewEntity, TyreInvoice, TyreInvoiceItem, TyreMaster, TyreMasterKind, TyrePayment, TyreTaxType, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
 import { ensureSeeded, exportBackup, loadDemoData, loadEmptyWorkspace, parseBackup, restoreBackup, type BackupFile } from "./bootstrap"
 import { createLocalRepository, latency, newId, NotFoundError } from "./repository"
 import { ConflictError, pendingVersions, runWithVersions } from "@/lib/versions"
 import { NeedData, requestScope } from "@/lib/request-scope"
 import { cleanWorkspace } from "@/lib/storage/seed"
+import { BROKER_ENTRY_LABEL, EXPENSE_SECTIONS, expenseProblems, hasValidity, textKey, type ExpenseInput } from "@/domain/expenses"
 
 export { NotFoundError, ConflictError }
 
@@ -85,6 +86,7 @@ const industrialSupplies = createLocalRepository("industrial_supplies", "ind") /
 const tyreMasters = createLocalRepository("tyre_masters", "tym") // /api/tyre-masters
 const tyreInvoices = createLocalRepository("tyre_invoices", "tyr") // /api/tyre-invoices
 const tyrePayments = createLocalRepository("tyre_payments", "tpy") // /api/tyre-payments
+const expenses = createLocalRepository("expenses", "exp") // Expense module (Phase 1: browser backend only)
 const invoices = createLocalRepository("invoices", "inv") // /api/invoices
 const payments = createLocalRepository("payments", "pay") // /api/payments
 
@@ -321,7 +323,7 @@ function assertMonthsEditable(from: string, to: string) {
 
 /** Creates, edits and deletes are checked here, not only hidden in the UI (src/lib/permissions.ts). */
 function assertCan(resource: Resource, action: "create" | "edit" | "delete") {
-  const what: Partial<Record<Resource, string>> = { diesel: "fuel", adblue: "AdBlue", payments: "payment", trips: "trip", vehicles: "tanker or vehicle", customers: "customer", invoices: "invoice" }
+  const what: Partial<Record<Resource, string>> = { diesel: "fuel", adblue: "AdBlue", payments: "payment", trips: "trip", vehicles: "tanker or vehicle", customers: "customer", invoices: "invoice", expenses: "expense" }
   if (!can(currentRole(), resource, action)) throw new PermissionError(`Your role can't ${action} ${what[resource] ?? resource} records.`)
 }
 
@@ -1166,6 +1168,7 @@ const meta = {
   transfer: (t: TankerTransfer) => ({ module: "Diesel Tanker", recordType: "Tanker transfer", recordId: t.id, label: `${tankerName(t.fromTankerId)} → ${tankerName(t.toTankerId)} · ${formatDate(t.date)} · ${L(t.litres)}`, recordDate: t.date }),
   tyrePayment: (p: TyrePayment) => ({ module: "Tyre", recordType: "Tyre payment", recordId: p.id, label: `${tyreMasterName(p.supplierId)} · ${p.mode} · ref ${p.utr} · ${formatDate(p.date)} · ${formatINR(settledOf(p))}${p.tdsAmount ? ` (${formatINR(p.amount)} paid + ${formatINR(p.tdsAmount)} TDS)` : ""}`, recordDate: p.date }),
   tyreInvoice: (x: TyreInvoice) => ({ module: "Tyre", recordType: "Tyre invoice", recordId: x.id, label: `${tyreMasterName(x.supplierId)} · bill ${x.billNo || "—"} · ${regNo(x.vehicleId)} · ${formatDate(x.date)} · ${formatINR(tyreTotals(x.items).grandTotal)}`, recordDate: x.date }),
+  expense: (x: Expense) => ({ module: "Expense", recordType: expenseRecordType(x), recordId: x.id, label: [EXPENSE_SECTIONS[x.section].title, x.broker, x.vehicleIds.length ? x.vehicleIds.map(regNo).join(", ") : x.section === "BROKER" ? null : "No vehicle", x.description || x.taxType || x.provider, formatDate(x.date), formatINR(x.entryType === "PAYMENT" ? x.paidAmount : x.amount)].filter(Boolean).join(" · "), recordDate: x.date }),
   tyreMaster: (m: TyreMaster) => ({ module: "Tyre", recordType: TYRE_MASTER_LABEL[m.kind].one, recordId: m.id, label: m.name, recordDate: null }),
   industrial: (x: IndustrialSupply) => ({ module: "Diesel", recordType: "Industrial supply", recordId: x.id, label: `${customerName(x.customerId)} · ${formatDate(x.date)} · ${L(x.litres)} @ ${formatINR(x.rate)} · ${x.purpose} · from ${(x.allocations ?? []).map((a) => `${tankerName(a.tankerId)} ${L(a.litres)}`).join(" + ")}`, recordDate: x.date }),
   adjustment: (a: TankerAdjustment) => ({ module: "Diesel Tanker", recordType: "Tanker stock adjustment", recordId: a.id, label: `${tankerName(a.tankerId)} · ${formatDate(a.date)} · ${a.litres > 0 ? "+" : "−"}${L(Math.abs(a.litres))}`, recordDate: a.date }),
@@ -1202,6 +1205,13 @@ const RECORD_COLLECTION: Record<string, Parameters<typeof readCollection>[0]> = 
   "Industrial supply": "industrial_supplies",
   "Tyre invoice": "tyre_invoices",
   "Tyre payment": "tyre_payments",
+  "Road tax": "expenses",
+  Insurance: "expenses",
+  Fitness: "expenses",
+  Fine: "expenses",
+  "Broker charge": "expenses",
+  "Broker payment": "expenses",
+  "Broker opening balance": "expenses",
   Supplier: "tyre_masters",
   "Repair type": "tyre_masters",
   "Tyre brand": "tyre_masters",
@@ -1232,6 +1242,7 @@ const MODULE_RESOURCE: Record<string, Resource> = {
   Invoices: "invoices",
   Settings: "settings",
   Tyre: "tyres",
+  Expense: "expenses", // Dev only while unreleased (permissions.ts UNRELEASED)
 }
 
 export interface AuditLogRow extends AuditEvent {
@@ -1346,6 +1357,72 @@ async function setVendorStatus(id: string, status: AdBlueVendor["status"]) {
   const after = await adblueVendors.update(id, { status })
   audit({ action: statusAction(before, after), ...meta.adblueVendor(after), before, after })
   return after
+}
+
+/* ------------------------------------------------------------------ Expense (Phase 1) */
+
+/** The Expense module has no table on the shared database yet (Phase 1): every write there is refused, never dropped. */
+function assertLocalExpenses() {
+  if (requestScope()) throw new Error("The Expense module isn't on the shared database yet (Phase 1 keeps it in this browser only). Nothing was saved.")
+}
+
+const expenseRecordType = (x: Pick<Expense, "section" | "entryType">) =>
+  x.section !== "BROKER" ? EXPENSE_SECTIONS[x.section].recordType : x.entryType === "PAYMENT" ? "Broker payment" : x.entryType === "BROUGHT_FORWARD" ? "Broker opening balance" : "Broker charge"
+
+/**
+ * An expense as stored: trimmed, the fields its section doesn't use cleared, validated (expenseProblems — the form shows
+ * the same), every vehicle from the master and open on the date, the customer stamped from the vehicle's assignment.
+ */
+function checkExpense(input: ExpenseInput, id?: string): NewEntity<Expense> {
+  assertLocalExpenses()
+  const section = input.section
+  if (!Object.hasOwn(EXPENSE_SECTIONS, section)) throw new Error("Choose the expense section")
+  const t = (v: unknown) => (typeof v === "string" ? v.trim().replace(/\s+/g, " ") : "")
+  const broker = section === "BROKER"
+  const entryType = broker ? (input.entryType ?? "CHARGE") : null
+  if (entryType && !Object.hasOwn(BROKER_ENTRY_LABEL, entryType)) throw new Error("Choose the kind of broker entry")
+  // A broker payment or opening balance names no vehicle (only a new charge does).
+  const vehicleIds = Array.isArray(input.vehicleIds) && (!entryType || entryType === "CHARGE") ? input.vehicleIds.filter((v) => typeof v === "string" && v) : []
+  const paidAmount = broker ? Number(input.paidAmount) : 0
+  const paid = section === "FINE" ? input.paymentStatus === "PAID" : paidAmount > 0
+  const x: ExpenseInput = {
+    section,
+    date: t(input.date),
+    vehicleIds,
+    companyCode: input.companyCode ?? null,
+    description: t(input.description),
+    amount: Number(input.amount),
+    remarks: typeof input.remarks === "string" ? input.remarks.trim() : "",
+    validFrom: hasValidity(section) ? t(input.validFrom) : "",
+    validTill: hasValidity(section) ? t(input.validTill) : "",
+    taxType: section === "ROAD_TAX" || section === "FINE" ? t(input.taxType) : "",
+    provider: section === "INSURANCE" ? t(input.provider) : "",
+    policyNo: section === "INSURANCE" ? t(input.policyNo) : "",
+    paymentMode: section === "INSURANCE" || (broker && paid) ? t(input.paymentMode) : "",
+    paymentReference: section === "INSURANCE" || (section === "FINE" && paid) ? t(input.paymentReference) : "",
+    paymentStatus: section === "FINE" ? input.paymentStatus : null,
+    paymentDate: (section === "FINE" || broker) && paid ? t(input.paymentDate) : "",
+    entryType,
+    broker: broker ? t(input.broker) : "",
+    purpose: entryType === "CHARGE" ? t(input.purpose) : "",
+    operatingCompany: broker ? t(input.operatingCompany) : "",
+    vehicleCount: broker ? (vehicleIds.length || Number(input.vehicleCount) || 0) : vehicleIds.length,
+    paidAmount,
+  }
+  if (x.companyCode !== null && !settingsOrThrow().companies.some((c) => c.code === x.companyCode)) throw new Error("Choose the company that pays (account payable)")
+  const problem = Object.values(expenseProblems(x, todayISO()))[0]
+  if (problem) throw new Error(problem)
+  for (const v of vehicleIds) assertOpen(v, null, x.date) // from the vehicle master only — never created here
+  if (broker) {
+    // One opening balance per broker, dated before every other entry of that broker.
+    const mine = readCollection("expenses").filter((e) => e.id !== id && e.section === "BROKER" && textKey(e.broker) === textKey(x.broker))
+    const opening = mine.find((e) => e.entryType === "BROUGHT_FORWARD")
+    if (entryType === "BROUGHT_FORWARD" && opening) throw new Error(`${x.broker} already has an opening balance (${formatDate(opening.date)}, ${formatINR(opening.amount)}). Edit that one instead.`)
+    if (entryType === "BROUGHT_FORWARD" && mine.some((e) => e.date < x.date)) throw new Error(`${x.broker} has entries dated before ${formatDate(x.date)} — an opening balance must come before every other entry.`)
+    if (entryType !== "BROUGHT_FORWARD" && opening && x.date < opening.date) throw new Error(`${x.broker}'s opening balance is dated ${formatDate(opening.date)}; an entry can't be dated before it.`)
+  }
+  const customerId = !broker && vehicleIds[0] ? (assignmentOn(assignmentIndex(periodsOf(vehicleIds[0])), vehicleIds[0], x.date)?.customerId ?? null) : null
+  return { ...x, customerId }
 }
 
 /** A DL number as stored (cleanLicenceNo); refused when another driver already has it — one licence, one person. */
@@ -2352,6 +2429,53 @@ export const api = {
       }),
     archive: (id: string) => setTyreMasterStatus(id, "ARCHIVED"),
     restore: (id: string) => setTyreMasterStatus(id, "ACTIVE"),
+  },
+
+  /**
+   * Expense → Road Tax, Insurance, Fitness, Fines, Broker Charges (owner, 25 Nov 2026). Phase 1: the browser backend
+   * only — refused on the shared database (no table yet), never silently dropped. Permission `expenses`: Dev only while
+   * the module is unreleased (owner, 25 Nov 2026; UNRELEASED in permissions.ts) — reads refused too. Month lock on the
+   * old and new date; delete with a reason. Audited.
+   */
+  expenses: {
+    list: async () => {
+      if (!can(currentRole(), "expenses")) throw new PermissionError("Your role can't view expense records.")
+      return expenses.list()
+    },
+    create: (input: ExpenseInput) =>
+      tx(async () => {
+        assertCan("expenses", "create")
+        const data = checkExpense(input)
+        assertMonthEditable(data.date)
+        const after = await expenses.create(data)
+        audit({ action: "CREATED", ...meta.expense(after), after })
+        return after
+      }),
+    update: (id: string, input: ExpenseInput, reason?: string) =>
+      tx(async () => {
+        assertCan("expenses", "edit")
+        const before = await expenses.get(id)
+        if (!before) throw new NotFoundError("Expense", id)
+        assertMonthEditable(before.date)
+        if (input.section !== before.section) throw new Error(`This is a ${EXPENSE_SECTIONS[before.section].one}; it can't be moved to ${EXPENSE_SECTIONS[input.section]?.title ?? "another section"}.`)
+        const data = checkExpense(input, id)
+        assertMonthEditable(data.date)
+        const after = await expenses.update(id, data)
+        audit({ action: "UPDATED", ...meta.expense(after), before, after, reason: reason?.trim() || undefined })
+        return after
+      }),
+    /** The Owner and Dev only (delete), with a reason. Not restorable from the Audit Log in Phase 1 (its DELETED event keeps the full record). */
+    remove: (id: string, reason: string) =>
+      tx(async () => {
+        assertCan("expenses", "delete")
+        assertReason(reason)
+        const before = await expenses.get(id)
+        if (!before) return
+        assertMonthEditable(before.date)
+        assertLocalExpenses()
+        await expenses.remove(id)
+        audit({ action: "DELETED", ...meta.expense(before), before, reason: reason.trim() })
+      }),
   },
 
   /** Tyre invoices: one supplier bill for one vehicle, with its repair lines — saved together or not at all. */

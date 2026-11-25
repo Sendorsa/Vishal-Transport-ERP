@@ -330,6 +330,25 @@ export const isDirectAdBlue = (e: { source?: "STOCK" | "DIRECT" }) => e.source =
 /** Vehicle AdBlue entries that draw from bulk inventory (direct vendor purchases left out). */
 export const stockDraws = <E extends { source?: "STOCK" | "DIRECT" }>(entries: E[]) => entries.filter((e) => !isDirectAdBlue(e))
 
+/**
+ * Each bulk draw's supplier bills (Stock Usage, owner 25 Nov 2026): the bill numbers of the purchase batches its litres
+ * came from, read from `valueInventory`'s own takes (never a second FIFO), in the order taken, each once. Litres taken
+ * from unattributed stock (opening stock, or stock whose vendor became unknown at an old draw) have no known bill and add
+ * none; a batch saved without a bill number adds none. Draw id → bill numbers ([] = none known). Needs every purchase
+ * and every draw (FIFO), not one period's.
+ */
+export function drawBills(purchases: (Purchase & { invoiceNo?: string })[], draws: Consumption[]): Map<string, string[]> {
+  const bill = new Map(purchases.map((p) => [p.id, (p.invoiceNo ?? "").trim()]))
+  const out = new Map<string, string[]>()
+  for (const t of valueInventory(purchases, draws).takes) {
+    const no = t.vendor === NO_VENDOR ? "" : (bill.get(t.purchaseId) ?? "")
+    const list = out.get(t.consumptionId) ?? []
+    if (no && !list.includes(no)) list.push(no)
+    out.set(t.consumptionId, list)
+  }
+  return out
+}
+
 type Stock = { stockLitres: number; stockValue: number; avgRate: number | null }
 
 /**

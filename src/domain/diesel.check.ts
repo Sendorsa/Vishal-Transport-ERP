@@ -605,6 +605,22 @@ const recs = (r: Partial<TankerRecords>): TankerRecords => ({ loads: [], fills: 
     assert.equal(p.closing, round2(p.opening + p.openingStock + p.loaded + p.transferIn + p.adjusted - p.dispensed - p.transferOut))
     assert.equal(tankerPeriod(tankerLedger(moves, t, "2026-10"), ["2026-10"]).opening, p.closing) // carries forward
   }
+  // Tankers table → Opening (owner, 25 Nov 2026) = tankerPeriod(…).opening, the previous period's closing per tanker,
+  // + opening stock dated in the period (go-live only) — the carry-forward is counted once, never added again.
+  const cfOf = (t: string, months: string[], extra: Parameters<typeof tankerMoves>[0]["loads"] = []) => tankerPeriod(tankerLedger(tankerMoves(recs({ ...r, loads: [...loads, ...extra] })), t, "2026-12"), months)
+  assert.deepEqual([TA, TB, TC, "tnk_d"].map((t) => cfOf(t, ["2026-10"]).opening), [350, 480, 555, 0], "October: each tanker's September closing; D had none (0 L)")
+  assert.deepEqual([TA, TB, TC, "tnk_d"].map((t) => cfOf(t, ["2026-09"]).opening), [0, 0, 0, 0], "the first month: 0 L")
+  assert.deepEqual([TA, TB, TC, "tnk_d"].map((t) => cfOf(t, ["2026-11"]).opening), [350, 480, 555, 200], "switching to November: October's closing")
+  assert.equal(round2([TA, TB, TC, "tnk_d"].reduce((s, t) => s + cfOf(t, ["2026-11"]).opening, 0)), tankerPeriod(tankerLedger(moves, null, "2026-12"), ["2026-11"]).opening, "All tankers = Σ tankers")
+  assert.equal(cfOf(TA, ["2026-10", "2026-11", "2026-12"]).opening, 350, "a quarter: the closing before its first month")
+  const dec = tkLoad("l_late", "2026-12-15", 100, 96, TA)
+  assert.equal(cfOf(TA, ["2026-11"], [dec]).opening, 350, "history: a later load never changes an earlier month's carry-forward")
+  const cfOpening = cfOf("tnk_e", ["2026-10"], [{ ...tkLoad("o_e", "2026-10-01", 70, 90, "tnk_e"), opening: true }])
+  assert.deepEqual([cfOpening.opening, cfOpening.openingStock, cfOpening.closing], [0, 70, 70], "opening stock is Opening, not Carry Forward — counted once")
+  for (const t of [TA, TB, TC]) {
+    const q = cfOf(t, ["2026-10"])
+    assert.equal(q.closing, round2(q.opening + q.openingStock + q.loaded + q.transferIn + q.adjusted - q.dispensed - q.industrial - q.transferOut), "Closing unchanged")
+  }
   // All tankers together: a transfer is not a purchase and doesn't change company stock; loads are counted once.
   const all = sep(null)
   assert.deepEqual([all.loaded, all.loadedCost, all.transferIn, all.transferOut, all.closing], [1900, round2(90000 + 55200 + 28200), 0, 0, 350 + 480 + 555])

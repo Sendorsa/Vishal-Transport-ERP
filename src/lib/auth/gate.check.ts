@@ -99,12 +99,21 @@ for (const s of [OUT, ACTIVE, NOT_APPROVED, DISABLED, INVITED, UNCONFIGURED])
     assert.equal(to("/adblue", s), "allow", `${role}: the landing page itself is allowed (no redirect loop)`)
     assert.equal(to("/api/erp", s), "allow", `${role}: the API enforces its own method list`)
   }
-  // The other roles are unchanged: every page, the Fuel Stations landing.
+  // The other roles: every page, the Fuel Stations landing — except Expense, unreleased: Dev only (owner, 25 Nov 2026).
+  const expense = routes.filter((r) => r.startsWith("/expenses/"))
+  assert.deepEqual(expense.sort(), ["/expenses/broker-charges", "/expenses/fines", "/expenses/fitness", "/expenses/insurance", "/expenses/road-tax"], "the five Expense pages")
   for (const role of ["OWNER", "DEV", "EMPLOYEE"] as const) {
     const s: AuthState = { ...ACTIVE, role }
     assert.equal(to("/", s), LANDING)
-    for (const r of routes.filter((r) => r !== "/" && r !== "/login")) assert.equal(to(r, s), "allow", `${role}: ${r}`)
+    for (const r of routes.filter((r) => r !== "/" && r !== "/login")) {
+      const allowed = role === "DEV" || !expense.includes(r)
+      assert.equal(to(r, s), allowed ? "allow" : LANDING, `${role}: ${r} ${allowed ? "allowed" : "→ Fuel Stations"}`)
+      assert.equal(to(`${r}?from=2026-11-01`, s), allowed ? "allow" : LANDING, `${role}: ${r} with a query string`)
+    }
+    for (const r of ["/expenses", "/expenses/road-tax/x", "/expenses/../expenses/fines"]) assert.equal(to(r, s), role === "DEV" ? "allow" : LANDING, `${role}: ${r}`)
+    assert.equal(to("/expenses-report", s), "allow", `${role}: only the /expenses section is gated, not look-alike paths`)
   }
+  for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) for (const r of expense) assert.equal(to(r, { ...ACTIVE, role }), "/adblue", `${role}: ${r} refused`)
 }
 
 /* ---------------------------------------------------------------- the proxy runs on every page, not on assets or the OAuth callback */

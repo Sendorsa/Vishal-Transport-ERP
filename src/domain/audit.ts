@@ -248,11 +248,18 @@ const FIELD_LABEL: Record<string, string> = {
   distanceKm: "Distance",
   tdsAmount: "TDS",
   tdsRate: "TDS %",
+  vehicleIds: "Vehicles",
+  validFrom: "Valid from",
+  validTill: "Valid till",
+  paidAmount: "Paid",
+  paymentDate: "Paid / cleared on",
+  taxType: "Type",
+  policyNo: "Policy no",
 }
-const MONEY = new Set(["amount", "rate", "totalCost", "pricePerBucket", "revenue", "baseAmount", "extraKmAmount", "bataAmount", "tollParking", "subtotal", "cgst", "sgst", "igst", "total", "tdsAmount", "emiAmount", "openingBalance"])
+const MONEY = new Set(["amount", "rate", "totalCost", "pricePerBucket", "revenue", "baseAmount", "extraKmAmount", "bataAmount", "tollParking", "subtotal", "cgst", "sgst", "igst", "total", "tdsAmount", "emiAmount", "openingBalance", "paidAmount"])
 const LITRES = new Set(["litres", "quantityLitres", "totalLitres", "litresPerBucket"])
 const KM = new Set(["odometerKm", "closingKm", "startKm", "endKm", "distanceKm"])
-const DATES = new Set(["date", "startDate", "endDate", "dueDate", "periodFrom", "periodTo", "effectiveDate", "fitnessValidTill", "permitValidTill", "pucValidTill", "licenseValidTill"])
+const DATES = new Set(["date", "startDate", "endDate", "dueDate", "periodFrom", "periodTo", "effectiveDate", "fitnessValidTill", "permitValidTill", "pucValidTill", "licenseValidTill", "validFrom", "validTill", "paymentDate"])
 /** Fields holding another record's id → resolved to a name for display. */
 export const REF_KIND: Record<string, "vehicle" | "customer" | "station" | "driver"> = {
   vehicleId: "vehicle",
@@ -284,6 +291,7 @@ export function formatAuditValue(field: string, value: unknown, ref?: RefLookup)
     return value
   }
   if (typeof value === "boolean") return value ? "Yes" : "No"
+  if (field === "vehicleIds" && Array.isArray(value)) return value.length ? (value as string[]).map((id) => ref?.("vehicle", id) ?? id).join(", ") : "—"
   if (field === "driverPeriods" && Array.isArray(value))
     return value.length
       ? (value as { driverId: string; startDate: string; endDate: string | null }[]).map((p) => `${ref?.("driver", p.driverId) ?? p.driverId} ${p.endDate ? `${formatDate(p.startDate)} – ${formatDate(p.endDate)}` : `from ${formatDate(p.startDate)}`}`).join("; ")

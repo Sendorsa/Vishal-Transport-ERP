@@ -13,6 +13,7 @@ export const RESOURCES = [
   "diesel",
   "adblue", // AdBlue inventory and vehicle AdBlue entries (owner, 11 Nov 2026: its own resource, out of "diesel")
   "tyres", // Tyre Data → Tyre: tyre / repair invoices and their masters (owner, 17 Nov 2026)
+  "expenses", // Expense: Road Tax, Insurance, Fitness, Fines, Broker Charges (owner, 25 Nov 2026) — unreleased: Dev only
   "invoices",
   "payments",
   "reports",
@@ -28,6 +29,13 @@ export type Resource = (typeof RESOURCES)[number]
  * to every other role whatever the map says, so no wildcard or shared list can ever grant them to the Owner.
  */
 export const DEV_ONLY: readonly Resource[] = ["accounts", "system"]
+
+/**
+ * Business modules still in development, Dev only until the owner releases them (temporary — not administration, so
+ * not DEV_ONLY). `can()` refuses them to every other role; the Owner's map already lists them (BUSINESS_ACCESS), so
+ * releasing one = removing it here (and, on the shared database, its role_permissions rows). Expense: owner, 25 Nov 2026.
+ */
+export const UNRELEASED: readonly Resource[] = ["expenses"]
 
 /** Every business module, every action — the Owner's list. Excludes the Dev-only resources. */
 const BUSINESS_ACCESS: Permission[] = RESOURCES.filter((r) => !DEV_ONLY.includes(r)).map((r) => `${r}:*` as const)
@@ -66,7 +74,7 @@ const MAP: Record<Role, Permission[]> = {
 export const canDelete = (role: Role) => role === "OWNER" || role === "DEV"
 
 export function can(role: Role, resource: Resource, action: Action = "view") {
-  if (DEV_ONLY.includes(resource) && role !== "DEV") return false
+  if ((DEV_ONLY.includes(resource) || UNRELEASED.includes(resource)) && role !== "DEV") return false
   if (action === "delete" && !canDelete(role)) return false
   const perms = MAP[role]
   return perms.includes("*") || perms.includes(`${resource}:*`) || perms.includes(`${resource}:${action}`)
