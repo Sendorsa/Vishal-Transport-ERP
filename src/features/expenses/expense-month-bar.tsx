@@ -12,7 +12,8 @@ import { EXPENSE_SECTIONS, isMonthLocked, monthSummary } from "@/domain/expenses
 import { MonthSelect } from "@/features/diesel/parts"
 import { DATA_BACKEND } from "@/lib/api/client"
 import { useLockExpenseMonth } from "@/lib/api/hooks"
-import { useCan } from "@/lib/app-state"
+import { useRole } from "@/lib/app-state"
+import { canLockExpenseMonths } from "@/lib/permissions"
 import { formatINR, formatNumber } from "@/lib/format"
 import type { ExpenseSection } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -34,7 +35,7 @@ export function MonthStateBadge({ locked }: { locked: boolean }) {
  * (Months) and Lock Month — never another section's records, months or locks.
  */
 export function ExpenseMonthBar({ d, section, month, months, onMonth }: { d: ExpenseData; section: ExpenseSection; month: string; months: string[]; onMonth: (m: string) => void }) {
-  const can = useCan()
+  const [role] = useRole()
   const lock = useLockExpenseMonth()
   const [confirming, setConfirming] = useState(false)
   const [history, setHistory] = useState(false)
@@ -60,7 +61,7 @@ export function ExpenseMonthBar({ d, section, month, months, onMonth }: { d: Exp
         <Button variant="outline" size="sm" onClick={() => setHistory(true)}>
           <History /> Months
         </Button>
-        {!locked && can("expenses", "edit") && (
+        {!locked && canLockExpenseMonths(role) && (
           <Button variant="outline" size="sm" onClick={() => setConfirming(true)}>
             <Lock /> Lock Month
           </Button>

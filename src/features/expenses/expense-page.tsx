@@ -37,6 +37,7 @@ import {
 import { DATA_BACKEND } from "@/lib/api/client"
 import { useDeleteExpense } from "@/lib/api/hooks"
 import { useCan, useCurrentMonth, useRole } from "@/lib/app-state"
+import { expenseSectionAllowed } from "@/lib/permissions"
 import { useStoredMonth } from "@/features/diesel/parts"
 import { formatDate, formatINR, round2, todayISO } from "@/lib/format"
 import type { Expense, ExpenseSection } from "@/lib/types"
@@ -129,7 +130,7 @@ export function ExpensePage({ section }: { section: ExpenseSection }) {
   // The two summary cards: this section's records as filtered on screen (dates and every other filter).
   const cards = useMemo(() => sectionCards(section, shown), [section, shown])
 
-  if (!can("expenses")) return <NoAccess what={meta.title} />
+  if (!expenseSectionAllowed(role, section)) return <NoAccess what={meta.title} />
   if (!d.ready) return <PageSkeleton />
   // Phase 2B (C-1): the "this browser only" wording only on the browser backend — on the shared database it isn't true.
   const local = DATA_BACKEND !== "supabase"

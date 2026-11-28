@@ -21,8 +21,8 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react"
-import { can, isAdBlueProfile, type Resource } from "@/lib/permissions"
-import type { Role } from "@/lib/types"
+import { can, expenseSectionAllowed, isAdBlueProfile, type Resource } from "@/lib/permissions"
+import type { ExpenseSection, Role } from "@/lib/types"
 
 /**
  * Sidebar sections, in display order. Add a section here (e.g. a future "Fleet") and tag its items
@@ -42,6 +42,8 @@ export interface NavItem {
   short?: string
   /** `false`: never fills a phone tab slot — the item stays one tap away under "More". */
   tab?: false
+  /** An Expense section's page: shown only to a role that may use that section (EMP 1: no Insurance — owner, 28 Nov 2026). */
+  expenseSection?: ExpenseSection
 }
 
 export const NAV_ITEMS: NavItem[] = [
@@ -58,12 +60,13 @@ export const NAV_ITEMS: NavItem[] = [
   { title: "AdBlue", href: "/adblue", icon: Droplets, resource: "adblue", group: "Fuel" },
   // Tyre Data (owner, 17 Nov 2026): tyre / repair invoices.
   { title: "Tyre", href: "/tyre", icon: CircleDot, resource: "tyres", group: "Tyre Data" },
-  // Expense (owner, 25 Nov 2026; Phase 1 — browser backend only). Permission `expenses`: Dev only until released (UNRELEASED in permissions.ts).
-  { title: "Road Tax", href: "/road-tax", icon: Landmark, resource: "expenses", group: "Expense", tab: false },
-  { title: "Insurance", href: "/insurance", icon: ShieldCheck, resource: "expenses", group: "Expense", tab: false },
-  { title: "Fitness", href: "/fitness", icon: ClipboardCheck, resource: "expenses", group: "Expense", tab: false },
-  { title: "Fines", href: "/fines", icon: Gavel, resource: "expenses", group: "Expense", tab: false },
-  { title: "Broker Charges", short: "Broker", href: "/broker-charges", icon: Handshake, resource: "expenses", group: "Expense", tab: false },
+  // Expense (owner, 25 Nov 2026). Permission `expenses`: Dev, the Owner (28 Nov 2026) and EMP 1 without Insurance
+  // (UNRELEASED_ROLES, HIDDEN_EXPENSE_SECTIONS in permissions.ts) — never the Employee.
+  { title: "Road Tax", href: "/road-tax", icon: Landmark, resource: "expenses", group: "Expense", tab: false, expenseSection: "ROAD_TAX" },
+  { title: "Insurance", href: "/insurance", icon: ShieldCheck, resource: "expenses", group: "Expense", tab: false, expenseSection: "INSURANCE" },
+  { title: "Fitness", href: "/fitness", icon: ClipboardCheck, resource: "expenses", group: "Expense", tab: false, expenseSection: "FITNESS" },
+  { title: "Fines", href: "/fines", icon: Gavel, resource: "expenses", group: "Expense", tab: false, expenseSection: "FINE" },
+  { title: "Broker Charges", short: "Broker", href: "/broker-charges", icon: Handshake, resource: "expenses", group: "Expense", tab: false, expenseSection: "BROKER" },
   { title: "Invoices", href: "/invoices", icon: FileText, resource: "invoices", group: "Finance", mobile: true },
   { title: "Payments", href: "/payments", icon: ArrowLeftRight, resource: "payments", group: "Finance" },
   { title: "Reports", href: "/reports", icon: BarChart3, resource: "reports", group: "Finance" },
@@ -81,9 +84,10 @@ export const NAV_ITEMS: NavItem[] = [
  * (src/lib/permissions.ts).
  */
 export const showInNav = (role: Role, item: NavItem) =>
-  isAdBlueProfile(role)
+  (!item.expenseSection || expenseSectionAllowed(role, item.expenseSection)) &&
+  (isAdBlueProfile(role)
     ? PROFILE_NAV.includes(item.href)
-    : role === "DEV" || item.group === "Fuel" || item.group === "Tyre Data" || item.group === "Expense" || item.href === "/audit" || item.href === "/vehicles" || item.href === "/drivers" || (role === "OWNER" && OWNER_EXTRA_NAV.includes(item.href))
+    : role === "DEV" || item.group === "Fuel" || item.group === "Tyre Data" || item.group === "Expense" || item.href === "/audit" || item.href === "/vehicles" || item.href === "/drivers" || (role === "OWNER" && OWNER_EXTRA_NAV.includes(item.href)))
 
 /** Finance pages the Owner sees in the sidebar besides Fuel / Tyre Data / Audit Log (owner, 18 Nov 2026): Payments only. */
 const OWNER_EXTRA_NAV = ["/payments"]

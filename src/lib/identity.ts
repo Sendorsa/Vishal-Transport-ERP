@@ -10,7 +10,7 @@ import { requestScope } from "./request-scope"
 import type { AuditActor, LegacyRole, Role } from "./types"
 
 const ROLE_KEY = "vt:ui:role"
-const ROLES: readonly Role[] = ["OWNER", "DEV", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"]
+const ROLES: readonly Role[] = ["OWNER", "DEV", "EMPLOYEE", "EMP1", "TATA_ADBLUE", "ADBLUE"]
 const LEGACY: readonly LegacyRole[] = ["ACCOUNTANT", "OPS_MANAGER"]
 
 // The verified account for code outside React in the browser. Browser only: on the server, module state would be

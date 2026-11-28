@@ -30,7 +30,7 @@ export type AccountState =
 
 export type Result = { ok: true } | { ok: false; error: string }
 
-const ROLES: readonly ErpRole[] = ["OWNER", "DEV", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"]
+const ROLES: readonly ErpRole[] = ["OWNER", "DEV", "EMPLOYEE", "EMP1", "TATA_ADBLUE", "ADBLUE"]
 
 const toAccount = (p: ProfileRow): Account => ({
   id: p.id,

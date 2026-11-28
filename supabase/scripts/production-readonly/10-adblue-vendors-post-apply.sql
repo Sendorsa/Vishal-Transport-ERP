@@ -86,8 +86,8 @@ from (values
   -- Tyre Data (20261117000000): its own objects, and that it changed none of the AdBlue ones (rows 3–6 and 10–12 above).
   (30, 'CHECK', 'Tyre: tables ops.tyre_masters, ops.tyre_invoices, ops.tyre_invoice_items', 'present',
       case when to_regclass('ops.tyre_masters') is not null and to_regclass('ops.tyre_invoices') is not null and to_regclass('ops.tyre_invoice_items') is not null then 'present' else 'missing' end),
-  (31, 'CHECK', 'Tyre: permission rows (Dev holds *)', 'EMPLOYEE:tyres:*,OWNER:tyres:*',
-      (select string_agg(role::text || ':' || permission, ',' order by role::text) from core.role_permissions where permission like 'tyres%')),
+  (31, 'CHECK', 'Tyre: permission rows (Dev holds *; EMP1 copies the Employee — 31-emp1-post-apply.sql)', 'EMPLOYEE:tyres:*,OWNER:tyres:*',
+      (select string_agg(role::text || ':' || permission, ',' order by role::text) from core.role_permissions where permission like 'tyres%' and role::text <> 'EMP1')),
   (32, 'CHECK', 'Tyre: audit module → permission (history, change polling)', 'tyres',
       (select private.module_resource('Tyre'))),
   (33, 'CHECK', 'Tyre: row level security on all three tables', 'on,on,on',

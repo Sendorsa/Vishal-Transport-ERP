@@ -20,7 +20,8 @@ import { categoryName } from "@/domain/analytics"
 import { vehicleFyFuel } from "@/domain/vehicle-summary"
 import { useDataset, useExpenses } from "@/lib/api/hooks"
 import { latestPayment } from "@/domain/expenses"
-import { useCan } from "@/lib/app-state"
+import { useCan, useRole } from "@/lib/app-state"
+import { expenseSectionAllowed } from "@/lib/permissions"
 import { formatINR, formatDate, formatNumber, todayISO } from "@/lib/format"
 import { VehicleDriversCard } from "./vehicle-drivers"
 import { VehicleForm } from "./vehicle-form"
@@ -34,6 +35,7 @@ const MAINT = new Set(["MAINTENANCE", "TYRE"])
 
 export function VehicleDetail({ id }: { id: string }) {
   const can = useCan()
+  const [role] = useRole()
   const finance = can("finance", "view")
   const { data: ds, isLoading } = useDataset()
   const expenses = useExpenses()
@@ -91,9 +93,10 @@ export function VehicleDetail({ id }: { id: string }) {
   const incomplete = gapIssues.filter(([x]) => x.fills > 0)
   const shortBy = incomplete.reduce((t, [x]) => t + x.fills, 0)
   const unreliable = f.incomplete.lower.fills > 0 // a lower reading can push the figure either way
-  // The latest Road Tax / Insurance / Fitness payment from Expense (this vehicle's own records), when the role sees Expense.
+  // The latest Road Tax / Insurance / Fitness payment from Expense (this vehicle's own records), when the role sees that
+  // section (EMP 1: not Insurance).
   const paidLine = (section: "ROAD_TAX" | "INSURANCE" | "FITNESS") => {
-    const x = can("expenses") ? latestPayment(expenses.data ?? [], v.id, section) : null
+    const x = expenseSectionAllowed(role, section) ? latestPayment(expenses.data ?? [], v.id, section) : null
     return x ? `last paid ${formatINR(x.amount)} on ${formatDate(x.date)}${x.description ? ` (${x.description})` : ""}` : ""
   }
   const docs: [string, string, string][] = [

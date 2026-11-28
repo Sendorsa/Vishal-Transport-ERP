@@ -24,7 +24,7 @@ from (values
   (22, '20261111000000 month lock Owner / Dev only', case when to_regprocedure('private.can_set_month_lock()') is null then 'not applied' else 'applied' end),
   -- Roles and permissions.
   (30, 'role permissions (role: permission list)', (select string_agg(role::text || ': ' || perms, ' | ' order by role::text) from (select role, string_agg(permission, ',' order by permission) perms from core.role_permissions group by role) p)),
-  (31, 'permission rows for expenses (must be none — Dev only)', (select count(*)::text from core.role_permissions where permission like 'expenses%')),
+  (31, 'permission rows for expenses (none; after 20261129000100 EMP1 view / edit; after 20261129000200 also OWNER *)', (select count(*)::text from core.role_permissions where permission like 'expenses%')),
   (32, 'accounts by role and status', coalesce((select string_agg(role::text || ' ' || status::text || ' ×' || n, ', ' order by role::text, status::text) from (select role, status, count(*) n from public.profiles group by 1, 2) a), 'none')),
   (33, 'module_resource: Expense · Drivers', private.module_resource('Expense') || ' · ' || private.module_resource('Drivers')),
   -- Master data the Expense design references.

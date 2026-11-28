@@ -1,4 +1,4 @@
-import type { LegacyRole, Role } from "./types"
+import type { ExpenseSection, LegacyRole, Role } from "./types"
 
 /**
  * `resource:action` permission map. The backend will enforce the same strings
@@ -13,7 +13,7 @@ export const RESOURCES = [
   "diesel",
   "adblue", // AdBlue inventory and vehicle AdBlue entries (owner, 11 Nov 2026: its own resource, out of "diesel")
   "tyres", // Tyre Data → Tyre: tyre / repair invoices and their masters (owner, 17 Nov 2026)
-  "expenses", // Expense: Road Tax, Insurance, Fitness, Fines, Broker Charges (owner, 25 Nov 2026) — unreleased: Dev only
+  "expenses", // Expense: Road Tax, Insurance, Fitness, Fines, Broker Charges (owner, 25 Nov 2026) — Dev, the Owner and EMP 1 only (UNRELEASED_ROLES)
   "invoices",
   "payments",
   "reports",
@@ -32,10 +32,18 @@ export const DEV_ONLY: readonly Resource[] = ["accounts", "system"]
 
 /**
  * Business modules still in development, Dev only until the owner releases them (temporary — not administration, so
- * not DEV_ONLY). `can()` refuses them to every other role; the Owner's map already lists them (BUSINESS_ACCESS), so
- * releasing one = removing it here (and, on the shared database, its role_permissions rows). Expense: owner, 25 Nov 2026.
+ * not DEV_ONLY). `can()` refuses them to every role not in UNRELEASED_ROLES; the Owner's map already lists them
+ * (BUSINESS_ACCESS), so releasing one = removing it here (and, on the shared database, its role_permissions rows).
+ * Expense: owner, 25 Nov 2026.
  */
 export const UNRELEASED: readonly Resource[] = ["expenses"]
+/**
+ * The roles an unreleased module is released to (then within their map). Expense: Dev; the Owner — every section, view /
+ * add / edit / delete (owner, 28 Nov 2026; BUSINESS_ACCESS already lists expenses:*); EMP 1 — view and edit of Road Tax,
+ * Fitness, Fines and Broker Charges only (owner, 28 Nov 2026; HIDDEN_EXPENSE_SECTIONS). Never the Employee or the AdBlue
+ * profiles. Imports and import rollbacks stay Dev's (checked by name in the API).
+ */
+const UNRELEASED_ROLES: Partial<Record<Resource, readonly Role[]>> = { expenses: ["DEV", "OWNER", "EMP1"] }
 
 /** Every business module, every action — the Owner's list. Excludes the Dev-only resources. */
 const BUSINESS_ACCESS: Permission[] = RESOURCES.filter((r) => !DEV_ONLY.includes(r)).map((r) => `${r}:*` as const)
@@ -47,6 +55,7 @@ export const ROLES: { value: Role; label: string; description: string }[] = [
   { value: "OWNER", label: "Owner", description: "Every business module and Owner-level control (month locks, restore, deletion review); no account or system administration" },
   { value: "DEV", label: "Dev", description: "Everything the Owner can do, plus exclusive account and system administration" },
   { value: "EMPLOYEE", label: "Employee", description: "Everything the Owner can do except Settings, locking months and deleting records" },
+  { value: "EMP1", label: "EMP 1", description: "Everything the Employee can do, plus Expense → Road Tax, Fitness, Fines and Broker Charges: view and edit only (no Insurance, no new or deleted records, no month locks)" },
   { value: "TATA_ADBLUE", label: "Tata Adblue", description: "AdBlue entries (add / edit) for the customers Dev assigns, bulk purchases into the shared stock; Diesel read-only for those customers" },
   { value: "ADBLUE", label: "Adblue", description: "AdBlue entries (add / edit) for every customer, bulk purchases into the shared stock; Diesel read-only for every customer" },
 ]
@@ -55,11 +64,15 @@ export const ROLES: { value: Role; label: string; description: string }[] = [
  * Dev holds "*" and is the only role that may (owner, 3 Nov 2026: Dev inherits every Owner business permission and
  * alone administers accounts and the system). A new business module reaches the Owner through BUSINESS_ACCESS.
  */
+// Owner's instruction, 5 Nov 2026: the Owner's access and Owner-level controls, except Settings.
+const EMPLOYEE_ACCESS: Permission[] = BUSINESS_ACCESS.filter((p) => p !== "settings:*")
 const MAP: Record<Role, Permission[]> = {
   DEV: ["*"],
   OWNER: BUSINESS_ACCESS,
-  // Owner's instruction, 5 Nov 2026: the Owner's access and Owner-level controls, except Settings.
-  EMPLOYEE: BUSINESS_ACCESS.filter((p) => p !== "settings:*"),
+  EMPLOYEE: EMPLOYEE_ACCESS,
+  // EMP 1 (owner, 28 Nov 2026): exactly the Employee, plus Expense view and edit — never create or delete (and, by
+  // HIDDEN_EXPENSE_SECTIONS, never Insurance). The Employee's own list is unchanged.
+  EMP1: [...EMPLOYEE_ACCESS.filter((p) => p !== "expenses:*"), "expenses:view", "expenses:edit"],
   // Owner's instruction, 11 Nov 2026: AdBlue (entries create / edit / delete, bulk purchases) and Diesel read-only.
   // Tata Adblue is further limited to the customers Dev assigns (customerScope in src/lib/identity.ts, RLS).
   TATA_ADBLUE: ["diesel:view", "adblue:*"],
@@ -74,7 +87,8 @@ const MAP: Record<Role, Permission[]> = {
 export const canDelete = (role: Role) => role === "OWNER" || role === "DEV"
 
 export function can(role: Role, resource: Resource, action: Action = "view") {
-  if ((DEV_ONLY.includes(resource) || UNRELEASED.includes(resource)) && role !== "DEV") return false
+  if (DEV_ONLY.includes(resource) && role !== "DEV") return false
+  if (UNRELEASED.includes(resource) && !(UNRELEASED_ROLES[resource] ?? ["DEV"]).includes(role)) return false
   if (action === "delete" && !canDelete(role)) return false
   const perms = MAP[role]
   return perms.includes("*") || perms.includes(`${resource}:*`) || perms.includes(`${resource}:${action}`)
@@ -85,13 +99,28 @@ export function can(role: Role, resource: Resource, action: Action = "view") {
  * stock: the Owner, Dev and (owner, 5 Nov 2026) the Employee, tested by name (never through can()). Settings → Data
  * (backup, restore, reset, clear) also needs `settings`. Month lock / unlock is not one of them: see canSetMonthLock.
  */
-export const hasOwnerAuthority = (role: Role) => role === "OWNER" || role === "DEV" || role === "EMPLOYEE"
+export const hasOwnerAuthority = (role: Role) => role === "OWNER" || role === "DEV" || role === "EMPLOYEE" || role === "EMP1" // EMP 1 = the Employee
 
 /** Locking or unlocking a month: the Owner and Dev only — never the Employee (owner, 11 Nov 2026). */
 export const canSetMonthLock = (role: Role) => role === "OWNER" || role === "DEV"
 
 /** Changing data in a locked month (Monthly Sheet Lock): the Owner and Dev only — never the Employee (owner, 5 Nov 2026). */
 export const canBypassMonthLock = (role: Role) => role === "OWNER" || role === "DEV"
+
+/**
+ * Expense sections a role never sees or changes, even with `expenses` (owner, 28 Nov 2026: EMP 1 — Insurance). Checked in
+ * every Expense API method, the sidebar and the page gate; the database: private.expense_section_ok / expense_event_ok.
+ */
+const HIDDEN_EXPENSE_SECTIONS: Partial<Record<Role, readonly ExpenseSection[]>> = { EMP1: ["INSURANCE"] }
+/** May this role work with this Expense section at all (then within its `expenses` actions)? */
+export const expenseSectionAllowed = (role: Role, section: ExpenseSection) => can(role, "expenses") && !(HIDDEN_EXPENSE_SECTIONS[role] ?? []).includes(section)
+/** True when the role sees only some Expense sections (its Expense audit events are filtered by section too). */
+export const hasHiddenExpenseSections = (role: Role) => (HIDDEN_EXPENSE_SECTIONS[role] ?? []).length > 0
+/**
+ * Locking an Expense section-month (no unlock exists): the month-lock authority (Owner / Dev) with `expenses` edit — Dev
+ * and the Owner (owner, 28 Nov 2026); never EMP 1, although it edits. The database: "Lock Expense months" + can_set_month_lock.
+ */
+export const canLockExpenseMonths = (role: Role) => canSetMonthLock(role) && can(role, "expenses", "edit")
 
 /** The AdBlue profiles (owner, 11 Nov 2026): only AdBlue and Diesel, never another module (src/lib/server/erp/profiles.ts). */
 export const isAdBlueProfile = (role: Role) => role === "TATA_ADBLUE" || role === "ADBLUE"

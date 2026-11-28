@@ -10,7 +10,7 @@ export type CompanyScope = CompanyCode | "GROUP"
 
 /** DEV = every module like the Owner, without the Owner-only actions (see lib/permissions.ts). */
 /** TATA_ADBLUE / ADBLUE (owner, 11 Nov 2026): the AdBlue profiles — AdBlue writes, Diesel read-only (src/lib/permissions.ts). */
-export type Role = "OWNER" | "DEV" | "EMPLOYEE" | "TATA_ADBLUE" | "ADBLUE"
+export type Role = "OWNER" | "DEV" | "EMPLOYEE" | "EMP1" | "TATA_ADBLUE" | "ADBLUE" // EMP1 = "EMP 1" (owner, 28 Nov 2026)
 /**
  * Roles removed on 31 Oct 2026 (owner's instruction: only Owner, Dev and Employee). Kept only so audit events
  * recorded under them read as they were, and because the Supabase `erp_role` enum still lists them (its migration

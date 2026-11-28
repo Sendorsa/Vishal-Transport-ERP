@@ -23,6 +23,7 @@ import { getAccountState, addAccount, relinkAccount, setAccountRole, setAccountS
 const ROLE_OPTIONS: { value: ErpRole; label: string }[] = [
   { value: "OWNER", label: "Owner" },
   { value: "EMPLOYEE", label: "Employee" },
+  { value: "EMP1", label: "EMP 1" }, // the Employee + Expense (Road Tax, Fitness, Fines, Broker Charges): view and edit only
   { value: "DEV", label: "Dev" },
   { value: "TATA_ADBLUE", label: "Tata Adblue" }, // AdBlue for the customers Dev assigns (Customer access); Diesel read-only
   { value: "ADBLUE", label: "Adblue" }, // AdBlue for every customer; Diesel read-only

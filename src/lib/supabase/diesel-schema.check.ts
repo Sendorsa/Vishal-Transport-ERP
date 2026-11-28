@@ -44,8 +44,11 @@ async function main() {
 
   /* ---------------------------------------------------------------- roles and permissions mirror the app */
   const roles = (await q<{ r: string }>(`select unnest(enum_range(null::public.erp_role))::text as r`)).map((x) => x.r)
-  assert.deepEqual(roles, ["OWNER", "DEV", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"] satisfies Role[], "erp_role = Owner / Dev / Employee + the two AdBlue profiles (11 Nov 2026)")
+  assert.deepEqual(roles, ["OWNER", "DEV", "EMPLOYEE", "EMP1", "TATA_ADBLUE", "ADBLUE"] satisfies Role[], "erp_role = Owner / Dev / Employee / EMP 1 (28 Nov 2026) + the two AdBlue profiles (11 Nov 2026)")
+  // EMP 1's rows: the Employee's exactly, plus expenses:view / expenses:edit (20261129000100).
   const perms = await q<{ role: Role; permission: string }>(`select role::text as role, permission from core.role_permissions`)
+  const rowsOf = (r: Role) => perms.filter((p) => p.role === r).map((p) => p.permission).sort()
+  assert.deepEqual(rowsOf("EMP1"), [...rowsOf("EMPLOYEE"), "expenses:edit", "expenses:view"].sort(), "EMP1 rows = the EMPLOYEE's + expenses:view / expenses:edit")
   // private.can: the rows, Dev-only resources, and delete for the Owner and Dev only (20261116000000, owner 16 Nov 2026).
   const dbCan = (role: Role, r: string, a: string) =>
     (!["accounts", "system"].includes(r) || role === "DEV") && (a !== "delete" || role === "OWNER" || role === "DEV") && perms.some((p) => p.role === role && ["*", `${r}:*`, `${r}:${a}`].includes(p.permission))

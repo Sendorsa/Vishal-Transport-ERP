@@ -229,7 +229,7 @@ async function main() {
   const e1 = await api.expenses.create({ ...rt, description: "TN TP" })
   await api.expenses.update(e1.id, { ...e1, amount: 8205 }, "Wrong amount")
   const snapshot = JSON.stringify(all())
-  for (const r of ["OWNER", "EMPLOYEE", "TATA_ADBLUE", "ADBLUE"] as const) {
+  for (const r of ["EMPLOYEE", "TATA_ADBLUE", "ADBLUE"] as const) {
     setRole(r)
     await assert.rejects(api.expenses.list(), /can't view expense/, `${r} reads no expense`)
     await assert.rejects(api.expenses.create(rt), /can't create expense/, `${r} adds no expense`)
@@ -237,6 +237,32 @@ async function main() {
     await assert.rejects(api.expenses.remove(e1.id, "Not mine"), /can't delete expense/, `${r} deletes no expense`)
   }
   assert.equal(JSON.stringify(all()), snapshot, "the refused calls changed nothing")
+  // The Owner (owner, 28 Nov 2026): every section — view, add, edit, delete (with a reason) — each audited as the Owner.
+  {
+    setRole("OWNER")
+    assert.ok((await api.expenses.list()).some((x) => x.id === e1.id), "the Owner sees Expense records")
+    await api.brokers.create("Owner Broker")
+    const made = [
+      await api.expenses.create({ ...rt, description: "MV TAX", amount: 101 }),
+      await api.expenses.create(base("INSURANCE", { vehicleIds: [v2.id], provider: "Owner Insurer", policyNo: "O-1", amount: 102, validFrom: "2026-11-01", validTill: "2027-10-31", paymentMode: "NEFT" })),
+      await api.expenses.create(base("FITNESS", { vehicleIds: [v2.id], description: "FC FEES", amount: 103 })),
+      await api.expenses.create(base("FINE", { vehicleIds: [v1.id], taxType: "Signal jump", amount: 104, paymentStatus: "UNPAID" })),
+      await api.expenses.create(base("BROKER", { entryType: "CHARGE", broker: "Owner Broker", description: "Owner bill", amount: 105 })),
+    ]
+    assert.deepEqual(made.map((x) => x.section), ["ROAD_TAX", "INSURANCE", "FITNESS", "FINE", "BROKER"], "the Owner adds in all five sections")
+    for (const x of made) assert.equal((await api.expenses.update(x.id, { ...x, amount: x.amount + 1 })).amount, x.amount + 1, `the Owner edits ${x.section}`)
+    for (const x of made) await api.expenses.remove(x.id, "Owner check")
+    assert.ok(!all().some((x) => made.some((m) => m.id === x.id)), "…and deletes in all five")
+    const evs = (readAuditEvents() as { action: string; recordId: string; reason: string | null; actor: { role: string | null } }[]).filter((e) => made.some((m) => m.id === e.recordId))
+    assert.deepEqual([...new Set(evs.map((e) => e.actor.role))], ["OWNER"], "every event: the Owner")
+    assert.deepEqual(made.map((m) => evs.filter((e) => e.recordId === m.id).map((e) => e.action)), made.map(() => ["CREATED", "UPDATED", "DELETED"]))
+    assert.ok(evs.filter((e) => e.action === "DELETED").every((e) => e.reason === "Owner check"), "deletion reasons kept")
+    await assert.rejects(api.expenses.remove(e1.id, " "), /reason/i, "the Owner's delete still needs a reason")
+    await assert.rejects(api.expenseImport.importPlan({}, "x"), /Only Dev/, "imports stay Dev's")
+    await assert.rejects(api.expenseImport.rollbackApply("imp_x", "x"), /Only Dev/, "…and import rollbacks")
+    const history = await api.audit.history(made[1].id)
+    assert.deepEqual(history.map((e) => e.action), ["CREATED", "UPDATED", "DELETED"], "the Owner sees an Insurance record's history")
+  }
   setRole("DEV")
   await api.expenses.create({ ...rt, date: "2026-10-15" }) // Dev, like the Owner, may record in a closed month
   await assert.rejects(api.expenses.remove(e1.id, " "), /reason/i)
@@ -257,6 +283,65 @@ async function main() {
     registerScopeGetter(() => undefined)
   }
   assert.equal(count(), before)
+  /* 6b. EMP 1 (owner, 28 Nov 2026): the Employee + Road Tax, Fitness, Fines, Broker Charges — view and edit only */
+  {
+    setRole("DEV")
+    const { PermissionError } = await import("./index")
+    const mk = async (section: Parameters<typeof blankExpense>[0], patch: Partial<ReturnType<typeof blankExpense>>) => api.expenses.create(base(section, { date: "2026-11-20", ...patch }))
+    const road = await mk("ROAD_TAX", { vehicleIds: [v1.id], description: "MV TAX", taxType: "Same state", amount: 1111, validFrom: "2026-10-01", validTill: "2026-12-31", companyCode: v1.companyCode })
+    const insur = await mk("INSURANCE", { vehicleIds: [v2.id], provider: "EMP1 Insurer", policyNo: "P-EMP1", amount: 2222, validFrom: "2026-10-01", validTill: "2027-09-30", paymentMode: "NEFT" })
+    const fit = await mk("FITNESS", { vehicleIds: [v2.id], description: "FC FEES", amount: 333 })
+    const fine = await mk("FINE", { vehicleIds: [v1.id], taxType: "Signal jump", amount: 444, paymentStatus: "UNPAID" })
+    await api.brokers.create("EMP1 Broker")
+    const bill = await mk("BROKER", { entryType: "CHARGE", broker: "EMP1 Broker", description: "EMP1 bill", amount: 5000 })
+    const closed = await mk("ROAD_TAX", { vehicleIds: [v1.id], description: "MV TAX", taxType: "Same state", amount: 999, validFrom: "2026-10-01", validTill: "2026-12-31", companyCode: v1.companyCode, date: "2026-10-20" })
+    const before = JSON.stringify(all())
+    const locksBefore = JSON.stringify(readCollection("expense_month_locks"))
+    setRole("EMP1")
+    // View: the four sections, never Insurance.
+    const seen = await api.expenses.list()
+    assert.ok([road, fit, fine, bill].every((x) => seen.some((y) => y.id === x.id)), "EMP1 sees Road Tax, Fitness, Fines and Broker Charges")
+    assert.ok(!seen.some((x) => x.section === "INSURANCE"), "EMP1 sees no Insurance record")
+    assert.ok((await api.brokers.list()).some((b) => b.name === "EMP1 Broker"), "…and the broker list")
+    assert.ok((await api.expenseMonths.list()).every((l) => l.section !== "INSURANCE"), "…and no Insurance month lock")
+    // Edit: allowed in the four sections, refused for Insurance (whatever the request says), audited as EMP1.
+    const edited = await api.expenses.update(road.id, { ...road, amount: 1112 }, "Corrected")
+    assert.equal(edited.amount, 1112)
+    await api.expenses.update(fit.id, { ...fit, vehicleIds: [v1.id] })
+    await api.expenses.update(fine.id, { ...fine, amount: 445 })
+    await api.expenses.update(bill.id, { ...bill, amount: 5100 })
+    const evs = (readAuditEvents() as { action: string; recordId: string; actor: { role: string | null } }[]).filter((e) => [road.id, fit.id, fine.id, bill.id].includes(e.recordId) && e.action === "UPDATED")
+    assert.deepEqual(evs.map((e) => e.actor.role), ["EMP1", "EMP1", "EMP1", "EMP1"], "each edit audited as EMP 1")
+    await assert.rejects(api.expenses.update(closed.id, { ...closed, amount: 1 }), /October 2026 is locked/, "EMP1 follows the Monthly Sheet Lock, as the Employee")
+    await assert.rejects(api.expenses.update(insur.id, { ...insur, amount: 1 }), (e) => e instanceof PermissionError && /Insurance/.test(e.message), "EMP1 never edits an Insurance record")
+    await assert.rejects(api.expenses.update(insur.id, { ...insur, section: "ROAD_TAX", amount: 1 }), /Insurance/, "…not even by claiming another section")
+    // No create (any section), no delete (any section), no new broker, no month lock, no import / rollback.
+    for (const [section, x] of [["ROAD_TAX", road], ["INSURANCE", insur], ["FITNESS", fit], ["FINE", fine], ["BROKER", bill]] as const) {
+      await assert.rejects(api.expenses.create({ ...x, id: undefined, requestId: null } as never), /can't create expense/, `EMP1 adds no ${section} record`)
+      await assert.rejects(api.expenses.remove(x.id, "Not allowed"), /can't delete expense/, `EMP1 deletes no ${section} record`)
+    }
+    await assert.rejects(api.brokers.create("Another Broker"), /can't create expense/, "EMP1 adds no broker")
+    await assert.rejects(api.expenseMonths.lock("ROAD_TAX", "2026-10"), /can't lock Expense months/, "EMP1 locks no month")
+    await assert.rejects(api.expenseImport.importPlan({}, "x"), /Only Dev/, "EMP1 runs no import")
+    await assert.rejects(api.expenseImport.importApply({}, "x"), /Only Dev/)
+    await assert.rejects(api.expenseImport.rollbackPlan("imp_x"), /Only Dev/, "…and no import rollback")
+    await assert.rejects(api.expenseImport.rollbackApply("imp_x", "x"), /Only Dev/)
+    await assert.rejects(api.expenseImport.list(), /Only Dev/)
+    assert.equal(JSON.stringify(readCollection("expense_month_locks")), locksBefore, "no lock written")
+    // Audit: the four sections' events, never an Insurance event (record, label or amount) or an Expense month / import.
+    const log = (await api.audit.list()).filter((e) => e.module === "Expense")
+    assert.ok(log.some((e) => e.recordId === road.id) && log.some((e) => e.recordId === bill.id), "EMP1 sees its sections' history")
+    assert.ok(!log.some((e) => e.recordType === "Insurance" || e.recordType === "Expense month" || e.recordType === "Import batch" || /EMP1 Insurer/.test(e.label)), "…and no Insurance, month-lock or import event")
+    assert.deepEqual(await api.audit.history(insur.id), [], "no Insurance record history")
+    // Everything else: exactly the Employee.
+    setRole("EMPLOYEE")
+    await assert.rejects(api.expenses.list(), /can't view expense/, "the Employee is unchanged: no Expense")
+    setRole("DEV")
+    const after = all()
+    assert.equal(after.find((x) => x.id === insur.id)!.amount, 2222, "the Insurance record is untouched")
+    assert.equal(after.length, JSON.parse(before).length, "EMP1 created and deleted nothing")
+  }
+
   /* 7. accounting months and month locking — each section independent (owner, 25 Nov 2026) */
   setRole("DEV")
   // The month is the record's own transaction date — never Tax From / Valid Till, policy dates or the day it was entered.
@@ -291,16 +376,19 @@ async function main() {
   assert.deepEqual(monthSummary("BROKER", sample, "2026-09"), { records: 1, expense: 0, paid: 0, outstanding: 9000 }, "an opening balance is owed, never a new expense")
   // Locking: explicit only, per section; read-only for every role in that section; other sections and months unaffected.
   assert.equal(isMonthLocked(readCollection("expense_month_locks"), "ROAD_TAX", "2026-10"), false, "a past month is never locked by the calendar")
-  for (const r of ["OWNER", "EMPLOYEE"] as const) {
-    setRole(r)
-    await assert.rejects(api.expenseMonths.lock("ROAD_TAX", "2026-11"), /can't edit expense/, `${r} can't lock (Expense is Dev only)`)
-  }
+  setRole("EMPLOYEE")
+  await assert.rejects(api.expenseMonths.lock("ROAD_TAX", "2026-11"), /can't edit expense/, "the Employee can't lock (no Expense)")
+  // The Owner locks a section-month (the month-lock authority, owner 28 Nov 2026) — audited as the Owner.
+  setRole("OWNER")
+  const ownerLock = await api.expenseMonths.lock("INSURANCE", "2026-07")
+  assert.ok(isMonthLocked(readCollection("expense_month_locks"), "INSURANCE", "2026-07"), "the Owner locked Insurance · July 2026")
+  assert.equal((readAuditEvents() as { action: string; recordId: string; actor: { role: string | null } }[]).find((e) => e.recordId === ownerLock.id && e.action === "MONTH_LOCKED")?.actor.role, "OWNER")
   setRole("DEV")
   await assert.rejects(api.expenseMonths.lock("ROAD_TAX", "2026-12"), /hasn't started yet/)
   await assert.rejects(api.expenseMonths.lock("TYRES" as "ROAD_TAX", "2026-11"), /Choose the Expense section/)
   const novLock = await api.expenseMonths.lock("ROAD_TAX", "2026-11")
   await assert.rejects(api.expenseMonths.lock("ROAD_TAX", "2026-11"), /already locked in Road Tax/)
-  assert.deepEqual((await api.expenseMonths.list()).map((l) => [l.section, l.month]), [["ROAD_TAX", "2026-11"]])
+  assert.deepEqual((await api.expenseMonths.list()).map((l) => [l.section, l.month]), [["INSURANCE", "2026-07"], ["ROAD_TAX", "2026-11"]], "the Owner's lock, then Dev's")
   for (const other of ["INSURANCE", "FITNESS", "FINE", "BROKER"] as const) assert.equal(isMonthLocked(readCollection("expense_month_locks"), other, "2026-11"), false, `${other} November stays open`)
   const snapshot2 = JSON.stringify(all())
   await assert.rejects(api.expenses.create({ ...rt, date: "2026-11-24" }), /November 2026 is locked in Road Tax/, "no new record in a locked month")
@@ -465,11 +553,12 @@ async function main() {
     assert.equal((await api.expenses.create(p(k2), { confirmSameDay: true })).id, second.id, "a consumed key never makes a third")
     await api.expenses.create({ ...rt, date: "2026-10-25", amount: 4321, requestId: crypto.randomUUID() }) // identical Road Tax: no confirmation
     // The Audit Log never shows Expense events to the Owner or the Employee (C-8).
-    for (const r of ["OWNER", "EMPLOYEE"] as const) {
-      setRole(r)
-      assert.equal((await api.audit.list()).filter((e) => e.module === "Expense").length, 0, `${r}: no Expense event in the Audit Log`)
-      assert.deepEqual(await api.audit.history(a1.id), [], `${r}: no Expense history`)
-    }
+    setRole("EMPLOYEE")
+    assert.equal((await api.audit.list()).filter((e) => e.module === "Expense").length, 0, "the Employee: no Expense event in the Audit Log")
+    assert.deepEqual(await api.audit.history(a1.id), [], "the Employee: no Expense history")
+    setRole("OWNER")
+    assert.ok((await api.audit.list()).some((e) => e.module === "Expense" && e.recordType === "Insurance"), "the Owner: every Expense event, Insurance included")
+    assert.ok((await api.audit.history(a1.id)).length > 0, "the Owner: Expense record history")
     setRole("DEV")
     assert.ok((await api.audit.list()).some((e) => e.module === "Expense"), "Dev sees them")
     // Browser resets keep Expense (C-7).

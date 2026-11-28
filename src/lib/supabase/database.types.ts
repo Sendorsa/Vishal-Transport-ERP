@@ -5,7 +5,7 @@
  * connection), so supabase-js never needs types for them. Once a project is linked, regenerate with:
  *   npx supabase gen types typescript --linked --schema public > src/lib/supabase/database.types.ts
  */
-export type ErpRole = "OWNER" | "DEV" | "EMPLOYEE" | "TATA_ADBLUE" | "ADBLUE" // 20261101000000_erp_roles_three.sql, 20261111000100_erp_roles_adblue.sql
+export type ErpRole = "OWNER" | "DEV" | "EMPLOYEE" | "EMP1" | "TATA_ADBLUE" | "ADBLUE" // 20261101000000_erp_roles_three.sql, 20261111000100_erp_roles_adblue.sql, 20261129000000_erp_role_emp1.sql
 export type AccountStatus = "INVITED" | "ACTIVE" | "DISABLED"
 
 export type Database = {

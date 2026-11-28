@@ -20,7 +20,7 @@ import { adBlueTotals, isDirectAdBlue, NO_VENDOR_LABEL, adBlueShortfallMessage, 
 import { availabilityMessage, fillAmount, fitsTanker, isStockPool, isTankerFill, normReg, shortfallMessage, tankerAvailability, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate, tdsPaymentProblem, tdsSplit, tdsTakenOn } from "@/domain/station-ledger"
 import { currentActor, currentRole, customerScope } from "@/lib/identity"
-import { can, canChangeAdBluePurchases, canManageAdBluePayments, canSetMonthLock, hasOwnerAuthority, isAdBlueProfile, type Resource } from "@/lib/permissions"
+import { can, canChangeAdBluePurchases, canLockExpenseMonths, canManageAdBluePayments, canSetMonthLock, expenseSectionAllowed, hasHiddenExpenseSections, hasOwnerAuthority, isAdBlueProfile, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
 import { addMonths, format, parseISO } from "date-fns"
 import { cleanName, CREDIT, financialChanges, itemProblem, lineAmounts, masterKey, OFFICE_LABEL, paidByInvoice, paymentProblem, referenceNoun, settledOf, tdsProblem, TYRE_MASTER_LABEL, TYRE_PAYMENT_MODES, tyreTdsSplit, tyreTotals, unallocated, utrKey } from "@/domain/tyre"
@@ -1381,6 +1381,21 @@ async function setVendorStatus(id: string, status: AdBlueVendor["status"]) {
 
 /* ------------------------------------------------------------------ Expense (Phase 1) */
 
+/**
+ * A section the role may not use at all (EMP 1: Insurance — owner, 28 Nov 2026): refused before anything is read or
+ * written, whatever the record or the request. The database refuses it too (private.expense_section_ok in RLS).
+ */
+function assertExpenseSection(section: ExpenseSection) {
+  if (!Object.hasOwn(EXPENSE_SECTIONS, section)) throw new Error("Choose the expense section")
+  if (!expenseSectionAllowed(currentRole(), section)) throw new PermissionError(`Your role can't work with ${EXPENSE_SECTIONS[section].title} records.`)
+}
+
+/** An Expense audit event's section, by its record type; none = not one section's record (an Expense month, an import batch). */
+const EXPENSE_EVENT_SECTION: Record<string, ExpenseSection> = {
+  "Road tax": "ROAD_TAX", Insurance: "INSURANCE", Fitness: "FITNESS", Fine: "FINE",
+  "Broker charge": "BROKER", "Broker payment": "BROKER", "Broker opening balance": "BROKER", Broker: "BROKER",
+}
+
 /** A section's month locked after review: that section's records in it are read-only for every role (owner, 25 Nov 2026). */
 function assertExpenseMonthOpen(section: ExpenseSection, date: string) {
   const month = date.slice(0, 7)
@@ -1866,8 +1881,13 @@ export interface RestorePlan {
  * database the read policy has already removed them; this keeps the browser backend the same and is a second barrier.
  */
 function visibleEvents() {
-  const seesExpense = can(currentRole(), "expenses")
-  return readAuditEvents().filter((e) => e.module !== "Expense" || seesExpense)
+  const role = currentRole()
+  const seesExpense = can(role, "expenses")
+  // A role limited to some Expense sections (EMP 1, owner 28 Nov 2026) sees only those sections' events — never an
+  // Insurance record, an Expense month lock or an import batch (its summary covers every section). = expense_event_ok.
+  const sectionOf = (e: AuditEvent) => EXPENSE_EVENT_SECTION[e.recordType] as ExpenseSection | undefined
+  const limited = hasHiddenExpenseSections(role)
+  return readAuditEvents().filter((e) => e.module !== "Expense" || (seesExpense && (!limited || (!!sectionOf(e) && expenseSectionAllowed(role, sectionOf(e)!)))))
 }
 
 /**
@@ -2806,8 +2826,10 @@ export const api = {
    */
   expenses: {
     list: async () => {
-      if (!can(currentRole(), "expenses")) throw new PermissionError("Your role can't view expense records.")
-      return expenses.list()
+      const role = currentRole()
+      if (!can(role, "expenses")) throw new PermissionError("Your role can't view expense records.")
+      // Only the sections the role may use (EMP 1: no Insurance). On the shared database RLS already left them out.
+      return (await expenses.list()).filter((x) => expenseSectionAllowed(role, x.section))
     },
     /**
      * Phase 2B (§5.4): 1. a `requestId` already used → the saved record (same content) or a refusal (changed content) —
@@ -2817,6 +2839,7 @@ export const api = {
     create: (input: ExpenseInput, opts: { confirmSameDay?: boolean } = {}) =>
       tx(async () => {
         assertCan("expenses", "create")
+        assertExpenseSection(input.section)
         const rid = typeof input.requestId === "string" && input.requestId ? input.requestId : null
         const used = rid ? readCollection("expenses").find((e) => e.requestId === rid) : undefined
         if (used) {
@@ -2849,6 +2872,8 @@ export const api = {
         assertCan("expenses", "edit")
         const before = await expenses.get(id)
         if (!before) throw new NotFoundError("Expense", id)
+        assertExpenseSection(before.section) // EMP 1 never changes an Insurance record, whatever the request says
+        assertExpenseSection(input.section)
         assertExpenseMonthOpen(before.section, before.date)
         assertMonthEditable(before.date)
         if (input.section !== before.section) throw new Error(`This is a ${EXPENSE_SECTIONS[before.section].one}; it can't be moved to ${EXPENSE_SECTIONS[input.section]?.title ?? "another section"}.`)
@@ -2874,6 +2899,7 @@ export const api = {
         assertReason(reason)
         const before = await expenses.get(id)
         if (!before) return
+        assertExpenseSection(before.section)
         assertExpenseMonthOpen(before.section, before.date)
         assertMonthEditable(before.date)
         if (before.section === "BROKER") assertBrokerLedger(readCollection("expenses").filter((e) => e.id !== id), [before.broker], before.entryType)
@@ -2960,12 +2986,15 @@ export const api = {
    */
   expenseMonths: {
     list: async () => {
-      if (!can(currentRole(), "expenses")) throw new PermissionError("Your role can't view expense months.")
-      return expenseMonthLocks.list()
+      const role = currentRole()
+      if (!can(role, "expenses")) throw new PermissionError("Your role can't view expense months.")
+      return (await expenseMonthLocks.list()).filter((l) => !l.section || expenseSectionAllowed(role, l.section))
     },
     lock: (section: ExpenseSection, month: string) =>
       tx(async () => {
         assertCan("expenses", "edit")
+        // …and the Owner / Dev month-lock authority (Dev today) — never EMP 1, although it edits (owner, 28 Nov 2026).
+        if (!canLockExpenseMonths(currentRole())) throw new PermissionError("Your role can't lock Expense months.")
         if (!Object.hasOwn(EXPENSE_SECTIONS, section)) throw new Error("Choose the Expense section")
         if (typeof month !== "string" || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("Choose the month to lock")
         if (month > todayISO().slice(0, 7)) throw new Error("A month that hasn't started yet can't be locked.")

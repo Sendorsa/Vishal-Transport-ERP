@@ -19,7 +19,9 @@
 --      20261128000000 can be applied again unchanged), and the audit policies no longer mention Expense.
 -- No audit event is removed (there are none: the script refuses otherwise).
 --
--- ORDER: deploy the app version WITHOUT Expense on the shared database first. Afterwards 27-expense-preflight.sql
+-- ORDER: roll back 20261129000100 (EMP 1 — 10-rollback-emp1-profile.sql) first if it is applied: it changes Expense
+-- policies and holds Expense permission rows; this script stops until then. Then deploy the app version WITHOUT Expense
+-- on the shared database. Afterwards 27-expense-preflight.sql
 -- reports every CHECK row OK again.
 
 begin;
@@ -28,6 +30,9 @@ do $$
 begin
   if to_regnamespace('expense') is null then
     raise exception 'Expense rollback stopped: the expense schema does not exist (not applied, or already rolled back). Nothing was changed.';
+  end if;
+  if to_regprocedure('private.expense_section_ok(text)') is not null or exists (select 1 from core.role_permissions where permission like 'expenses%') then
+    raise exception 'Expense rollback stopped: the EMP 1 profile (20261129000100) is applied — run 10-rollback-emp1-profile.sql first. Nothing was changed.';
   end if;
   if exists (select 1 from expense.entries) or exists (select 1 from expense.entry_vehicles) or exists (select 1 from expense.brokers)
      or exists (select 1 from expense.month_locks) or exists (select 1 from expense.import_batches) or exists (select 1 from expense.import_items) then

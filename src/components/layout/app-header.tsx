@@ -62,6 +62,7 @@ const PREVIEW_OPTIONS: { value: Role; note: string }[] = [
   { value: "DEV", note: "Actual role" },
   { value: "OWNER", note: "Preview" },
   { value: "EMPLOYEE", note: "Preview" },
+  { value: "EMP1", note: "Preview" },
   { value: "TATA_ADBLUE", note: "Preview · no customers" },
   { value: "ADBLUE", note: "Preview" },
 ]

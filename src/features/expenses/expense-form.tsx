@@ -33,6 +33,7 @@ import {
 import { DATA_BACKEND } from "@/lib/api/client"
 import { useBrokers, useCreateBroker, useSaveExpense } from "@/lib/api/hooks"
 import { useCan, useRole } from "@/lib/app-state"
+import { expenseSectionAllowed } from "@/lib/permissions"
 import { formatDate, todayISO } from "@/lib/format"
 import type { BrokerEntryType, CompanyCode, Expense, ExpenseSection } from "@/lib/types"
 import { useExpenseData, type ExpenseData } from "./expense-data"
@@ -49,8 +50,8 @@ export function ExpenseDialog({ section, expense, defaultDate, onClose }: { sect
   const [role] = useRole()
   const d = useExpenseData()
   if (!d.ready) return null
-  const blocked = !can("expenses", expense ? "edit" : "create")
-    ? `Your role can't ${expense ? "edit" : "add"} expenses.`
+  const blocked = !can("expenses", expense ? "edit" : "create") || !expenseSectionAllowed(role, section)
+    ? `Your role can't ${expense ? "edit" : "add"} ${expenseSectionAllowed(role, section) ? "expenses" : `${EXPENSE_SECTIONS[section].title} records`}.`
     : expense && isMonthLocked(d.monthLocks, section, monthOf(expense))
       ? `${monthLabel(monthOf(expense))} is locked in ${EXPENSE_SECTIONS[section].title} — its records are read-only.`
       : expense && !canEditMonth(role, expense.date.slice(0, 7), todayISO(), d.locks)
@@ -83,6 +84,8 @@ function Form({ d, section, expense, defaultDate, blocked, onClose }: { d: Expen
   const save = useSaveExpense()
   const brokerList = useBrokers()
   const createBroker = useCreateBroker()
+  // Adding a broker creates a record: only with `expenses` create (EMP 1 edits, never adds — owner, 28 Nov 2026).
+  const mayAddBroker = useCan()("expenses", "create")
   const today = todayISO()
   const meta = EXPENSE_SECTIONS[section]
   // A new entry opens on the selected month's date (today in the current month).
@@ -228,9 +231,9 @@ function Form({ d, section, expense, defaultDate, blocked, onClose }: { d: Expen
           value={f.broker}
           options={brokerNames.map((n) => ({ value: n, label: n }))}
           onChange={set("broker")}
-          onCreate={addBroker}
+          onCreate={mayAddBroker ? addBroker : undefined}
           createLabel={(q) => `Add New Broker "${q}"`}
-          addLabel="Add New Broker"
+          addLabel={mayAddBroker ? "Add New Broker" : undefined}
           placeholder="Search broker…"
           invalid={!!show("broker")}
         />

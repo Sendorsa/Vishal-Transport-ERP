@@ -99,20 +99,22 @@ for (const s of [OUT, ACTIVE, NOT_APPROVED, DISABLED, INVITED, UNCONFIGURED])
     assert.equal(to("/adblue", s), "allow", `${role}: the landing page itself is allowed (no redirect loop)`)
     assert.equal(to("/api/erp", s), "allow", `${role}: the API enforces its own method list`)
   }
-  // The other roles: every page, the Fuel Stations landing — except Expense, unreleased: Dev only (owner, 25 Nov 2026).
+  // The other roles: every page, the Fuel Stations landing — except Expense (unreleased): Dev and the Owner open all five
+  // pages (owner, 28 Nov 2026), EMP 1 every one but Insurance, the Employee none.
   const EXPENSE_PAGES = ["/broker-charges", "/fines", "/fitness", "/insurance", "/road-tax"]
   const expense = routes.filter((r) => EXPENSE_PAGES.includes(r))
   assert.deepEqual(expense.sort(), EXPENSE_PAGES, "the five Expense pages, at the top level (owner, 26 Nov 2026)")
   assert.equal(routes.filter((r) => r.startsWith("/expenses")).length, 0, "no page left under the old /expenses prefix")
-  for (const role of ["OWNER", "DEV", "EMPLOYEE"] as const) {
+  const opens = (role: string, r: string) => role === "DEV" || role === "OWNER" || (role === "EMP1" && !r.startsWith("/insurance"))
+  for (const role of ["OWNER", "DEV", "EMPLOYEE", "EMP1"] as const) {
     const s: AuthState = { ...ACTIVE, role }
     assert.equal(to("/", s), LANDING)
     for (const r of routes.filter((r) => r !== "/" && r !== "/login")) {
-      const allowed = role === "DEV" || !expense.includes(r)
+      const allowed = !expense.includes(r) || opens(role, r)
       assert.equal(to(r, s), allowed ? "allow" : LANDING, `${role}: ${r} ${allowed ? "allowed" : "→ Fuel Stations"}`)
       assert.equal(to(`${r}?from=2026-11-01`, s), allowed ? "allow" : LANDING, `${role}: ${r} with a query string`)
     }
-    for (const r of ["/expenses", "/expenses/road-tax", "/road-tax/x", "/fines/../fines", "/expenses/../broker-charges"]) assert.equal(to(r, s), role === "DEV" ? "allow" : LANDING, `${role}: ${r}`)
+    for (const r of ["/expenses", "/expenses/road-tax", "/road-tax/x", "/fines/../fines", "/expenses/../broker-charges", "/insurance/x"]) assert.equal(to(r, s), opens(role, r) ? "allow" : LANDING, `${role}: ${r}`)
     for (const r of ["/expenses-report", "/finesse", "/road-taxes", "/fitness-report"]) assert.equal(to(r, s), "allow", `${role}: ${r} — only the Expense pages are gated, not look-alike paths`)
   }
   for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) for (const r of expense) assert.equal(to(r, { ...ACTIVE, role }), "/adblue", `${role}: ${r} refused`)

@@ -3,7 +3,7 @@
  * pre-created account is ACTIVE. One pure function so the proxy's decisions are testable (gate.check.ts).
  * `src/proxy.ts` applies it to every page request before anything renders.
  */
-import { can, type Resource } from "@/lib/permissions"
+import { can, expenseSectionAllowed } from "@/lib/permissions"
 import type { Role } from "@/lib/types"
 
 export type AccountStatus = "INVITED" | "ACTIVE" | "DISABLED"
@@ -33,9 +33,17 @@ export const landingFor = (role: Role | null | undefined) => (role === "TATA_ADB
  */
 // The five Expense pages sit at the top level (owner, 26 Nov 2026: /road-tax … /broker-charges); "/expenses" stays gated
 // as the old prefix (next.config.ts redirects its five pages to the new URLs).
-const UNRELEASED_PAGES: [string, Resource][] = [["/road-tax", "expenses"], ["/insurance", "expenses"], ["/fitness", "expenses"], ["/fines", "expenses"], ["/broker-charges", "expenses"], ["/expenses", "expenses"]]
+// Each Expense page also needs its section (owner, 28 Nov 2026: EMP 1 has Expense without Insurance).
+const UNRELEASED_PAGES: [string, (role: Role) => boolean][] = [
+  ["/road-tax", (r) => expenseSectionAllowed(r, "ROAD_TAX")],
+  ["/insurance", (r) => expenseSectionAllowed(r, "INSURANCE")],
+  ["/fitness", (r) => expenseSectionAllowed(r, "FITNESS")],
+  ["/fines", (r) => expenseSectionAllowed(r, "FINE")],
+  ["/broker-charges", (r) => expenseSectionAllowed(r, "BROKER")],
+  ["/expenses", (r) => can(r, "expenses")],
+]
 export const unreleasedPageAllowed = (role: Role | null | undefined, pathname: string) =>
-  UNRELEASED_PAGES.every(([prefix, resource]) => !(pathname === prefix || pathname.startsWith(`${prefix}/`)) || (!!role && can(role, resource)))
+  UNRELEASED_PAGES.every(([prefix, allowed]) => !(pathname === prefix || pathname.startsWith(`${prefix}/`)) || (!!role && allowed(role)))
 
 export function profilePageAllowed(role: Role, pathname: string) {
   if (pathname === "/adblue" || pathname === "/diesel") return true

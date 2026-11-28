@@ -35,7 +35,10 @@ from (values
       (select string_agg(case when coalesce(qual, with_check) ~ 'audit\.events' then 'yes' else 'no' end, ',' order by cmd) from pg_policies where schemaname = 'audit' and tablename = 'reviews' and policyname in ('Owner and Dev read reviews', 'Owner and Dev review deletions'))),
   (15, 'CHECK', 'changed_modules filters Expense', 'yes',
       (select case when prosrc ~ 'Expense' then 'yes' else 'no' end from pg_proc where oid = to_regprocedure('private.changed_modules(timestamptz)'))),
-  (16, 'CHECK', 'expenses permission rows (Dev-only)', '0', (select count(*)::text from core.role_permissions where permission like 'expenses%')),
+  (16, 'CHECK', 'expenses permission rows: none, or only EMP1 view / edit (20261129000100) and OWNER * (20261129000200)', 'none',
+      coalesce((select string_agg(role::text || ' ' || permission, ', ' order by role::text, permission) from core.role_permissions
+                where permission like 'expenses%' and not (role::text = 'EMP1' and permission in ('expenses:view', 'expenses:edit'))
+                  and not (role::text = 'OWNER' and permission = 'expenses:*')), 'none')),
   (17, 'INFO', 'vehicles · customers · drivers · audit events (unchanged vs 27)', '',
       (select count(*)::text from core.vehicles) || ' · ' || (select count(*)::text from core.customers) || ' · ' || (select count(*)::text from core.drivers) || ' · ' || (select count(*)::text from audit.events))
 ) as t(check_no, kind, check_name, expected, actual)
