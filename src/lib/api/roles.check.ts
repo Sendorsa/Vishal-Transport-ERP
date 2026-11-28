@@ -9,7 +9,7 @@ import { checkTanker, setRole, storage } from "./test-browser"
 
 async function main() {
   const { api } = await import("./index")
-  const { can, RESOURCES, DEV_ONLY, UNRELEASED, ROLES, roleLabel, hasOwnerAuthority, canBypassMonthLock, canSetMonthLock, canChangeAdBluePurchases, isAdBlueProfile, canDelete, canLockExpenseMonths, expenseSectionAllowed, hasHiddenExpenseSections } = await import("@/lib/permissions")
+  const { can, RESOURCES, DEV_ONLY, UNRELEASED, ROLES, roleLabel, hasOwnerAuthority, canBypassMonthLock, canSetMonthLock, canChangeAdBluePurchases, isAdBlueProfile, canDelete, canLockExpenseMonths, expenseSectionAllowed, hasHiddenExpenseSections, canAddBrokers } = await import("@/lib/permissions")
   const { currentRole } = await import("@/lib/app-state")
   const { canEditMonth } = await import("@/domain/month-lock")
   const { actorLabel } = await import("@/domain/audit")
@@ -44,7 +44,7 @@ async function main() {
   assert.equal(roleLabel("EMP1"), "EMP 1")
   for (const r of RESOURCES)
     for (const a of actions)
-      assert.equal(can("EMP1", r, a), r === "expenses" ? a === "view" || a === "edit" : can("EMPLOYEE", r, a), `EMP1 ${r}:${a}`)
+      assert.equal(can("EMP1", r, a), r === "expenses" ? a === "view" || a === "create" || a === "edit" : can("EMPLOYEE", r, a), `EMP1 ${r}:${a}`)
   assert.deepEqual([hasOwnerAuthority("EMP1"), canSetMonthLock("EMP1"), canBypassMonthLock("EMP1"), canChangeAdBluePurchases("EMP1", "edit"), canChangeAdBluePurchases("EMP1", "delete"), isAdBlueProfile("EMP1")],
     [hasOwnerAuthority("EMPLOYEE"), canSetMonthLock("EMPLOYEE"), canBypassMonthLock("EMPLOYEE"), canChangeAdBluePurchases("EMPLOYEE", "edit"), canChangeAdBluePurchases("EMPLOYEE", "delete"), isAdBlueProfile("EMPLOYEE")], "EMP1 = the Employee's controls")
   assert.equal(canEditMonth("EMP1", "2020-01", todayISO(), []), canEditMonth("EMPLOYEE", "2020-01", todayISO(), []), "EMP1 follows the Monthly Sheet Lock as the Employee")
@@ -55,6 +55,7 @@ async function main() {
   for (const role of ["EMPLOYEE", "TATA_ADBLUE", "ADBLUE"] as const) assert.ok(sections.every((x) => !expenseSectionAllowed(role, x)), `${role}: no Expense section`)
   assert.deepEqual(ROLES.map((x) => x.value).filter(canLockExpenseMonths), ["OWNER", "DEV"], "Expense months: the Owner and Dev lock (never EMP1)")
   assert.deepEqual(ROLES.map((x) => x.value).filter(hasHiddenExpenseSections), ["EMP1"])
+  assert.deepEqual(ROLES.map((x) => x.value).filter(canAddBrokers), ["OWNER", "DEV"], "the broker list: the Owner and Dev (never EMP1, although it adds entries)")
   assert.deepEqual([roleLabel("TATA_ADBLUE"), roleLabel("ADBLUE")], ["Tata Adblue", "Adblue"])
   // The AdBlue profiles (owner, 11 Nov 2026): Diesel read-only and AdBlue, nothing else — and no Owner-level control.
   for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) {

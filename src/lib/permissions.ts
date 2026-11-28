@@ -55,7 +55,7 @@ export const ROLES: { value: Role; label: string; description: string }[] = [
   { value: "OWNER", label: "Owner", description: "Every business module and Owner-level control (month locks, restore, deletion review); no account or system administration" },
   { value: "DEV", label: "Dev", description: "Everything the Owner can do, plus exclusive account and system administration" },
   { value: "EMPLOYEE", label: "Employee", description: "Everything the Owner can do except Settings, locking months and deleting records" },
-  { value: "EMP1", label: "EMP 1", description: "Everything the Employee can do, plus Expense → Road Tax, Fitness, Fines and Broker Charges: view and edit only (no Insurance, no new or deleted records, no month locks)" },
+  { value: "EMP1", label: "EMP 1", description: "Everything the Employee can do, plus Expense → Road Tax, Fitness, Fines and Broker Charges: view, add and edit (no Insurance, no deleting, no new brokers, no month locks)" },
   { value: "TATA_ADBLUE", label: "Tata Adblue", description: "AdBlue entries (add / edit) for the customers Dev assigns, bulk purchases into the shared stock; Diesel read-only for those customers" },
   { value: "ADBLUE", label: "Adblue", description: "AdBlue entries (add / edit) for every customer, bulk purchases into the shared stock; Diesel read-only for every customer" },
 ]
@@ -70,9 +70,9 @@ const MAP: Record<Role, Permission[]> = {
   DEV: ["*"],
   OWNER: BUSINESS_ACCESS,
   EMPLOYEE: EMPLOYEE_ACCESS,
-  // EMP 1 (owner, 28 Nov 2026): exactly the Employee, plus Expense view and edit — never create or delete (and, by
-  // HIDDEN_EXPENSE_SECTIONS, never Insurance). The Employee's own list is unchanged.
-  EMP1: [...EMPLOYEE_ACCESS.filter((p) => p !== "expenses:*"), "expenses:view", "expenses:edit"],
+  // EMP 1 (owner, 28 Nov 2026): exactly the Employee, plus Expense view, add and edit (add: owner, 28 Nov 2026) — never
+  // delete (and, by HIDDEN_EXPENSE_SECTIONS, never Insurance; canAddBrokers: no new broker). The Employee's list is unchanged.
+  EMP1: [...EMPLOYEE_ACCESS.filter((p) => p !== "expenses:*"), "expenses:view", "expenses:create", "expenses:edit"],
   // Owner's instruction, 11 Nov 2026: AdBlue (entries create / edit / delete, bulk purchases) and Diesel read-only.
   // Tata Adblue is further limited to the customers Dev assigns (customerScope in src/lib/identity.ts, RLS).
   TATA_ADBLUE: ["diesel:view", "adblue:*"],
@@ -114,11 +114,16 @@ export const canBypassMonthLock = (role: Role) => role === "OWNER" || role === "
 const HIDDEN_EXPENSE_SECTIONS: Partial<Record<Role, readonly ExpenseSection[]>> = { EMP1: ["INSURANCE"] }
 /** May this role work with this Expense section at all (then within its `expenses` actions)? */
 export const expenseSectionAllowed = (role: Role, section: ExpenseSection) => can(role, "expenses") && !(HIDDEN_EXPENSE_SECTIONS[role] ?? []).includes(section)
+/**
+ * Adding a broker to the Broker Charges list (configuration shared by every entry): Dev and the Owner — never EMP 1,
+ * although it adds entries (owner, 28 Nov 2026). The database: "Add brokers" also needs is_owner() / is_dev().
+ */
+export const canAddBrokers = (role: Role) => can(role, "expenses", "create") && (role === "DEV" || role === "OWNER")
 /** True when the role sees only some Expense sections (its Expense audit events are filtered by section too). */
 export const hasHiddenExpenseSections = (role: Role) => (HIDDEN_EXPENSE_SECTIONS[role] ?? []).length > 0
 /**
  * Locking an Expense section-month (no unlock exists): the month-lock authority (Owner / Dev) with `expenses` edit — Dev
- * and the Owner (owner, 28 Nov 2026); never EMP 1, although it edits. The database: "Lock Expense months" + can_set_month_lock.
+ * and the Owner (owner, 28 Nov 2026); never EMP 1, although it adds and edits. The database: "Lock Expense months" + can_set_month_lock.
  */
 export const canLockExpenseMonths = (role: Role) => canSetMonthLock(role) && can(role, "expenses", "edit")
 

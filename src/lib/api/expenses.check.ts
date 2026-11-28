@@ -283,7 +283,7 @@ async function main() {
     registerScopeGetter(() => undefined)
   }
   assert.equal(count(), before)
-  /* 6b. EMP 1 (owner, 28 Nov 2026): the Employee + Road Tax, Fitness, Fines, Broker Charges — view and edit only */
+  /* 6b. EMP 1 (owner, 28 Nov 2026): the Employee + Road Tax, Fitness, Fines, Broker Charges — view, add and edit; no delete */
   {
     setRole("DEV")
     const { PermissionError } = await import("./index")
@@ -315,12 +315,22 @@ async function main() {
     await assert.rejects(api.expenses.update(closed.id, { ...closed, amount: 1 }), /October 2026 is locked/, "EMP1 follows the Monthly Sheet Lock, as the Employee")
     await assert.rejects(api.expenses.update(insur.id, { ...insur, amount: 1 }), (e) => e instanceof PermissionError && /Insurance/.test(e.message), "EMP1 never edits an Insurance record")
     await assert.rejects(api.expenses.update(insur.id, { ...insur, section: "ROAD_TAX", amount: 1 }), /Insurance/, "…not even by claiming another section")
-    // No create (any section), no delete (any section), no new broker, no month lock, no import / rollback.
-    for (const [section, x] of [["ROAD_TAX", road], ["INSURANCE", insur], ["FITNESS", fit], ["FINE", fine], ["BROKER", bill]] as const) {
-      await assert.rejects(api.expenses.create({ ...x, id: undefined, requestId: null } as never), /can't create expense/, `EMP1 adds no ${section} record`)
-      await assert.rejects(api.expenses.remove(x.id, "Not allowed"), /can't delete expense/, `EMP1 deletes no ${section} record`)
-    }
-    await assert.rejects(api.brokers.create("Another Broker"), /can't create expense/, "EMP1 adds no broker")
+    // Add (owner, 28 Nov 2026): a new record in each of the four sections, audited as EMP 1; never Insurance, never in a
+    // closed month (the Monthly Sheet Lock, as the Employee).
+    const added = [
+      await mk("ROAD_TAX", { vehicleIds: [v1.id], description: "MV TAX", taxType: "Same state", amount: 1201, validFrom: "2026-11-01", validTill: "2027-01-31", companyCode: v1.companyCode }),
+      await mk("FITNESS", { vehicleIds: [v2.id], description: "FC FEES", amount: 1202 }),
+      await mk("FINE", { vehicleIds: [v1.id], taxType: "Overload", amount: 1203, paymentStatus: "PAID", paymentDate: "2026-11-21" }),
+      await mk("BROKER", { entryType: "PAYMENT", broker: "EMP1 Broker", paidAmount: 1204, paymentDate: "2026-11-20" }),
+    ]
+    assert.deepEqual(added.map((x) => x.section), ["ROAD_TAX", "FITNESS", "FINE", "BROKER"], "EMP1 adds in the four sections")
+    const created = (readAuditEvents() as { action: string; recordId: string; actor: { role: string | null } }[]).filter((e) => added.some((x) => x.id === e.recordId) && e.action === "CREATED")
+    assert.deepEqual(created.map((e) => e.actor.role), ["EMP1", "EMP1", "EMP1", "EMP1"], "each addition audited as EMP 1")
+    await assert.rejects(mk("INSURANCE", { vehicleIds: [v2.id], provider: "EMP1 Insurer", policyNo: "P-2", amount: 1, validFrom: "2026-11-01", validTill: "2027-10-31", paymentMode: "NEFT" }), (e) => e instanceof PermissionError && /Insurance/.test(e.message), "EMP1 adds no Insurance record")
+    await assert.rejects(mk("FITNESS", { vehicleIds: [v2.id], amount: 1, date: "2026-10-20" }), /October 2026 is locked/, "…nor into a closed month")
+    // No delete (any section — also its own additions), no new broker, no month lock, no import / rollback.
+    for (const x of [road, insur, fit, fine, bill, ...added]) await assert.rejects(api.expenses.remove(x.id, "Not allowed"), /can't delete expense/, `EMP1 deletes no ${x.section} record`)
+    await assert.rejects(api.brokers.create("Another Broker"), /can't add brokers/, "EMP1 adds no broker")
     await assert.rejects(api.expenseMonths.lock("ROAD_TAX", "2026-10"), /can't lock Expense months/, "EMP1 locks no month")
     await assert.rejects(api.expenseImport.importPlan({}, "x"), /Only Dev/, "EMP1 runs no import")
     await assert.rejects(api.expenseImport.importApply({}, "x"), /Only Dev/)
@@ -339,7 +349,7 @@ async function main() {
     setRole("DEV")
     const after = all()
     assert.equal(after.find((x) => x.id === insur.id)!.amount, 2222, "the Insurance record is untouched")
-    assert.equal(after.length, JSON.parse(before).length, "EMP1 created and deleted nothing")
+    assert.equal(after.length, JSON.parse(before).length + 4, "EMP1 added its four records and deleted nothing")
   }
 
   /* 7. accounting months and month locking — each section independent (owner, 25 Nov 2026) */

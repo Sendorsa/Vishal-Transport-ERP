@@ -48,7 +48,7 @@ async function main() {
   // EMP 1's rows: the Employee's exactly, plus expenses:view / expenses:edit (20261129000100).
   const perms = await q<{ role: Role; permission: string }>(`select role::text as role, permission from core.role_permissions`)
   const rowsOf = (r: Role) => perms.filter((p) => p.role === r).map((p) => p.permission).sort()
-  assert.deepEqual(rowsOf("EMP1"), [...rowsOf("EMPLOYEE"), "expenses:edit", "expenses:view"].sort(), "EMP1 rows = the EMPLOYEE's + expenses:view / expenses:edit")
+  assert.deepEqual(rowsOf("EMP1"), [...rowsOf("EMPLOYEE"), "expenses:create", "expenses:edit", "expenses:view"].sort(), "EMP1 rows = the EMPLOYEE's + expenses:view / create / edit (20261129000100, 20261129000300)")
   // private.can: the rows, Dev-only resources, and delete for the Owner and Dev only (20261116000000, owner 16 Nov 2026).
   const dbCan = (role: Role, r: string, a: string) =>
     (!["accounts", "system"].includes(r) || role === "DEV") && (a !== "delete" || role === "OWNER" || role === "DEV") && perms.some((p) => p.role === role && ["*", `${r}:*`, `${r}:${a}`].includes(p.permission))

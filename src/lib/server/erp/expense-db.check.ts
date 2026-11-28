@@ -595,9 +595,10 @@ async function main() {
     // Refused, through the API and directly (RLS) — nothing changes.
     const insNow = await now(ins.id)
     await assert.rejects(as(E1, () => api.expenses.update(ins.id, { ...insNow, amount: 1 }), true, { [ins.id]: insNow.updatedAt }), /not found|Insurance/i, "EMP1 can't edit Insurance (invisible to it)")
-    await assert.rejects(as(E1, () => api.expenses.create(rt({ requestId: rid() }))), /can't create expense/, "no create")
+    // Before 20261129000300 (EMP 1 adds, tested below) the database refuses an addition even though the app allows it.
+    await assert.rejects(as(E1, () => api.expenses.create(rt({ requestId: rid() }))), /row-level security/, "no create in the database before 20261129000300")
     await assert.rejects(as(E1, () => api.expenses.remove(mine.id, "Not allowed")), /can't delete expense/, "no delete")
-    await assert.rejects(as(E1, () => api.brokers.create("EMP1 New Broker")), /can't create expense/, "no new broker")
+    await assert.rejects(as(E1, () => api.brokers.create("EMP1 New Broker")), /can't add brokers/, "no new broker")
     await assert.rejects(as(E1, () => api.expenseMonths.lock("FINE", today.slice(0, 7))), /can't lock Expense months/, "no month lock")
     await assert.rejects(read(E1, () => api.expenseImport.importPlan(f1, "x")), /Only Dev/, "no import")
     await assert.rejects(as(E1, () => api.expenseImport.importApply(f1, "x")), /Only Dev/)
@@ -702,17 +703,90 @@ async function main() {
     assert.deepEqual((await sqlAs(EMP, `select (select count(*) from expense.entries)::int e, (select count(*) from audit.events where module = 'Expense')::int a, private.can('expenses', 'view') v`))[0], { e: 0, a: 0, v: false }, "…not in the database either")
     const e1seen = await read(E1, () => api.expenses.list())
     assert.ok(e1seen.length > 0 && !e1seen.some((x) => x.section === "INSURANCE"), "EMP1: still no Insurance")
-    await assert.rejects(as(E1, () => api.expenses.create(rt({ requestId: rid() }))), /can't create expense/, "EMP1: still no create")
+    await assert.rejects(as(E1, () => api.expenses.create(rt({ requestId: rid() }))), /row-level security/, "EMP1: no create in the database before 20261129000300")
     await assert.rejects(as(E1, () => api.expenses.remove(e1seen[0].id, "x")), /can't delete expense/, "EMP1: still no delete")
     await assert.rejects(as(E1, () => api.expenseMonths.lock("FINE", "2026-06")), /can't lock Expense months/, "EMP1: still no lock")
     await assert.rejects(read(E1, () => api.expenseImport.list()), /Only Dev/, "EMP1: still no import")
     assert.equal(((await sqlAs(E1, `select count(*)::int n from audit.events where module = 'Expense' and record_type in ('Insurance', 'Expense month', 'Import batch')`))[0] as { n: number }).n, 0, "EMP1: still no Insurance / month / import event (the Owner's included)")
     assert.ok((await read(DEV, () => api.expenseImport.list())).length > 0 && (await all()).some((x) => x.section === "INSURANCE"), "Dev: unchanged")
   }
+  /* ---------------------------------------------------------------- EMP 1 adds Expense records (owner, 28 Nov 2026): 20261129000300 */
+  {
+    const mig = readFileSync(new URL("20261129000300_emp1_expense_create.sql", MIG), "utf8")
+    await db.exec(mig)
+    assert.deepEqual(stops(await run(readFileSync(new URL("33-emp1-create-post-apply.sql", RO), "utf8"))), [], "33 post-apply: every CHECK OK")
+    await assert.rejects(db.exec(mig), /already applied/, "a second run stops")
+    await db.exec("rollback").catch(() => undefined)
+    const row = async (script: string, no: number) => ((await run(readFileSync(new URL(script, RO), "utf8"))) as { check_no: number; status: string }[]).find((r) => r.check_no === no)!.status
+    assert.deepEqual([await row("28-expense-post-apply.sql", 16), await row("31-emp1-post-apply.sql", 1), await row("31-emp1-post-apply.sql", 2), await row("32-owner-expense-post-apply.sql", 1)], ["OK", "OK", "OK", "OK"], "28 / 31 / 32 still OK")
+    const E1 = who("EMP1", "EMP1", "Emp One")
+    const all = () => read(DEV, () => api.expenses.list())
+    // Add in the four sections through the engine — attributed to the EMP 1 account, audited CREATED.
+    const added = [
+      await as(E1, () => api.expenses.create(rt({ amount: 801, requestId: rid() }))),
+      await as(E1, () => api.expenses.create(base("FITNESS", { vehicleIds: [v2.id], amount: 802, requestId: rid() }))),
+      await as(E1, () => api.expenses.create(base("FINE", { vehicleIds: [v1.id], taxType: "Overload", amount: 803, paymentStatus: "UNPAID", requestId: rid() }))),
+      await as(E1, () => api.expenses.create(base("BROKER", { entryType: "CHARGE", broker: "ABC Bunk Broker", description: "EMP1 bill", amount: 804, vehicleIds: [v3.id, v1.id], requestId: rid() }))),
+    ]
+    assert.deepEqual(added.map((x) => x.section), ["ROAD_TAX", "FITNESS", "FINE", "BROKER"], "EMP1 adds in the four sections")
+    assert.deepEqual((await ev(added[3].id)).map((r) => r.vehicle_id), [v3.id, v1.id], "…with its vehicle lines, in order")
+    const evs = (await sqlAs(null, `select record_id, action::text a, actor_role::text r, actor_user_id::text u from audit.events where action = 'CREATED' and record_id in (${added.map((x) => `'${x.id}'`).join(", ")})`)) as { a: string; r: string; u: string }[]
+    assert.deepEqual([evs.length, [...new Set(evs.map((e) => `${e.r} ${e.u}`))]], [4, [`EMP1 ${P.EMP1}`]], "each addition: a CREATED event of the EMP 1 account")
+    // …and edits them; viewing them back.
+    for (const x of added) {
+      const cur = (await all()).find((y) => y.id === x.id)!
+      await as(E1, () => api.expenses.update(x.id, { ...cur, amount: cur.amount + 1 }), true, { [x.id]: cur.updatedAt })
+    }
+    const seen = await read(E1, () => api.expenses.list())
+    assert.ok(added.every((x) => seen.find((y) => y.id === x.id)?.amount === x.amount + 1) && !seen.some((x) => x.section === "INSURANCE"), "EMP1 views its additions, edited; still no Insurance")
+    // Refused: Insurance (API and database), delete (API and database), a new broker (API and database), a month lock, a
+    // closed month (Monthly Sheet Lock), a locked section-month, imports.
+    const s0 = JSON.stringify(await all())
+    await assert.rejects(as(E1, () => api.expenses.create(base("INSURANCE", { vehicleIds: [v1.id], provider: "X", amount: 1, validFrom: today, validTill: `${Number(today.slice(0, 4)) + 1}${today.slice(4)}`, requestId: rid() }))), /can't work with Insurance/, "API: no Insurance record")
+    await assert.rejects(sqlAs(E1, `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', '${P.EMP1}', 'EMP1', 'CREATED', 'Expense', 'Insurance', 'exp_emp1ins00001');
+      insert into expense.entries (id, section, date, provider, amount, valid_from, valid_till) values ('exp_emp1ins00001', 'INSURANCE', '${today}', 'X', 1, '${today}', '${today}')`), /row-level security/, "RLS: no Insurance insert")
+    for (const x of added) await assert.rejects(as(E1, () => api.expenses.remove(x.id, "Not allowed")), /can't delete expense/, `API: EMP1 deletes no ${x.section} record`)
+    assert.deepEqual(await sqlAs(E1, `delete from expense.entries where id in (${added.map((x) => `'${x.id}'`).join(", ")}) returning id`), [], "RLS: no delete")
+    await assert.rejects(as(E1, () => api.brokers.create("EMP1 Broker Two")), /can't add brokers/, "API: no new broker")
+    await assert.rejects(sqlAs(E1, `insert into audit.events (actor_kind, actor_user_id, actor_role, action, module, record_type, record_id) values ('SESSION', '${P.EMP1}', 'EMP1', 'CREATED', 'Expense', 'Broker', 'brk_emp1raw00002');
+      insert into expense.brokers (id, name) values ('brk_emp1raw00002', 'Raw Broker Two')`), /row-level security/, "RLS: no new broker")
+    await assert.rejects(as(E1, () => api.expenseMonths.lock("FITNESS", today.slice(0, 7))), /can't lock Expense months/, "no month lock")
+    const lastMonth = new Date(Date.UTC(Number(today.slice(0, 4)), Number(today.slice(5, 7)) - 2, 15)).toISOString().slice(0, 10)
+    await assert.rejects(as(E1, () => api.expenses.create(base("FITNESS", { vehicleIds: [v2.id], amount: 1, date: lastMonth, requestId: rid() }))), /is locked/, "no addition in a closed month (Monthly Sheet Lock)")
+    await as(DEV, () => api.expenseMonths.lock("FINE", today.slice(0, 7)))
+    await assert.rejects(as(E1, () => api.expenses.create(base("FINE", { vehicleIds: [v1.id], taxType: "Overload", amount: 1, paymentStatus: "UNPAID", requestId: rid() }))), /is locked in Fines/, "no addition in a locked section-month")
+    await assert.rejects(read(E1, () => api.expenseImport.importPlan(f1, "x")), /Only Dev/, "no import")
+    await assert.rejects(as(E1, () => api.expenseImport.rollbackApply(bid, "x")), /Only Dev/, "no import rollback")
+    assert.equal(JSON.stringify(await all()), s0, "the refused calls changed nothing")
+    // The others: unchanged.
+    await assert.rejects(read(EMP, () => api.expenses.list()), /can't view/, "the Employee: still no Expense")
+    assert.deepEqual((await sqlAs(EMP, `select private.can('expenses', 'view') v, private.can('expenses', 'create') c`))[0], { v: false, c: false })
+    const ob = await as(OWNER, () => api.brokers.create("Owner Broker Two"))
+    assert.ok(ob.id, "the Owner still adds brokers")
+    assert.ok((await read(OWNER, () => api.expenses.list())).some((x) => x.section === "INSURANCE"), "the Owner still sees Insurance")
+  }
+  {
+    // EMP 1's Add rolled back (12-rollback-emp1-expense-create.sql) on a separate database: exactly the state before
+    // 20261129000300 (rows and the brokers policy); it applies again; 11 refuses while it is applied.
+    const xdb = await freshDb((f) => f < "20261129000300")
+    const xrun = async (sql: string) => (await xdb.exec(sql)).at(-1)?.rows as never[]
+    const perms = async () => JSON.stringify(await xrun(`select role::text, permission from core.role_permissions order by 1, 2`))
+    const s0 = await dbState(xrun)
+    const p0 = await perms()
+    const mig = readFileSync(new URL("20261129000300_emp1_expense_create.sql", MIG), "utf8")
+    await xdb.exec(mig)
+    await assert.rejects(xdb.exec(readFileSync(new URL("11-rollback-owner-expense.sql", SCRIPTS), "utf8")), /EMP 1's Add \(20261129000300\) is applied/, "11 refuses while EMP 1's Add is applied")
+    await xdb.exec("rollback").catch(() => undefined)
+    await xdb.exec(readFileSync(new URL("12-rollback-emp1-expense-create.sql", SCRIPTS), "utf8"))
+    assert.deepEqual([await dbState(xrun), await perms()], [s0, p0], "12: exactly the state before 20261129000300")
+    await xdb.exec(mig)
+    assert.deepEqual(stops(await xrun(readFileSync(new URL("33-emp1-create-post-apply.sql", RO), "utf8"))), [], "…applies again; 33 OK")
+    await xdb.close()
+  }
   {
     // The Owner's access rolled back (11-rollback-owner-expense.sql) on a separate database: only its permission row goes;
     // the migration then applies again; 10 (EMP 1) and 08 (Expense) refuse while it is applied.
-    const odb = await freshDb(() => true)
+    const odb = await freshDb((f) => f < "20261129000300")
     const orun = async (sql: string) => (await odb.exec(sql)).at(-1)?.rows as never[]
     const perms = async () => JSON.stringify(await orun(`select role::text, permission from core.role_permissions order by 1, 2`))
     const s1 = await dbState(orun)

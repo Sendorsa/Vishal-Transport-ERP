@@ -6,7 +6,8 @@
 -- EMP 1 keep their access. One transaction (all or nothing).
 --
 -- ORDER: deploy the app version without the Owner's Expense access first (otherwise the Owner sees empty Expense pages
--- and every save is refused). Before rolling back EMP 1 (10) or Expense (08), run this.
+-- and every save is refused). Roll back EMP 1's Add (12) first if it is applied — this script stops until then. Before
+-- rolling back EMP 1 (10) or Expense (08), run this.
 
 begin;
 
@@ -14,6 +15,9 @@ do $$
 begin
   if not exists (select 1 from core.role_permissions where role = 'OWNER' and permission = 'expenses:*') then
     raise exception 'Owner Expense rollback stopped: 20261129000200 is not applied (or already rolled back). Nothing was changed.';
+  end if;
+  if exists (select 1 from core.role_permissions where role::text = 'EMP1' and permission = 'expenses:create') then
+    raise exception 'Owner Expense rollback stopped: EMP 1''s Add (20261129000300) is applied — run 12-rollback-emp1-expense-create.sql first. Nothing was changed.';
   end if;
 end $$;
 

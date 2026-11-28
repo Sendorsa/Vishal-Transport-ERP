@@ -3,8 +3,8 @@
 select check_no, check_name, expected, actual,
        case when kind = 'INFO' then 'INFO' when actual = expected then 'OK' else 'STOP' end as status
 from (values
-  (1, 'CHECK', 'Expense permission rows of every role (DEV holds *)', 'EMP1 expenses:edit, EMP1 expenses:view, OWNER expenses:*',
-      (select string_agg(role::text || ' ' || permission, ', ' order by role::text, permission) from core.role_permissions where permission like 'expenses%')),
+  (1, 'CHECK', 'Expense permission rows of every role (DEV holds *; EMP1 create from 20261129000300 not counted)', 'EMP1 expenses:edit, EMP1 expenses:view, OWNER expenses:*',
+      (select string_agg(role::text || ' ' || permission, ', ' order by role::text, permission) from core.role_permissions where permission like 'expenses%' and not (role::text = 'EMP1' and permission = 'expenses:create'))),
   (2, 'CHECK', 'the EMPLOYEE and the AdBlue profiles: no Expense row, no wildcard', '0',
       (select count(*)::text from core.role_permissions where role::text in ('EMPLOYEE', 'TATA_ADBLUE', 'ADBLUE') and (permission like 'expenses%' or permission = '*'))),
   (3, 'CHECK', 'EMP1 section rules in place (expense_section_ok, expense_event_ok)', '2',

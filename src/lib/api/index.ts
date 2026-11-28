@@ -20,7 +20,7 @@ import { adBlueTotals, isDirectAdBlue, NO_VENDOR_LABEL, adBlueShortfallMessage, 
 import { availabilityMessage, fillAmount, fitsTanker, isStockPool, isTankerFill, normReg, shortfallMessage, tankerAvailability, tankerOf, valueTankers, type TankerRecords } from "@/domain/tanker"
 import { STATION_PAYMENT_CATEGORY, isStationPayment, tdsDate, tdsPaymentProblem, tdsSplit, tdsTakenOn } from "@/domain/station-ledger"
 import { currentActor, currentRole, customerScope } from "@/lib/identity"
-import { can, canChangeAdBluePurchases, canLockExpenseMonths, canManageAdBluePayments, canSetMonthLock, expenseSectionAllowed, hasHiddenExpenseSections, hasOwnerAuthority, isAdBlueProfile, type Resource } from "@/lib/permissions"
+import { can, canAddBrokers, canChangeAdBluePurchases, canLockExpenseMonths, canManageAdBluePayments, canSetMonthLock, expenseSectionAllowed, hasHiddenExpenseSections, hasOwnerAuthority, isAdBlueProfile, type Resource } from "@/lib/permissions"
 import { buildEvent, deletionReasonError, editedIds, newestFirst, recordHistory, restorations, statusAction, unreviewedDeletions, type AuditInput } from "@/domain/audit"
 import { addMonths, format, parseISO } from "date-fns"
 import { cleanName, CREDIT, financialChanges, itemProblem, lineAmounts, masterKey, OFFICE_LABEL, paidByInvoice, paymentProblem, referenceNoun, settledOf, tdsProblem, TYRE_MASTER_LABEL, TYRE_PAYMENT_MODES, tyreTdsSplit, tyreTotals, unallocated, utrKey } from "@/domain/tyre"
@@ -2993,7 +2993,7 @@ export const api = {
     lock: (section: ExpenseSection, month: string) =>
       tx(async () => {
         assertCan("expenses", "edit")
-        // …and the Owner / Dev month-lock authority (Dev today) — never EMP 1, although it edits (owner, 28 Nov 2026).
+        // …and the Owner / Dev month-lock authority — never EMP 1, although it adds and edits (owner, 28 Nov 2026).
         if (!canLockExpenseMonths(currentRole())) throw new PermissionError("Your role can't lock Expense months.")
         if (!Object.hasOwn(EXPENSE_SECTIONS, section)) throw new Error("Choose the Expense section")
         if (typeof month !== "string" || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("Choose the month to lock")
@@ -3017,6 +3017,8 @@ export const api = {
     create: (name: string) =>
       tx(async () => {
         assertCan("expenses", "create")
+        // The broker list itself: Dev and the Owner only — never EMP 1, although it adds entries (owner, 28 Nov 2026).
+        if (!canAddBrokers(currentRole())) throw new PermissionError("Your role can't add brokers — choose one from the list.")
         const clean = typeof name === "string" ? name.trim().replace(/\s+/g, " ") : ""
         if (!clean) throw new Error("Enter the broker's name")
         if (clean.length > 80) throw new Error("A broker name is at most 80 characters.")

@@ -2,13 +2,13 @@
 select check_no, check_name, expected, actual,
        case when kind = 'INFO' then 'INFO' when actual = expected then 'OK' else 'STOP' end as status
 from (values
-  (1, 'CHECK', 'EMP1 = the EMPLOYEE''s permission rows + expenses:view / expenses:edit (rows missing · extra)', '0 · 0',
+  (1, 'CHECK', 'EMP1 = the EMPLOYEE''s permission rows + expenses:view / expenses:edit (rows missing · extra; expenses:create from 20261129000300 not counted)', '0 · 0',
       (select count(*)::text from (select permission from core.role_permissions where role::text = 'EMPLOYEE' union select unnest(array['expenses:view', 'expenses:edit'])
                                    except select permission from core.role_permissions where role::text = 'EMP1') m) || ' · ' ||
-      (select count(*)::text from (select permission from core.role_permissions where role::text = 'EMP1'
+      (select count(*)::text from (select permission from core.role_permissions where role::text = 'EMP1' and permission <> 'expenses:create'
                                    except (select permission from core.role_permissions where role::text = 'EMPLOYEE' union select unnest(array['expenses:view', 'expenses:edit']))) x)),
   (2, 'CHECK', 'Expense permission rows of EMP1 and the EMPLOYEE (the Owner''s: 32-owner-expense-post-apply.sql)', 'EMP1 expenses:edit, EMP1 expenses:view',
-      (select string_agg(role::text || ' ' || permission, ', ' order by role::text, permission) from core.role_permissions where permission like 'expenses%' and role::text in ('EMP1', 'EMPLOYEE'))),
+      (select string_agg(role::text || ' ' || permission, ', ' order by role::text, permission) from core.role_permissions where permission like 'expenses%' and permission <> 'expenses:create' and role::text in ('EMP1', 'EMPLOYEE'))),
   (3, 'CHECK', 'is_owner_or_dev and customer_in_scope include EMP1', 'yes,yes',
       (select string_agg(case when prosrc ~ '''EMP1''' then 'yes' else 'no' end, ',' order by proname) from pg_proc
          where oid in (to_regprocedure('private.customer_in_scope(text)'), to_regprocedure('private.is_owner_or_dev()')))),

@@ -33,7 +33,7 @@ import {
 import { DATA_BACKEND } from "@/lib/api/client"
 import { useBrokers, useCreateBroker, useSaveExpense } from "@/lib/api/hooks"
 import { useCan, useRole } from "@/lib/app-state"
-import { expenseSectionAllowed } from "@/lib/permissions"
+import { canAddBrokers, expenseSectionAllowed } from "@/lib/permissions"
 import { formatDate, todayISO } from "@/lib/format"
 import type { BrokerEntryType, CompanyCode, Expense, ExpenseSection } from "@/lib/types"
 import { useExpenseData, type ExpenseData } from "./expense-data"
@@ -84,8 +84,8 @@ function Form({ d, section, expense, defaultDate, blocked, onClose }: { d: Expen
   const save = useSaveExpense()
   const brokerList = useBrokers()
   const createBroker = useCreateBroker()
-  // Adding a broker creates a record: only with `expenses` create (EMP 1 edits, never adds — owner, 28 Nov 2026).
-  const mayAddBroker = useCan()("expenses", "create")
+  // Adding a broker changes the shared broker list: Dev and the Owner only (EMP 1 picks from it — owner, 28 Nov 2026).
+  const mayAddBroker = canAddBrokers(useRole()[0])
   const today = todayISO()
   const meta = EXPENSE_SECTIONS[section]
   // A new entry opens on the selected month's date (today in the current month).
