@@ -25,6 +25,14 @@ for (const e of [sys("ENOTFOUND", "getaddrinfo ENOTFOUND aws-0-ap-south-1.pooler
   assert.ok(!/supabase|6543|10\.0|ENOTFOUND|ECONN|TIMEOUT/.test(r.body.message), r.body.message)
   assert.equal(r.log, true, "logged on the server for diagnosis")
 }
+// The database older than the app (25 Nov 2026 — AdBlue direct purchases on credit, enum value 'CREDIT' missing until
+// 20261118000100): a plain "needs an update" message, never the SQL; logged on the server with the real error.
+for (const e of [pg("22P02", 'invalid input value for enum fuel.adblue_payment_mode: "CREDIT"'), pg("42703", 'column "gst_rate" of relation "adblue_purchases" does not exist'), pg("42P01", 'relation "fuel.adblue_payments" does not exist'), pg("42883", "function private.adblue_payment_check() does not exist"), pg("42704", 'type "fuel.adblue_payment_mode" does not exist')]) {
+  const r = toErpError(e)
+  assert.deepEqual([r.status, r.log], [503, true], e.message)
+  assert.match(r.body.message, /needs an update before this can be saved.*Nothing was saved/)
+  assert.ok(!/enum|relation|column|fuel\.|adblue_|CREDIT|function|type "/.test(r.body.message), r.body.message)
+}
 // Programming errors never show their text either.
 assert.equal(toErpError(new TypeError("Cannot read properties of undefined (reading 'id')")).body.message, "Something went wrong. Nothing was saved.")
 

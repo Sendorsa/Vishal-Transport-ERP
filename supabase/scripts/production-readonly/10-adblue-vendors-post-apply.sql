@@ -1,4 +1,4 @@
--- Post-apply check for 20261116000000_adblue_vendors_owner_dev_delete.sql (rows 1–21) and, since 17 Nov 2026,
+-- READ-ONLY. Post-apply check for 20261116000000_adblue_vendors_owner_dev_delete.sql (rows 1–21) and, since 17 Nov 2026,
 -- 20261117000000_tyre_data.sql (rows 30–37). Run after the Tyre Data migration's COMMIT, in the Supabase SQL Editor of
 -- project dqnoducqiootfvkzskhu: every row OK. (Before the Tyre Data migration it fails: ops.tyre_masters does not exist.) READ-ONLY: a single SELECT over the system catalogs and the
 -- AdBlue tables (counts only). Function fingerprints are the md5 of the repository's definitions. Before the migration
@@ -14,7 +14,7 @@
 --                                snapshot records the row (edit_delete_guard)
 --     UNPROTECTED                anything else — STOP (row 11)
 with
-biz(n) as (values ('core'), ('fuel'), ('finance'), ('ops'), ('billing'), ('audit')),
+biz(n) as (values ('core'), ('fuel'), ('finance'), ('ops'), ('billing'), ('audit'), ('expense')),
 del as (
   select distinct table_schema::text || '.' || table_name::text as t from information_schema.role_table_grants
   where grantee = 'authenticated' and privilege_type = 'DELETE' and table_schema in (select n from biz)
@@ -29,7 +29,9 @@ guarded as (  -- the child-row delete guards: edit_delete_guard, Tyre Data's tyr
   where g.tgfoid in (to_regprocedure('private.edit_delete_guard()'), coalesce(to_regprocedure('private.tyre_item_delete_guard()'), 0),
                      coalesce(to_regprocedure('private.tyre_allocation_delete_guard()'), 0), -- tyre payment corrections (20261117000300)
                      coalesce(to_regprocedure('private.adblue_allocation_delete_guard()'), 0), -- AdBlue supplier payments (20261118000000)
-                     coalesce(to_regprocedure('private.vehicle_driver_period_delete_guard()'), 0)) -- vehicle driver periods (20261121000000)
+                     coalesce(to_regprocedure('private.vehicle_driver_period_delete_guard()'), 0), -- vehicle driver periods (20261121000000)
+                     coalesce(to_regprocedure('private.vehicle_company_period_delete_guard()'), 0), -- vehicle company periods (20261127000000)
+                     coalesce(to_regprocedure('private.entry_vehicle_delete_guard()'), 0)) -- Expense entry vehicles (20261128000000)
 ),
 cls as (
   select d.t, case
@@ -69,7 +71,12 @@ from (values
         (case when to_regclass('fuel.adblue_payments') is not null then 'fuel.adblue_payment_allocations=owner/dev + audited edit' end),
         (case when to_regclass('fuel.adblue_payments') is not null then 'fuel.adblue_payments=owner/dev' end),
         -- Vehicle PUC and drivers (20261121000000): once applied
-        (case when to_regclass('core.vehicle_driver_periods') is not null then 'core.vehicle_driver_periods=owner/dev + audited edit' end)
+        (case when to_regclass('core.vehicle_driver_periods') is not null then 'core.vehicle_driver_periods=owner/dev + audited edit' end),
+        -- Driver master and vehicle company periods (20261127000000): once applied
+        (case when to_regclass('core.vehicle_company_periods') is not null then 'core.vehicle_company_periods=owner/dev + audited edit' end),
+        -- Expense (20261128000000): once applied
+        (case when to_regclass('expense.entries') is not null then 'expense.entries=owner/dev' end),
+        (case when to_regclass('expense.entry_vehicles') is not null then 'expense.entry_vehicles=owner/dev + audited edit' end)
       ) as e(x) where x is not null),
       (select string_agg(t || '=' || c, '; ' order by t) from cls)),
   (11, 'CHECK', 'tables an Employee or AdBlue profile could delete from outside an audited edit', 'none',

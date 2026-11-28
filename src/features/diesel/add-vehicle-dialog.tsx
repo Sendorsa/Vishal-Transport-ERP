@@ -196,7 +196,7 @@ export function AddVehicleDialog({ open, onOpenChange, customer, vehicle }: { op
               value={n.driverId}
               onChange={(v) => setN((cur) => ({ ...cur, driverId: v }))}
               options={[{ value: NONE, label: "None / later" }, ...(drivers.data ?? []).filter((d) => d.status === "ACTIVE").map((d) => ({ value: d.id, label: d.name }))]}
-              onCreate={(name) => createDriver(name, customer.companyCode)}
+              onCreate={(name) => createDriver(name)}
               createLabel={(q) => `Create driver "${q}"`}
               placeholder="Select driver"
             />

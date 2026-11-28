@@ -74,14 +74,14 @@ async function main() {
   assert.deepEqual(shown("DEV"), NAV_ITEMS.map((i) => i.title))
   // Finance → Payments for the Owner (owner, 18 Nov 2026) — Invoices and Reports stay hidden; the Employee unchanged.
   // Operations → Vehicles for the Owner and the Employee (21 Nov 2026) — Customers and Trips stay hidden.
-  assert.deepEqual(shown("OWNER"), ["Vehicles", ...fuel, "Tyre", "Payments", "Audit Log"], "OWNER sidebar: Operations → Vehicles + Fuel + Tyre Data + Finance → Payments + Audit Log; no Expense (Dev only), no Settings, no other item")
-  assert.deepEqual(shown("OWNER"), ["Vehicles", "Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Payments", "Audit Log"])
+  assert.deepEqual(shown("OWNER"), ["Vehicles", "Drivers", ...fuel, "Tyre", "Payments", "Audit Log"], "OWNER sidebar: Operations → Vehicles + Drivers + Fuel + Tyre Data + Finance → Payments + Audit Log; no Expense (Dev only), no Settings, no other item")
+  assert.deepEqual(shown("OWNER"), ["Vehicles", "Drivers", "Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Payments", "Audit Log"])
   assert.ok(!shown("OWNER").includes("Invoices") && !shown("OWNER").includes("Reports"), "the Owner's other Finance pages stay out of the sidebar")
   assert.ok(!shown("EMPLOYEE").includes("Payments"), "the Employee's sidebar has no Payments")
   assert.deepEqual(expense, ["Road Tax", "Insurance", "Fitness", "Fines", "Broker Charges"], "Expense: five sections, in order")
   assert.deepEqual(shown("DEV").filter((t) => expense.includes(t)), expense, "DEV sees all five Expense sections")
-  assert.deepEqual(shown("EMPLOYEE"), ["Vehicles", ...fuel, "Tyre", "Audit Log"], "EMPLOYEE sidebar: Operations → Vehicles + Fuel + Tyre Data + Audit Log (read-only); no Expense (Dev only), no Settings, no other section")
-  assert.deepEqual(shown("EMPLOYEE"), ["Vehicles", "Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Audit Log"])
+  assert.deepEqual(shown("EMPLOYEE"), ["Vehicles", "Drivers", ...fuel, "Tyre", "Audit Log"], "EMPLOYEE sidebar: Operations → Vehicles + Drivers + Fuel + Tyre Data + Audit Log (read-only); no Expense (Dev only), no Settings, no other section")
+  assert.deepEqual(shown("EMPLOYEE"), ["Vehicles", "Drivers", "Fuel Stations", "Diesel", "Diesel Tankers", "AdBlue", "Tyre", "Audit Log"])
   for (const role of ["OWNER", "EMPLOYEE"] as const) {
     assert.ok(!shown(role).includes("Customers") && !shown(role).includes("Trips"), `${role}: the other Operations items stay out of the sidebar`)
   }

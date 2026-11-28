@@ -235,7 +235,12 @@ async function main() {
 
   /* ---------------------------------------------------------------- 13. Receipt: never settles an invoice twice */
   const views = await api.invoices.list()
-  const receipt = (await api.payments.list()).find((p) => p.direction === "IN" && p.allocations.length === 1 && views.find((i) => i.id === p.allocations[0].invoiceId)?.status === "ISSUED")!
+  // A receipt that settles its invoice in full, so a same-sized replacement leaves no room for it (the demo data is
+  // generated from today's date: on some days the first receipt found was a part-payment, which may rightly be restored).
+  const receipt = (await api.payments.list()).find((p) => {
+    const inv = p.direction === "IN" && p.allocations.length === 1 ? views.find((i) => i.id === p.allocations[0].invoiceId) : undefined
+    return inv?.status === "ISSUED" && p.allocations[0].amount >= inv.total - 0.5
+  })!
   await api.payments.remove(receipt.id, "Wrong customer")
   const delR = await lastDeletion(receipt.id)
   const replacement = await api.payments.create({ ...receipt, date: today, reference: "re-received", allocations: receipt.allocations.map((a) => ({ ...a })) } as never)

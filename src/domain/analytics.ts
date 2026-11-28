@@ -58,7 +58,7 @@ export function scopeDataset(ds: Dataset, scope: CompanyScope): Dataset {
     settings: ds.settings,
     customers: f(ds.customers),
     vehicles: f(ds.vehicles),
-    drivers: f(ds.drivers),
+    drivers: ds.drivers, // the central master: looked up by id, never scoped by a stored company (owner, 27 Nov 2026)
     trips: f(ds.trips),
     diesel: f(ds.diesel),
     invoices: f(ds.invoices),

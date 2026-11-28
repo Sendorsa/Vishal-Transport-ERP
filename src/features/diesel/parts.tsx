@@ -122,34 +122,59 @@ export function readLogoFile(file: File): Promise<string> {
 /* ------------------------------------------------------------------ Global reporting month */
 
 const MONTH_KEY = "vt:ui:dieselMonth"
-const monthListeners = new Set<() => void>()
 
-function subscribeMonth(cb: () => void) {
-  monthListeners.add(cb)
-  const onStorage = (e: StorageEvent) => e.key === MONTH_KEY && cb()
-  window.addEventListener("storage", onStorage)
-  return () => {
-    monthListeners.delete(cb)
-    window.removeEventListener("storage", onStorage)
+/**
+ * One stored month per key ("picked@pickedIn", pickMonth): the ERP's shared reporting month (MONTH_KEY), or a module's
+ * own (Expense: one per section — owner, 25 Nov 2026). Stores are cached per key so their functions stay stable.
+ */
+const monthStores = new Map<string, { subscribe: (cb: () => void) => () => void; read: () => string; write: (m: string) => void }>()
+function monthStore(key: string) {
+  let store = monthStores.get(key)
+  if (!store) {
+    const listeners = new Set<() => void>()
+    store = {
+      subscribe(cb) {
+        listeners.add(cb)
+        const onStorage = (e: StorageEvent) => e.key === key && cb()
+        window.addEventListener("storage", onStorage)
+        return () => {
+          listeners.delete(cb)
+          window.removeEventListener("storage", onStorage)
+        }
+      },
+      read() {
+        try {
+          return window.localStorage.getItem(key) ?? ""
+        } catch {
+          return ""
+        }
+      },
+      /** Stored as "picked@pickedIn" (pickMonth): a pick only lasts for the India calendar month it was made in. */
+      write(m) {
+        try {
+          window.localStorage.setItem(key, `${m}@${monthKey(todayISO())}`)
+        } catch {
+          /* storage unavailable — month just won't persist */
+        }
+        listeners.forEach((l) => l())
+      },
+    }
+    monthStores.set(key, store)
   }
+  return store
 }
 
-function readMonth() {
-  try {
-    return window.localStorage.getItem(MONTH_KEY) ?? ""
-  } catch {
-    return ""
-  }
-}
-
-/** Stored as "picked@pickedIn" (pickMonth): a pick only lasts for the India calendar month it was made in. */
-function writeMonth(m: string) {
-  try {
-    window.localStorage.setItem(MONTH_KEY, `${m}@${monthKey(todayISO())}`)
-  } catch {
-    /* storage unavailable — month just won't persist */
-  }
-  monthListeners.forEach((l) => l())
+/**
+ * A month picked by hand, kept under `key`, among `available` (newest first). Opens on the current India month unless
+ * one was picked this month (pickMonth); a new calendar month opens on itself.
+ */
+export function useStoredMonth(key: string, available: string[]): [string, (m: string) => void] {
+  const store = monthStore(key)
+  const stored = useSyncExternalStore(store.subscribe, store.read, () => "")
+  const current = useCurrentMonth()
+  const month = pickMonth(available, stored, current)
+  const set = useCallback((m: string) => store.write(m), [store])
+  return [month, set]
 }
 
 /**
@@ -157,17 +182,14 @@ function writeMonth(m: string) {
  * user picks it once. Opens on the latest month (the current India month) unless one was picked this month (pickMonth).
  */
 export function useDieselMonth(available: string[]): [string, (m: string) => void] {
-  const stored = useSyncExternalStore(subscribeMonth, readMonth, () => "")
-  const current = useCurrentMonth()
-  const month = pickMonth(available, stored, current)
-  const set = useCallback((m: string) => writeMonth(m), [])
-  return [month, set]
+  return useStoredMonth(MONTH_KEY, available)
 }
 
 /** Pages whose URL carries a month keep the global month in step with it. */
 export function useSyncDieselMonth(month: string) {
   useEffect(() => {
-    if (readMonth() !== `${month}@${monthKey(todayISO())}`) writeMonth(month)
+    const store = monthStore(MONTH_KEY)
+    if (store.read() !== `${month}@${monthKey(todayISO())}`) store.write(month)
   }, [month])
 }
 

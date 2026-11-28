@@ -103,6 +103,29 @@ async function main() {
     const vs = readCollection("vehicles")
     writeCollection("vehicles", vs.map((v, i) => (i === 0 ? { ...v, pucValidTill: "2027-01-15", driverPeriods: [{ id: "vdp_field1", driverId: d1.id, startDate: "2026-09-01", endDate: "2026-10-15" }, { id: "vdp_field2", driverId: d2.id, startDate: "2026-10-01", endDate: null }, { id: "vdp_field3", driverId: d1.id, startDate: "2026-11-01", endDate: null }], documentAlertHistory: [{ id: "vda_field1", document: "Insurance", regNo: v.regNo, expiryDate: "2026-11-20", alertDate: "2026-11-13", newExpiryDate: "2027-11-20", resolvedAt: "2026-11-15T05:12:09.123Z" }, { id: "vda_field2", document: "Road tax", regNo: v.regNo, expiryDate: "2026-11-18", alertDate: "2026-11-13", newExpiryDate: null, resolvedAt: "2026-11-16T05:12:09.000Z" }] } : i === 1 ? { ...v, pucValidTill: "2026-11-30" } : v)))
   }
+  // Expense (Phase 2B, 20261128000000): one record of each section with every field set (vehicles in order, broker name
+  // spelling, company confirmed, driver, request id, import batch, null dates), a broker, a section lock and an import batch.
+  {
+    const vs = readCollection("vehicles")
+    const cust = readCollection("customers")[0].id
+    const drv = readCollection("drivers")[0].id
+    const e = (id: string, x: Record<string, unknown>) => ({
+      id, createdAt: "2026-11-20T09:02:15.851Z", updatedAt: "2026-11-21T10:47:05.599Z", section: "ROAD_TAX", date: "2026-11-02", vehicleIds: [vs[0].id], customerId: cust, companyCode: "VT",
+      description: "", amount: 0, remarks: "", validFrom: "", validTill: "", taxType: "", provider: "", policyNo: "", paymentMode: "", paymentReference: "", paymentStatus: null, paymentDate: "",
+      driverId: null, entryType: null, broker: "", billNo: "", purpose: "", operatingCompany: "", vehicleCount: 1, paidAmount: 0, requestId: null, importBatchId: null, ...x,
+    })
+    writeCollection("expense_import_batches", [{ id: "imp_field1", createdAt: at, updatedAt: at, sourceLabel: "Office Mac — Chrome", sourceFingerprint: "a".repeat(64), exportedAt: "2026-11-27T08:00:00.000Z", summary: { counts: { expenses: { IMPORTED: 1 } } }, sourceSnapshot: { expenses: [] }, items: [{ sourceCollection: "brokers", sourceId: "brk_x", outcome: "SKIPPED", targetId: "brk_field1", reason: "Same broker" }, { sourceCollection: "expenses", sourceId: "exp_field1", outcome: "IMPORTED", targetId: "exp_field1", reason: "" }] }])
+    writeCollection("brokers", [{ id: "brk_field1", createdAt: at, updatedAt: at, name: "Manjanna  RTO" }])
+    writeCollection("expenses", [
+      e("exp_field1", { companyConfirmed: true, description: "MV TAX", amount: 30310.25, remarks: "Paid by Popular", validFrom: "2026-10-01", validTill: "2026-12-31", taxType: "Same state", requestId: "4b1c2d3e-0f12-4a5b-8c6d-7e8f90a1b2c3", importBatchId: "imp_field1" }),
+      e("exp_field2", { section: "INSURANCE", companyCode: "VTHPL", description: "Comprehensive", amount: 52000, validFrom: "2026-11-01", validTill: "2027-10-31", provider: "New India", policyNo: "P-1", paymentMode: "NEFT", paymentReference: "UTR 9" }),
+      e("exp_field3", { section: "FITNESS", companyCode: null, description: "FC 1 YEAR", amount: 1250 }),
+      e("exp_field4", { section: "FINE", companyCode: null, taxType: "Signal jump", description: "near  hosur,  9 pm", amount: 500, paymentStatus: "PAID", paymentDate: "2026-11-03", paymentReference: "", driverId: drv }),
+      e("exp_field5", { section: "BROKER", vehicleIds: [vs[2].id, vs[0].id, vs[1].id], customerId: null, companyCode: null, entryType: "CHARGE", broker: "manjanna rto", billNo: "B-7", description: "PSV registration", amount: 69000, paidAmount: 20000, paymentDate: "2026-11-04", paymentMode: "Cash", purpose: "Bus", operatingCompany: "Minda", vehicleCount: 3 }),
+      e("exp_field6", { section: "BROKER", vehicleIds: [], customerId: null, companyCode: null, entryType: "PAYMENT", broker: "Manjanna  RTO", paidAmount: 5000, paymentDate: "2026-11-05", date: "2026-11-05", vehicleCount: 0 }),
+    ] as never)
+    writeCollection("expense_month_locks", [{ id: "eml_field1", createdAt: at, updatedAt: at, month: "2026-10", section: "ROAD_TAX" }])
+  }
   const ctx = { extras: new Map(), identity: { profileId: "10000000-0000-0000-0000-0000000000f1", userId: "00000000-0000-0000-0000-0000000000f1", role: "DEV" as const, email: null, name: null } }
 
   // Settings (companies, vehicle types, expense categories, tax): the migrations seed reference rows; write the demo ones over them.

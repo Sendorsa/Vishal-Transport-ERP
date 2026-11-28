@@ -12,6 +12,7 @@ import { Field } from "@/components/shared/misc"
 import { StatusBadge } from "@/components/shared/status-badge"
 import { cleanLicenceNo, currentDriverIds, pastDriverPeriods, vehicleDrivers } from "@/domain/compliance"
 import { useCreateDriverByName, useUpdateDriver, useVehicleDriver } from "@/lib/api/hooks"
+import { driverLabel } from "@/domain/drivers"
 import { useCan } from "@/lib/app-state"
 import { formatDate, todayISO } from "@/lib/format"
 import type { Driver, Vehicle } from "@/lib/types"
@@ -203,10 +204,10 @@ function DriverDialog({ vehicle, drivers, editing, onClose }: { vehicle: Vehicle
               <CreatableSelect
                 value={driverId}
                 onChange={pick}
-                onCreate={(name) => createDriver(name, vehicle.companyCode)}
+                onCreate={(name) => createDriver(name)}
                 createLabel={(q) => `Create driver "${q}"`}
                 placeholder="Select or type a driver's name"
-                options={drivers.filter((d) => d.companyCode === vehicle.companyCode && d.status !== "ARCHIVED" && !listed.has(d.id)).map((d) => ({ value: d.id, label: d.name }))}
+                options={drivers.filter((d) => d.status !== "ARCHIVED" && !listed.has(d.id)).map((d) => ({ value: d.id, label: driverLabel(d) }))}
               />
             </Field>
           )}

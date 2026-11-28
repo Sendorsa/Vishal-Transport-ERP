@@ -27,7 +27,7 @@ export type Transact = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>
 const KEY: Record<CollectionKey, string> = {
   customers: "vt:customers", vehicles: "vt:vehicles", drivers: "vt:drivers", trips: "vt:trips", diesel_entries: "vt:fuelEntries", adblue_entries: "vt:adBlueEntries",
   vehicle_assignments: "vt:vehicleAssignments", month_locks: "vt:monthLocks", fuel_stations: "vt:fuelStations", adblue_purchases: "vt:adBluePurchases", adblue_vendors: "vt:adBlueVendors", tanker_loads: "vt:tankerLoads",
-  tanker_dispenses: "vt:tankerDispenses", tankers: "vt:tankers", tanker_transfers: "vt:tankerTransfers", tanker_adjustments: "vt:tankerAdjustments", industrial_supplies: "vt:industrialSupplies", tyre_masters: "vt:tyreMasters", tyre_invoices: "vt:tyreInvoices", tyre_payments: "vt:tyrePayments", expenses: "vt:expenses", adblue_payments: "vt:adBluePayments", invoices: "vt:invoices", payments: "vt:payments",
+  tanker_dispenses: "vt:tankerDispenses", tankers: "vt:tankers", tanker_transfers: "vt:tankerTransfers", tanker_adjustments: "vt:tankerAdjustments", industrial_supplies: "vt:industrialSupplies", tyre_masters: "vt:tyreMasters", tyre_invoices: "vt:tyreInvoices", tyre_payments: "vt:tyrePayments", expenses: "vt:expenses", brokers: "vt:brokers", expense_month_locks: "vt:expenseMonthLocks", expense_import_batches: "vt:expenseImportBatches", adblue_payments: "vt:adBluePayments", invoices: "vt:invoices", payments: "vt:payments",
 }
 const COLLECTION_OF = new Map(Object.entries(KEY).map(([k, v]) => [v, k as CollectionKey]))
 const SETTINGS = "vt:settings"

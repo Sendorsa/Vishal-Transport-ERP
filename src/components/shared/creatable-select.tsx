@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { Check, ChevronsUpDown, Loader2, Plus } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
@@ -26,6 +26,7 @@ export function CreatableSelect({
   placeholder = "Select…",
   createLabel = (q) => `Create "${q}"`,
   invalid,
+  addLabel,
 }: {
   value: string | null | undefined
   options: CreatableOption[]
@@ -34,10 +35,13 @@ export function CreatableSelect({
   placeholder?: string
   createLabel?: (query: string) => string
   invalid?: boolean
+  /** With `onCreate`: an always-visible option (e.g. "Add New Broker") — before anything is typed it puts the cursor in the search box to type the new name. */
+  addLabel?: string
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [creating, setCreating] = useState(false)
+  const input = useRef<HTMLInputElement>(null)
   const selected = options.find((o) => o.value === value)
   const q = query.trim()
   const exists = options.some((o) => o.label.toLowerCase() === q.toLowerCase())
@@ -59,7 +63,7 @@ export function CreatableSelect({
       <PopoverContent className="w-(--radix-popover-trigger-width) p-0" align="start">
         {/* Plain substring match — fuzzy matching makes registration numbers ("KA51") noisy. */}
         <Command filter={(value, search) => (value.split("\u0000")[0].toLowerCase().includes(search.toLowerCase()) ? 1 : 0)}>
-          <CommandInput value={query} onValueChange={setQuery} placeholder={onCreate ? "Search or type to create…" : "Search…"} />
+          <CommandInput ref={input} value={query} onValueChange={setQuery} placeholder={onCreate ? "Search or type to create…" : "Search…"} />
           <CommandList>
             <CommandEmpty>{q ? "No match" : onCreate ? "Nothing yet — type to create" : "Nothing to show"}</CommandEmpty>
             <CommandGroup>
@@ -70,6 +74,15 @@ export function CreatableSelect({
                 </CommandItem>
               ))}
             </CommandGroup>
+            {onCreate && addLabel && !q && (
+              <CommandGroup>
+                <CommandItem value="__add_new" onSelect={() => input.current?.focus()}>
+                  <Plus />
+                  {addLabel}
+                  <span className="ml-auto text-xs text-muted-foreground">type the name above</span>
+                </CommandItem>
+              </CommandGroup>
+            )}
             {onCreate && q && !exists && (
               <CommandGroup>
                 <CommandItem

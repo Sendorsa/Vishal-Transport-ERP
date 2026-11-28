@@ -100,8 +100,10 @@ for (const s of [OUT, ACTIVE, NOT_APPROVED, DISABLED, INVITED, UNCONFIGURED])
     assert.equal(to("/api/erp", s), "allow", `${role}: the API enforces its own method list`)
   }
   // The other roles: every page, the Fuel Stations landing — except Expense, unreleased: Dev only (owner, 25 Nov 2026).
-  const expense = routes.filter((r) => r.startsWith("/expenses/"))
-  assert.deepEqual(expense.sort(), ["/expenses/broker-charges", "/expenses/fines", "/expenses/fitness", "/expenses/insurance", "/expenses/road-tax"], "the five Expense pages")
+  const EXPENSE_PAGES = ["/broker-charges", "/fines", "/fitness", "/insurance", "/road-tax"]
+  const expense = routes.filter((r) => EXPENSE_PAGES.includes(r))
+  assert.deepEqual(expense.sort(), EXPENSE_PAGES, "the five Expense pages, at the top level (owner, 26 Nov 2026)")
+  assert.equal(routes.filter((r) => r.startsWith("/expenses")).length, 0, "no page left under the old /expenses prefix")
   for (const role of ["OWNER", "DEV", "EMPLOYEE"] as const) {
     const s: AuthState = { ...ACTIVE, role }
     assert.equal(to("/", s), LANDING)
@@ -110,8 +112,8 @@ for (const s of [OUT, ACTIVE, NOT_APPROVED, DISABLED, INVITED, UNCONFIGURED])
       assert.equal(to(r, s), allowed ? "allow" : LANDING, `${role}: ${r} ${allowed ? "allowed" : "→ Fuel Stations"}`)
       assert.equal(to(`${r}?from=2026-11-01`, s), allowed ? "allow" : LANDING, `${role}: ${r} with a query string`)
     }
-    for (const r of ["/expenses", "/expenses/road-tax/x", "/expenses/../expenses/fines"]) assert.equal(to(r, s), role === "DEV" ? "allow" : LANDING, `${role}: ${r}`)
-    assert.equal(to("/expenses-report", s), "allow", `${role}: only the /expenses section is gated, not look-alike paths`)
+    for (const r of ["/expenses", "/expenses/road-tax", "/road-tax/x", "/fines/../fines", "/expenses/../broker-charges"]) assert.equal(to(r, s), role === "DEV" ? "allow" : LANDING, `${role}: ${r}`)
+    for (const r of ["/expenses-report", "/finesse", "/road-taxes", "/fitness-report"]) assert.equal(to(r, s), "allow", `${role}: ${r} — only the Expense pages are gated, not look-alike paths`)
   }
   for (const role of ["TATA_ADBLUE", "ADBLUE"] as const) for (const r of expense) assert.equal(to(r, { ...ACTIVE, role }), "/adblue", `${role}: ${r} refused`)
 }

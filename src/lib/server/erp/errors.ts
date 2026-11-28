@@ -31,6 +31,11 @@ export function toErpError(e: unknown): { status: number; body: ErpError; log: b
       case "40001": case "40P01": return { status: 409, body: { message: "Someone else saved at the same moment. Please try again." }, log: false }
       case "42501": return { status: 403, body: { message: business ? msg : "Your role or the month lock doesn't allow this change. Nothing was saved." }, log: false }
       case "23514": case "P0001": case "22023": if (business) return { status: 400, body: { message: msg }, log: false }
+      // The database is older than the app (a migration not applied yet): a value, column, table, function or type the
+      // app writes doesn't exist there (25 Nov 2026: AdBlue direct purchases on credit failed this way — 22P02, enum value
+      // 'CREDIT' missing until 20261118000100). Said plainly, never with the SQL; the full error is logged on the server.
+      case "22P02": case "42703": case "42P01": case "42883": case "42704":
+        return { status: 503, body: { message: "The shared database needs an update before this can be saved (a database change for this feature hasn't been applied yet). Nothing was saved — please tell Dev." }, log: true }
     }
     return { status: 500, body: { message: "Something went wrong. Nothing was saved." }, log: true }
   }

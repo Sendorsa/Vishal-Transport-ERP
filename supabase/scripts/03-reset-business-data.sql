@@ -7,7 +7,9 @@
 --   fuel stations (except the internal tanker source dv_tanker), tankers, diesel / petrol / EV entries, tanker loads,
 --   transfers, adjustments, AdBlue purchases and entries, payments and vouchers (+ receipt allocations), trips,
 --   invoices (+ lines).
--- KEEPS: auth.users, auth.identities (Google), public.profiles (every account and role), the audit trail (only
+-- KEEPS: every Expense table (expense.* — Phase 2B: never reset; the script stops if Expense names a vehicle, customer
+--   or driver it would delete, and aborts if any Expense table would change),
+--   auth.users, auth.identities (Google), public.profiles (every account and role), the audit trail (only
 --   appended to), month locks, role permissions, companies, vehicle types, payment categories, app settings, dv_tanker,
 --   the schema and the migration history.
 -- AUDIT: every removed row gets a SYSTEM "DELETED" event with its full snapshot and the reason below, then one
@@ -19,7 +21,7 @@ from unnest(array[
   'finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices', 'ops.trips', 'ops.tyre_payment_allocations', 'ops.tyre_payments', 'ops.tyre_invoice_items', 'ops.tyre_invoices', 'ops.tyre_masters', 
   'fuel.adblue_payment_allocations', 'fuel.adblue_payments', 'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.adblue_vendors', 'fuel.diesel_entries', 'fuel.industrial_supply_allocations', 'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
   'fuel.tankers', 'core.vehicle_assignments', 'core.vehicle_status_periods', 'core.customer_route_rates', 'core.customer_pricing',
-  'core.customer_status_periods', 'core.vehicle_driver_periods', 'core.vehicle_document_alerts', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'
+  'core.customer_status_periods', 'core.vehicle_driver_periods', 'core.vehicle_company_periods', 'core.vehicle_document_alerts', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'
 ]) as t
 where to_regclass(t) is not null;
 
@@ -36,10 +38,21 @@ declare
     'core.drivers', 'core.customers', 'fuel.fuel_stations'];
   t text;
   n bigint;
+  expense_before text;
   profiles_before bigint := (select count(*) from public.profiles);
   identities_before bigint := (select count(*) from auth.identities);
   users_before bigint := (select count(*) from auth.users);
 begin
+  -- Expense (Phase 2B) is NEVER touched by this reset (docs/PHASE_2B_IMPLEMENTATION_PLAN.md §8.2). It stops before deleting
+  -- anything when Expense records name vehicles, customers or drivers this reset would delete, and proves at the end that
+  -- every Expense table is exactly as it was.
+  if to_regclass('expense.entries') is not null then
+    if exists (select 1 from expense.entry_vehicles) or exists (select 1 from expense.entries where customer_id is not null or driver_id is not null) then
+      raise exception 'Expense records reference vehicles, customers or drivers this reset would delete — Expense is never reset. Nothing was changed.';
+    end if;
+    expense_before := (select md5(concat_ws('|', (select count(*) from expense.entries), (select coalesce(sum(amount), 0) from expense.entries), (select coalesce(sum(paid_amount), 0) from expense.entries),
+      (select count(*) from expense.entry_vehicles), (select count(*) from expense.brokers), (select count(*) from expense.month_locks), (select count(*) from expense.import_batches), (select count(*) from expense.import_items))));
+  end if;
   if current_setting('vt.confirm_reset', true) is distinct from 'dqnoducqiootfvkzskhu' then
     raise exception 'Not confirmed. Run: select set_config(''vt.confirm_reset'', ''dqnoducqiootfvkzskhu'', false); — on project dqnoducqiootfvkzskhu only.';
   end if;
@@ -67,7 +80,7 @@ begin
   foreach t in array array['core.profile_customer_access', 'finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices', 'ops.trips', 'ops.tyre_payment_allocations', 'ops.tyre_payments', 'ops.tyre_invoice_items', 'ops.tyre_invoices', 'ops.tyre_masters', 
     'fuel.adblue_payment_allocations', 'fuel.adblue_payments', 'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.adblue_vendors', 'fuel.diesel_entries', 'fuel.industrial_supply_allocations', 'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
     'fuel.tankers', 'core.vehicle_assignments', 'core.vehicle_status_periods', 'core.customer_route_rates', 'core.customer_pricing',
-    'core.customer_status_periods', 'core.vehicle_driver_periods', 'core.vehicle_document_alerts', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'] loop
+    'core.customer_status_periods', 'core.vehicle_driver_periods', 'core.vehicle_company_periods', 'core.vehicle_document_alerts', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'] loop
     if to_regclass(t) is null then continue; end if;
     execute format('delete from %s %s', t, case when t = 'fuel.fuel_stations' then 'where not is_tanker_source' else '' end);
     get diagnostics n = row_count;
@@ -77,6 +90,9 @@ begin
   insert into audit.events (actor_kind, action, module, record_type, record_id, label, reason, note)
   values ('SYSTEM', 'DATA_RESET', 'System', 'Data', 'workspace', 'Business data cleared for the clean go-live', why, 'supabase/scripts/03-reset-business-data.sql');
 
+  if to_regclass('expense.entries') is not null and (select md5(concat_ws('|', (select count(*) from expense.entries), (select coalesce(sum(amount), 0) from expense.entries), (select coalesce(sum(paid_amount), 0) from expense.entries), (select count(*) from expense.entry_vehicles), (select count(*) from expense.brokers), (select count(*) from expense.month_locks), (select count(*) from expense.import_batches), (select count(*) from expense.import_items)))) is distinct from expense_before then
+    raise exception 'An Expense table would change — Expense is never reset. Aborting, nothing changed.';
+  end if;
   -- Accounts are never touched (no business table cascades into them) — proven, not assumed.
   if (select count(*) from public.profiles) <> profiles_before or (select count(*) from auth.identities) <> identities_before
      or (select count(*) from auth.users) <> users_before then

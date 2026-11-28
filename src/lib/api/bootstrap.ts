@@ -54,11 +54,18 @@ export function ensureSeeded() {
   )
 }
 
+/**
+ * Expense collections are never replaced by Load demo data, Clear all data or Restore from file in a browser (Phase 2B,
+ * C-7, owner 27 Nov 2026): a whole-workspace operation keeps this browser's Expense data exactly as it is.
+ */
+export const EXPENSE_COLLECTIONS: CollectionKey[] = ["expenses", "brokers", "expense_month_locks", "expense_import_batches"]
+const resettable = COLLECTION_KEYS.filter((k) => !EXPENSE_COLLECTIONS.includes(k))
+
 export function loadDemoData() {
   clearAll()
   const data = generateSeedData(new Date())
   writeSettings(data.settings)
-  for (const key of COLLECTION_KEYS) writeCollection(key, data[key] as never)
+  for (const key of resettable) writeCollection(key, data[key] as never)
   writeMeta({ version: SCHEMA_VERSION, seededAt: new Date().toISOString(), source: "DEMO" })
 }
 
@@ -70,7 +77,7 @@ export function loadDemoData() {
 export function loadEmptyWorkspace() {
   clearAll()
   writeSettings(structuredClone(DEFAULT_SETTINGS))
-  for (const key of COLLECTION_KEYS) writeCollection(key, [])
+  for (const key of resettable) writeCollection(key, [])
   const clean = cleanWorkspace(new Date())
   writeCollection("fuel_stations", clean.fuel_stations)
   writeCollection("vehicles", clean.vehicles)
@@ -174,11 +181,14 @@ export function parseBackup(raw: unknown): BackupFile {
   return file
 }
 
-/** Replaces all business data with the file's (the audit log and session stay). Call inside a storage transaction. */
+/**
+ * Replaces all business data with the file's (the audit log and session stay) — except Expense, which is kept as it is
+ * (C-7): the file's Expense records are not restored. Call inside a storage transaction.
+ */
 export function restoreBackup(file: BackupFile) {
   clearAll()
   writeSettings(file.settings)
-  for (const key of COLLECTION_KEYS) writeCollection(key, (file.collections[key] ?? []) as never)
+  for (const key of resettable) writeCollection(key, (file.collections[key] ?? []) as never)
   writeMeta({ version: SCHEMA_VERSION, seededAt: new Date().toISOString(), source: "RESTORED" })
   migrateStorage(true)
 }

@@ -12,6 +12,8 @@ import { adBlueNeighbours } from "@/domain/adblue"
 import { allocationProblem, industrialAmount, industrialProblem, sortedAllocations, type TankerAllocation } from "@/domain/industrial"
 import { odometerConflict } from "@/domain/diesel"
 import { dayBefore, statusOn, withStatus } from "@/domain/status-history"
+import { withCompanyChange } from "@/domain/drivers"
+import { COMPANIES } from "@/lib/constants"
 import { canEditMonth } from "@/domain/month-lock"
 import { ADBLUE_PAYMENT_MODES, CREDIT as AB_CREDIT, directPayable, ON_ACCOUNT, isPayableDirect, paidByPurchase, payableLabel, payablesOf, type Payable, paymentProblem as abPaymentProblem, purchaseValue, referenceNoun as abReferenceNoun, refKey, settledOf as abSettled, tdsProblem as abTdsProblem, tdsSplit as abTdsSplit, unallocated as abUnallocated, type PurchasePaymentType } from "@/domain/adblue-payments"
 import { adBlueTotals, isDirectAdBlue, NO_VENDOR_LABEL, adBlueShortfallMessage, stockDraws, valueInventory } from "@/domain/adblue-inventory"
@@ -25,13 +27,13 @@ import { cleanName, CREDIT, financialChanges, itemProblem, lineAmounts, masterKe
 import { assignmentIndex, assignmentOn, correctedPeriods, handedOverBy, inferAssignments, isCalendarDate, movedRecords, resolveCustomers, startDateProblem, transferPeriods, type AssignmentPeriod, type AttributedRecords, type MovedRecord, type StartDateProblem } from "@/domain/assignments"
 import { formatDate, formatINR, formatNumber, round2, todayISO, formatLitres } from "@/lib/format"
 import { appendAuditEvent, appendAuditReviews, readAuditEvents, readAuditReviews, readCollection, readSettings, runInTransaction, writeCollection, writeSettings } from "@/lib/storage/local-store"
-import type { AdBlueEntry, AdBluePayment, AdBluePurchase, AdBlueVendor, AuditEvent, CompanyCode, Expense, Customer, DieselEntry, Driver, FuelStation, IndustrialSupply, Invoice, NewEntity, TyreInvoice, TyreInvoiceItem, TyreMaster, TyreMasterKind, TyrePayment, TyreTaxType, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
+import type { AdBlueEntry, AdBluePayment, AdBluePurchase, AdBlueVendor, AuditEvent, Broker, CompanyCode, Expense, ExpenseImportBatch, ExpenseImportItem, ExpenseMonthLock, ExpenseSection, Customer, DieselEntry, Driver, FuelStation, IndustrialSupply, Invoice, NewEntity, TyreInvoice, TyreInvoiceItem, TyreMaster, TyreMasterKind, TyrePayment, TyreTaxType, Payment, PaymentMode, Settings, Tanker, TankerAdjustment, TankerDispense, TankerLoad, TankerTransfer, Trip, Vehicle, VehicleAssignment } from "@/lib/types"
 import { ensureSeeded, exportBackup, loadDemoData, loadEmptyWorkspace, parseBackup, restoreBackup, type BackupFile } from "./bootstrap"
 import { createLocalRepository, latency, newId, NotFoundError } from "./repository"
 import { ConflictError, pendingVersions, runWithVersions } from "@/lib/versions"
 import { NeedData, requestScope } from "@/lib/request-scope"
 import { cleanWorkspace } from "@/lib/storage/seed"
-import { BROKER_ENTRY_LABEL, EXPENSE_SECTIONS, expenseProblems, hasValidity, textKey, type ExpenseInput } from "@/domain/expenses"
+import { BROKER_ENTRY_LABEL, EXPENSE_SECTIONS, brokerOutstanding, descriptionOptions, entriesOf, expenseProblems, firstOverpayment, hasValidity, isMonthLocked, monthOf, textKey, type ExpenseInput } from "@/domain/expenses"
 
 export { NotFoundError, ConflictError }
 
@@ -87,6 +89,9 @@ const tyreMasters = createLocalRepository("tyre_masters", "tym") // /api/tyre-ma
 const tyreInvoices = createLocalRepository("tyre_invoices", "tyr") // /api/tyre-invoices
 const tyrePayments = createLocalRepository("tyre_payments", "tpy") // /api/tyre-payments
 const expenses = createLocalRepository("expenses", "exp") // Expense module (Phase 1: browser backend only)
+const brokers = createLocalRepository("brokers", "brk") // Broker Charges → broker list (Phase 1: browser backend only)
+const expenseMonthLocks = createLocalRepository("expense_month_locks", "eml") // Expense → locked section-months
+const expenseImportBatches = createLocalRepository("expense_import_batches", "imp") // Expense → applied imports (shared database, Dev)
 const invoices = createLocalRepository("invoices", "inv") // /api/invoices
 const payments = createLocalRepository("payments", "pay") // /api/payments
 
@@ -1169,6 +1174,9 @@ const meta = {
   tyrePayment: (p: TyrePayment) => ({ module: "Tyre", recordType: "Tyre payment", recordId: p.id, label: `${tyreMasterName(p.supplierId)} · ${p.mode} · ref ${p.utr} · ${formatDate(p.date)} · ${formatINR(settledOf(p))}${p.tdsAmount ? ` (${formatINR(p.amount)} paid + ${formatINR(p.tdsAmount)} TDS)` : ""}`, recordDate: p.date }),
   tyreInvoice: (x: TyreInvoice) => ({ module: "Tyre", recordType: "Tyre invoice", recordId: x.id, label: `${tyreMasterName(x.supplierId)} · bill ${x.billNo || "—"} · ${regNo(x.vehicleId)} · ${formatDate(x.date)} · ${formatINR(tyreTotals(x.items).grandTotal)}`, recordDate: x.date }),
   expense: (x: Expense) => ({ module: "Expense", recordType: expenseRecordType(x), recordId: x.id, label: [EXPENSE_SECTIONS[x.section].title, x.broker, x.vehicleIds.length ? x.vehicleIds.map(regNo).join(", ") : x.section === "BROKER" ? null : "No vehicle", x.description || x.taxType || x.provider, formatDate(x.date), formatINR(x.entryType === "PAYMENT" ? x.paidAmount : x.amount)].filter(Boolean).join(" · "), recordDate: x.date }),
+  importBatch: (b: ExpenseImportBatch) => ({ module: "Expense", recordType: "Import batch", recordId: b.id, label: `Expense import · ${b.sourceLabel}`, recordDate: null }),
+  expenseMonth: (l: ExpenseMonthLock) => ({ module: "Expense", recordType: "Expense month", recordId: l.id, label: `${l.section ? EXPENSE_SECTIONS[l.section].title : "Expense"} · ${format(parseISO(`${l.month}-01`), "MMMM yyyy")}`, recordDate: `${l.month}-01` }),
+  broker: (b: Broker) => ({ module: "Expense", recordType: "Broker", recordId: b.id, label: b.name, recordDate: null }),
   tyreMaster: (m: TyreMaster) => ({ module: "Tyre", recordType: TYRE_MASTER_LABEL[m.kind].one, recordId: m.id, label: m.name, recordDate: null }),
   industrial: (x: IndustrialSupply) => ({ module: "Diesel", recordType: "Industrial supply", recordId: x.id, label: `${customerName(x.customerId)} · ${formatDate(x.date)} · ${L(x.litres)} @ ${formatINR(x.rate)} · ${x.purpose} · from ${(x.allocations ?? []).map((a) => `${tankerName(a.tankerId)} ${L(a.litres)}`).join(" + ")}`, recordDate: x.date }),
   adjustment: (a: TankerAdjustment) => ({ module: "Diesel Tanker", recordType: "Tanker stock adjustment", recordId: a.id, label: `${tankerName(a.tankerId)} · ${formatDate(a.date)} · ${a.litres > 0 ? "+" : "−"}${L(Math.abs(a.litres))}`, recordDate: a.date }),
@@ -1212,6 +1220,9 @@ const RECORD_COLLECTION: Record<string, Parameters<typeof readCollection>[0]> = 
   "Broker charge": "expenses",
   "Broker payment": "expenses",
   "Broker opening balance": "expenses",
+  Broker: "brokers",
+  "Expense month": "expense_month_locks",
+  "Import batch": "expense_import_batches",
   Supplier: "tyre_masters",
   "Repair type": "tyre_masters",
   "Tyre brand": "tyre_masters",
@@ -1319,12 +1330,21 @@ async function transferVehicle(id: string, customerId: string | null, effectiveD
   return after
 }
 
-async function updateVehicle(id: string, input: Partial<NewEntity<Vehicle>>) {
+async function updateVehicle(id: string, input: Partial<NewEntity<Vehicle>>, companyEffective?: string) {
   assertCan("vehicles", "edit")
-  // Resolved document alerts are history the API alone appends (below) — never taken from the caller.
+  // Resolved document alerts and the company history are history the API alone appends (below) — never taken from the caller.
   let patch: Partial<NewEntity<Vehicle>> = { ...input }
   delete patch.documentAlertHistory
+  delete patch.companyPeriods
   let current = await vehicles.get(id)
+  // A change of company (VT ↔ VTHPL) is dated (owner, 27 Nov 2026): effective today unless given; earlier dates keep
+  // the company they had, so a driver's deployment history stays right (src/domain/drivers.ts).
+  if (current && patch.companyCode && patch.companyCode !== current.companyCode) {
+    if (!COMPANIES.some((c) => c.value === patch.companyCode)) throw new Error("Choose VT or VTHPL")
+    patch = { ...patch, companyPeriods: withCompanyChange(current, patch.companyCode, companyEffective ?? todayISO(), todayISO(), () => newId("vcp")) }
+    // The current company is the last period's (a change can't take effect before the last recorded one).
+    patch.companyCode = patch.companyPeriods!.at(-1)!.companyCode
+  }
   if (patch.assignedCustomerId && patch.assignedCustomerId !== current?.assignedCustomerId) assertCustomerOpen(patch.assignedCustomerId, todayISO())
   if (current && patch.status && patch.status !== current.status) patch = { ...patch, statusHistory: withStatus(current, patch.status, todayISO()) }
   // Changing the customer here is a transfer effective today — earlier months keep their customer.
@@ -1361,9 +1381,27 @@ async function setVendorStatus(id: string, status: AdBlueVendor["status"]) {
 
 /* ------------------------------------------------------------------ Expense (Phase 1) */
 
-/** The Expense module has no table on the shared database yet (Phase 1): every write there is refused, never dropped. */
-function assertLocalExpenses() {
-  if (requestScope()) throw new Error("The Expense module isn't on the shared database yet (Phase 1 keeps it in this browser only). Nothing was saved.")
+/** A section's month locked after review: that section's records in it are read-only for every role (owner, 25 Nov 2026). */
+function assertExpenseMonthOpen(section: ExpenseSection, date: string) {
+  const month = date.slice(0, 7)
+  if (isMonthLocked(readCollection("expense_month_locks"), section, month))
+    throw new Error(`${format(parseISO(`${month}-01`), "MMMM yyyy")} is locked in ${EXPENSE_SECTIONS[section].title} — its records are read-only. Nothing was saved.`)
+}
+
+/**
+ * Idempotency of every Expense create (Phase 2B, docs/PHASE_2B_IMPLEMENTATION_PLAN.md §5.4): one key per form submission,
+ * re-sent on retry. Content compared on everything the API stores from the form (never id / timestamps / customer stamp).
+ */
+const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const sameExpenseContent = (a: NewEntity<Expense>, b: Expense) => {
+  const pick = (x: Partial<Expense>) => JSON.stringify([x.section, x.date, x.vehicleIds, x.companyCode ?? null, x.description, x.amount, x.remarks, x.validFrom, x.validTill, x.taxType, x.provider, x.policyNo, x.paymentMode, x.paymentReference, x.paymentStatus, x.paymentDate, x.driverId ?? null, x.entryType, textKey(x.broker ?? ""), x.billNo ?? "", x.purpose, x.operatingCompany, x.vehicleCount, x.paidAmount])
+  return pick(a) === pick(b)
+}
+
+/** A broker payment with the same broker (name key), date and amount as another payment — asks for confirmation (§5.4). */
+function samePaymentAs(x: Pick<Expense, "section" | "entryType" | "broker" | "date" | "paidAmount">, id?: string) {
+  if (x.section !== "BROKER" || x.entryType !== "PAYMENT") return undefined
+  return readCollection("expenses").find((e) => e.id !== id && e.section === "BROKER" && e.entryType === "PAYMENT" && textKey(e.broker) === textKey(x.broker) && e.date === x.date && e.paidAmount === x.paidAmount)
 }
 
 const expenseRecordType = (x: Pick<Expense, "section" | "entryType">) =>
@@ -1373,16 +1411,15 @@ const expenseRecordType = (x: Pick<Expense, "section" | "entryType">) =>
  * An expense as stored: trimmed, the fields its section doesn't use cleared, validated (expenseProblems — the form shows
  * the same), every vehicle from the master and open on the date, the customer stamped from the vehicle's assignment.
  */
-function checkExpense(input: ExpenseInput, id?: string): NewEntity<Expense> {
-  assertLocalExpenses()
+function checkExpense(input: ExpenseInput, id?: string, brokerList?: Broker[]): NewEntity<Expense> {
   const section = input.section
   if (!Object.hasOwn(EXPENSE_SECTIONS, section)) throw new Error("Choose the expense section")
   const t = (v: unknown) => (typeof v === "string" ? v.trim().replace(/\s+/g, " ") : "")
   const broker = section === "BROKER"
   const entryType = broker ? (input.entryType ?? "CHARGE") : null
   if (entryType && !Object.hasOwn(BROKER_ENTRY_LABEL, entryType)) throw new Error("Choose the kind of broker entry")
-  // A broker payment or opening balance names no vehicle (only a new charge does).
-  const vehicleIds = Array.isArray(input.vehicleIds) && (!entryType || entryType === "CHARGE") ? input.vehicleIds.filter((v) => typeof v === "string" && v) : []
+  // A charge or a payment may name vehicles (a payment: the vehicle it was for, owner 25 Nov 2026); an opening balance none.
+  const vehicleIds = Array.isArray(input.vehicleIds) && entryType !== "BROUGHT_FORWARD" ? input.vehicleIds.filter((v) => typeof v === "string" && v) : []
   const paidAmount = broker ? Number(input.paidAmount) : 0
   const paid = section === "FINE" ? input.paymentStatus === "PAID" : paidAmount > 0
   const x: ExpenseInput = {
@@ -1390,7 +1427,8 @@ function checkExpense(input: ExpenseInput, id?: string): NewEntity<Expense> {
     date: t(input.date),
     vehicleIds,
     companyCode: input.companyCode ?? null,
-    description: t(input.description),
+    // Fines and Broker Charges: free text kept as typed — inner spaces and punctuation untouched, only the ends trimmed (owner, 25 Nov 2026).
+    description: section === "FINE" || broker ? (typeof input.description === "string" ? input.description.trim() : "") : t(input.description),
     amount: Number(input.amount),
     remarks: typeof input.remarks === "string" ? input.remarks.trim() : "",
     validFrom: hasValidity(section) ? t(input.validFrom) : "",
@@ -1398,10 +1436,17 @@ function checkExpense(input: ExpenseInput, id?: string): NewEntity<Expense> {
     taxType: section === "ROAD_TAX" || section === "FINE" ? t(input.taxType) : "",
     provider: section === "INSURANCE" ? t(input.provider) : "",
     policyNo: section === "INSURANCE" ? t(input.policyNo) : "",
-    paymentMode: section === "INSURANCE" || (broker && paid) ? t(input.paymentMode) : "",
+    paymentMode: section === "INSURANCE" || broker ? t(input.paymentMode) : "", // Broker: kept as recorded (older entries); the form no longer asks
     paymentReference: section === "INSURANCE" || (section === "FINE" && paid) ? t(input.paymentReference) : "",
     paymentStatus: section === "FINE" ? input.paymentStatus : null,
     paymentDate: (section === "FINE" || broker) && paid ? t(input.paymentDate) : "",
+    // Fines: the driver from the driver master (owner, 27 Nov 2026). Broker: the credit entry a payment settles.
+    driverId: section === "FINE" && typeof input.driverId === "string" && input.driverId ? input.driverId : null,
+    billNo: entryType === "CHARGE" ? t(input.billNo) : "",
+    requestId: typeof input.requestId === "string" && input.requestId ? input.requestId : null,
+    importBatchId: null, // only the import sets it
+    // Road Tax: every save requires the paying company now (expenseProblems), so the entry's company is confirmed.
+    ...(section === "ROAD_TAX" ? { companyConfirmed: true } : {}),
     entryType,
     broker: broker ? t(input.broker) : "",
     purpose: entryType === "CHARGE" ? t(input.purpose) : "",
@@ -1410,8 +1455,27 @@ function checkExpense(input: ExpenseInput, id?: string): NewEntity<Expense> {
     paidAmount,
   }
   if (x.companyCode !== null && !settingsOrThrow().companies.some((c) => c.code === x.companyCode)) throw new Error("Choose the company that pays (account payable)")
+  if ((x.billNo ?? "").length > 40) throw new Error("A bill number is at most 40 characters.")
+  if (x.requestId && !REQUEST_ID.test(x.requestId)) throw new Error("This form's request id is not valid — reopen the form.")
   const problem = Object.values(expenseProblems(x, todayISO()))[0]
   if (problem) throw new Error(problem)
+  const prior = id ? readCollection("expenses").find((e) => e.id === id) : undefined
+  // Road Tax descriptions: one spelling each (owner, 27 Nov 2026) — a description already used or in the books is saved
+  // in that spelling, whatever its case or spacing; a new one becomes available to later entries.
+  if (section === "ROAD_TAX") x.description = descriptionOptions(readCollection("expenses"), "ROAD_TAX").find((d) => textKey(d) === textKey(x.description)) ?? x.description
+  if (x.driverId) {
+    const d = readCollection("drivers").find((r) => r.id === x.driverId)
+    if (!d) throw new Error("Choose the driver from the driver list")
+    if (d.status === "ARCHIVED" && prior?.driverId !== d.id) throw new Error(`${d.name} is archived — choose an active driver.`)
+  }
+  if (broker) {
+    // The broker comes from the list, saved in the list's own spelling; an older entry may keep the name it already has.
+    const listed = (brokerList ?? readCollection("brokers")).find((b) => textKey(b.name) === textKey(x.broker))
+    const kept = id ? readCollection("expenses").find((e) => e.id === id)?.broker : undefined
+    if (kept !== undefined && textKey(x.broker) === textKey(kept)) x.broker = kept // unchanged: kept exactly as recorded
+    else if (listed) x.broker = listed.name
+    else throw new Error(`${x.broker} isn't in the broker list — choose a broker, or add it with Add New Broker.`)
+  }
   for (const v of vehicleIds) assertOpen(v, null, x.date) // from the vehicle master only — never created here
   if (broker) {
     // One opening balance per broker, dated before every other entry of that broker.
@@ -1420,9 +1484,264 @@ function checkExpense(input: ExpenseInput, id?: string): NewEntity<Expense> {
     if (entryType === "BROUGHT_FORWARD" && opening) throw new Error(`${x.broker} already has an opening balance (${formatDate(opening.date)}, ${formatINR(opening.amount)}). Edit that one instead.`)
     if (entryType === "BROUGHT_FORWARD" && mine.some((e) => e.date < x.date)) throw new Error(`${x.broker} has entries dated before ${formatDate(x.date)} — an opening balance must come before every other entry.`)
     if (entryType !== "BROUGHT_FORWARD" && opening && x.date < opening.date) throw new Error(`${x.broker}'s opening balance is dated ${formatDate(opening.date)}; an entry can't be dated before it.`)
+    // Each bill stays identifiable: one bill number once per broker (case and spaces ignored).
+    const same = x.billNo ? mine.find((e) => e.entryType === "CHARGE" && e.billNo && textKey(e.billNo) === textKey(x.billNo!)) : undefined
+    if (same) throw new Error(`Bill ${same.billNo} of ${x.broker} is already recorded (${formatDate(same.date)}, ${formatINR(same.amount)}).`)
   }
   const customerId = !broker && vehicleIds[0] ? (assignmentOn(assignmentIndex(periodsOf(vehicleIds[0])), vehicleIds[0], x.date)?.customerId ?? null) : null
   return { ...x, customerId }
+}
+
+/**
+ * Broker Charges (owner, 27 Nov 2026): a broker is never paid more than has been billed — at any date. Checked on the
+ * broker's entries as they would be after the change (a new or back-dated payment, a bill made smaller or deleted).
+ */
+function assertBrokerLedger(next: Expense[], brokers: string[], changed: Expense["entryType"]) {
+  for (const b of [...new Set(brokers.filter(Boolean))]) {
+    const over = firstOverpayment(entriesOf(next, b))
+    if (!over) continue
+    if (changed === "PAYMENT")
+      throw new Error(`${b} had ${formatINR(Math.max(0, round2(over.balance + over.entry.paidAmount)))} outstanding on ${formatDate(over.entry.date)} — a payment can't be more than that.`)
+    throw new Error(`This would leave ${b} paid ${formatINR(-over.balance)} more than billed on ${formatDate(over.entry.date)}. Nothing was saved.`)
+  }
+}
+
+/* ------------------------------------------------------------------ Expense import from a browser backup (Phase 2B, §7) */
+
+type ImportCollection = "expenses" | "brokers" | "expense_month_locks"
+interface ImportItemPlan { sourceCollection: ImportCollection; sourceId: string; outcome: ExpenseImportItem["outcome"]; targetId: string | null; reason: string }
+export interface ExpenseImportPlan {
+  fingerprint: string
+  label: string
+  exportedAt: string | null
+  /** The file was applied before (batch id) — nothing can be imported from it again. */
+  appliedAs: string | null
+  items: ImportItemPlan[]
+  /** Problems that stop the apply altogether (e.g. a broker would be overpaid). */
+  blocking: string[]
+  /** Customer Company recomputed from the central assignment history, where it differs from the browser's stamp. */
+  customerDifferences: { id: string; browser: string | null; central: string | null }[]
+  /** Central vs file master data (information only — never written). */
+  drift: { driversChanged: string[]; driversMissing: string[]; vehiclesMissing: string[] }
+  /** Per section × month: file / to import / skipped / rejected — records, Σ amount, Σ paid. */
+  perMonth: { section: string; month: string; file: number; toImport: number; skipped: number; rejected: number; amount: number; paid: number }[]
+  /** Broker outstanding after the import (central + imported), per broker. */
+  brokerOutstanding: { broker: string; before: number; after: number }[]
+  counts: Record<ImportCollection, Record<ImportItemPlan["outcome"], number>>
+}
+
+/** Canonical JSON (keys sorted, records sorted by id) — the same bytes in the browser and on the server. */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`).join(",")}}`
+  return JSON.stringify(v ?? null)
+}
+async function sha256(text: string) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("")
+}
+const importSource = (file: BackupFile) => {
+  const byId = <T extends { id: string }>(xs: T[] | undefined) => [...(xs ?? [])].sort((a, b) => (a.id < b.id ? -1 : 1))
+  return { expenses: byId(file.collections.expenses), brokers: byId(file.collections.brokers), expense_month_locks: byId(file.collections.expense_month_locks) }
+}
+
+/**
+ * The dry run (writes nothing): classifies every record of the file's three Expense collections against the shared
+ * database — new / already present / conflict / rejected / skipped — and reports the result. Records are compared and
+ * imported **as they are** (id, createdAt, updatedAt, date); only the customer stamp is recomputed (D-12) and the broker
+ * link follows the broker name. Drivers, vehicles, customers and assignments in the file are never written.
+ */
+async function planExpenseImport(raw: unknown, label: string): Promise<ExpenseImportPlan & { _source: ReturnType<typeof importSource>; _brokers: Broker[] }> {
+  if (currentRole() !== "DEV") throw new PermissionError("Only Dev can import Expense data.")
+  if (!requestScope()) throw new Error("The import runs on the shared database only (sign in to the shared ERP as Dev).")
+  if (typeof label !== "string" || !label.trim()) throw new Error("Name the source of the file (e.g. “Office Mac — Chrome”).")
+  const file = parseBackup(raw)
+  const src = importSource(file)
+  const fingerprint = await sha256(canonical(src))
+  const applied = readCollection("expense_import_batches").find((b) => b.sourceFingerprint === fingerprint)
+  const central = readCollection("expenses")
+  const centralBrokers = readCollection("brokers")
+  const centralLocks = readCollection("expense_month_locks")
+  const vehicleIds = new Set(readCollection("vehicles").map((v) => v.id))
+  const drivers = new Map(readCollection("drivers").map((d) => [d.id, d]))
+  const deletedIds = new Set(readAuditEvents().filter((e) => e.action === "DELETED" && e.module === "Expense").map((e) => e.recordId))
+  const items: ImportItemPlan[] = []
+  const add = (c: ImportCollection, id: string, outcome: ImportItemPlan["outcome"], reason = "", targetId: string | null = null) => items.push({ sourceCollection: c, sourceId: id, outcome, targetId: targetId ?? (outcome === "IMPORTED" ? id : null), reason })
+
+  // Brokers: a central broker with the same name (spaces / case ignored) is the same broker; else new with its own id.
+  const brokerList = [...centralBrokers]
+  for (const b of src.brokers) {
+    const byName = centralBrokers.find((c) => textKey(c.name) === textKey(b.name))
+    const byId = centralBrokers.find((c) => c.id === b.id)
+    if (byName) add("brokers", b.id, byName.id === b.id ? "ALREADY_PRESENT" : "SKIPPED", byName.id === b.id ? "" : `Same broker as “${byName.name}” already on the shared database`, byName.id)
+    else if (byId) add("brokers", b.id, "CONFLICT", `Broker id already used for “${byId.name}”`)
+    else {
+      add("brokers", b.id, "IMPORTED")
+      brokerList.push(b)
+    }
+  }
+
+  // Entries.
+  const customerDifferences: ExpenseImportPlan["customerDifferences"] = []
+  const accepted: Expense[] = []
+  const lockedCentrally = (x: Expense) => isMonthLocked(centralLocks, x.section, monthOf(x))
+  for (const x of src.expenses) {
+    const same = central.find((c) => c.id === x.id)
+    if (same) {
+      // Same id: identical content and the same creation instant (the database returns +00:00 text where the browser wrote Z).
+      const identical = sameExpenseContent(x, same) && Date.parse(same.createdAt) === Date.parse(x.createdAt)
+      add("expenses", x.id, identical ? "ALREADY_PRESENT" : "CONFLICT", identical ? "" : "Same id, different content on the shared database — not overwritten")
+      continue
+    }
+    const reject = (reason: string) => add("expenses", x.id, "REJECTED", reason)
+    if (deletedIds.has(x.id)) { reject("This record was deleted on the shared database"); continue }
+    const missing = x.vehicleIds.filter((v) => !vehicleIds.has(v))
+    if (missing.length) { reject(`Vehicle not on the shared database: ${missing.join(", ")}`); continue }
+    if (x.driverId && !drivers.has(x.driverId)) { reject(`Driver not on the shared database: ${x.driverId}`); continue }
+    if (lockedCentrally(x)) { reject(`${format(parseISO(`${monthOf(x)}-01`), "MMMM yyyy")} is locked in ${EXPENSE_SECTIONS[x.section].title} on the shared database`); continue }
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(x.createdAt) || !/^\d{4}-\d{2}-\d{2}T/.test(x.updatedAt)) { reject("Missing or invalid createdAt / updatedAt"); continue }
+    const money = [x.amount, x.paidAmount].every((n) => Number.isFinite(n) && round2(n) === n)
+    if (!money) { reject("An amount has more than two decimals"); continue }
+    let checked: NewEntity<Expense>
+    try {
+      checked = checkExpense({ ...x, requestId: null } as ExpenseInput, x.id, brokerList)
+    } catch (e) {
+      if (e instanceof NeedData) throw e // loading data on demand (shared backend), not a rejection
+      reject(e instanceof Error ? e.message : String(e))
+      continue
+    }
+    if (checked.customerId !== x.customerId) customerDifferences.push({ id: x.id, browser: x.customerId, central: checked.customerId })
+    accepted.push({ ...x, customerId: checked.customerId, requestId: null, importBatchId: null })
+    add("expenses", x.id, "IMPORTED")
+  }
+  // Rules across the file and the shared database together: bill numbers, one opening per broker, the ledger.
+  const blocking: string[] = []
+  const all = [...central, ...accepted]
+  for (const x of accepted.filter((a) => a.section === "BROKER")) {
+    const mine = all.filter((e) => e.id !== x.id && e.section === "BROKER" && textKey(e.broker) === textKey(x.broker))
+    if (x.entryType === "CHARGE" && x.billNo && mine.some((e) => e.entryType === "CHARGE" && e.billNo && textKey(e.billNo) === textKey(x.billNo!))) blocking.push(`Bill ${x.billNo} of ${x.broker} would be recorded twice`)
+    if (x.entryType === "BROUGHT_FORWARD" && mine.some((e) => e.entryType === "BROUGHT_FORWARD")) blocking.push(`${x.broker} would have two opening balances`)
+  }
+  const brokerNames = [...new Set(all.filter((e) => e.section === "BROKER").map((e) => textKey(e.broker)))]
+  for (const k of brokerNames) {
+    const over = firstOverpayment(all.filter((e) => e.section === "BROKER" && textKey(e.broker) === k))
+    if (over) blocking.push(`${over.entry.broker || "A broker"} would be paid ${formatINR(-over.balance)} more than billed on ${formatDate(over.entry.date)}`)
+  }
+
+  // Locks: imported after their month's records; one already locked centrally is skipped.
+  const today = todayISO().slice(0, 7)
+  for (const l of src.expense_month_locks) {
+    const section = l.section
+    if (!section || !Object.hasOwn(EXPENSE_SECTIONS, section)) add("expense_month_locks", l.id, "REJECTED", "A lock without a section")
+    else if (centralLocks.some((c) => c.section === section && c.month === l.month)) add("expense_month_locks", l.id, "SKIPPED", "Already locked on the shared database")
+    else if (l.month > today) add("expense_month_locks", l.id, "REJECTED", "A month that hasn't started")
+    else add("expense_month_locks", l.id, "IMPORTED")
+  }
+
+  // Report.
+  const outcomeOf = new Map(items.filter((i) => i.sourceCollection === "expenses").map((i) => [i.sourceId, i.outcome]))
+  const perMonthMap = new Map<string, ExpenseImportPlan["perMonth"][number]>()
+  for (const x of src.expenses) {
+    const key = `${x.section}|${monthOf(x)}`
+    const r = perMonthMap.get(key) ?? { section: x.section, month: monthOf(x), file: 0, toImport: 0, skipped: 0, rejected: 0, amount: 0, paid: 0 }
+    const o = outcomeOf.get(x.id)
+    r.file++
+    if (o === "IMPORTED") { r.toImport++; r.amount = round2(r.amount + x.amount); r.paid = round2(r.paid + x.paidAmount) }
+    else if (o === "ALREADY_PRESENT" || o === "SKIPPED") r.skipped++
+    else r.rejected++
+    perMonthMap.set(key, r)
+  }
+  const outstandingRows = brokerNames.map((k) => {
+    const name = all.find((e) => e.section === "BROKER" && textKey(e.broker) === k)!.broker || "No broker named"
+    return { broker: name, before: brokerOutstanding(central, name), after: brokerOutstanding(all, name) }
+  })
+  const fileDrivers = file.collections.drivers ?? []
+  const counts = Object.fromEntries((["expenses", "brokers", "expense_month_locks"] as ImportCollection[]).map((c) => [c, Object.fromEntries((["IMPORTED", "ALREADY_PRESENT", "CONFLICT", "REJECTED", "SKIPPED"] as const).map((o) => [o, items.filter((i) => i.sourceCollection === c && i.outcome === o).length]))])) as ExpenseImportPlan["counts"]
+  return {
+    fingerprint, label: label.trim(), exportedAt: file.exportedAt || null, appliedAs: applied?.id ?? null, items, blocking: [...new Set(blocking)], customerDifferences,
+    drift: {
+      driversChanged: fileDrivers.filter((d) => drivers.has(d.id) && (drivers.get(d.id)!.name !== d.name || (drivers.get(d.id)!.licenseNo ?? "") !== (d.licenseNo ?? ""))).map((d) => d.id),
+      driversMissing: fileDrivers.filter((d) => !drivers.has(d.id)).map((d) => d.id),
+      vehiclesMissing: (file.collections.vehicles ?? []).filter((v) => !vehicleIds.has(v.id)).map((v) => v.id),
+    },
+    perMonth: [...perMonthMap.values()].sort((a, b) => a.section.localeCompare(b.section) || a.month.localeCompare(b.month)),
+    brokerOutstanding: outstandingRows, counts, _source: src, _brokers: brokerList,
+  }
+}
+const publicPlan = (p: Awaited<ReturnType<typeof planExpenseImport>>): ExpenseImportPlan => {
+  const { _source, _brokers, ...rest } = p
+  void _source
+  void _brokers
+  return rest
+}
+
+export interface ExpenseRollbackReport {
+  batchId: string
+  label: string
+  /** Imported by the batch (entries, brokers, locks). */
+  total: { entries: number; brokers: number; locks: number }
+  eligible: string[]
+  retainedLocked: string[]
+  retainedChanged: string[]
+  retainedLedger: string[]
+  alreadyGone: string[]
+  /** Apply only. */
+  deleted: string[]
+  /** Imported entries still present after this run (incl. the retained ones). */
+  remaining: number
+  status: string
+}
+
+/** Classifies the entries a batch imported (§7.6); `apply` deletes the eligible ones. Never touches locked months. */
+function planRollback(batchId: string): ExpenseRollbackReport & { _byId: Map<string, Expense> } {
+  if (currentRole() !== "DEV") throw new PermissionError("Only Dev can roll back an import.")
+  if (!requestScope()) throw new Error("Import rollback runs on the shared database only.")
+  const batch = readCollection("expense_import_batches").find((b) => b.id === batchId)
+  if (!batch) throw new NotFoundError("Import batch", batchId)
+  const importedIds = batch.items.filter((i) => i.sourceCollection === "expenses" && i.outcome === "IMPORTED").map((i) => i.targetId ?? i.sourceId)
+  const snapshot = new Map(((batch.sourceSnapshot.expenses ?? []) as Expense[]).map((x) => [x.id, x]))
+  const current = readCollection("expenses")
+  const byId = new Map(current.map((x) => [x.id, x]))
+  const locks = readCollection("expense_month_locks")
+  const eligible: string[] = [], retainedLocked: string[] = [], retainedChanged: string[] = [], retainedLedger: string[] = [], alreadyGone: string[] = []
+  for (const id of importedIds) {
+    const x = byId.get(id)
+    if (!x) alreadyGone.push(id)
+    else if (isMonthLocked(locks, x.section, monthOf(x))) retainedLocked.push(id)
+    else if (snapshot.get(id) && Date.parse(snapshot.get(id)!.updatedAt) !== Date.parse(x.updatedAt)) retainedChanged.push(id)
+    else eligible.push(id)
+  }
+  // Broker ledger: if removing a broker's eligible entries would leave it overpaid, its bills / openings stay (payments
+  // can always go — removing a payment never overpays).
+  const remove = new Set(eligible)
+  for (const k of [...new Set(eligible.map((id) => byId.get(id)!).filter((x) => x.section === "BROKER").map((x) => textKey(x.broker)))]) {
+    const left = current.filter((e) => e.section === "BROKER" && textKey(e.broker) === k && !remove.has(e.id))
+    if (firstOverpayment(left))
+      for (const x of current.filter((e) => remove.has(e.id) && e.section === "BROKER" && textKey(e.broker) === k && e.entryType !== "PAYMENT")) {
+        remove.delete(x.id)
+        retainedLedger.push(x.id)
+      }
+  }
+  const finalEligible = eligible.filter((id) => remove.has(id))
+  const brokersImported = batch.items.filter((i) => i.sourceCollection === "brokers" && i.outcome === "IMPORTED").length
+  const locksImported = batch.items.filter((i) => i.sourceCollection === "expense_month_locks" && i.outcome === "IMPORTED").length
+  const remainingAfter = importedIds.length - alreadyGone.length - finalEligible.length
+  return {
+    batchId, label: batch.sourceLabel, total: { entries: importedIds.length, brokers: brokersImported, locks: locksImported },
+    eligible: finalEligible, retainedLocked, retainedChanged, retainedLedger, alreadyGone, deleted: [], remaining: remainingAfter,
+    status: rollbackStatus(importedIds.length, remainingAfter, retainedLocked.length, retainedChanged.length, retainedLedger.length),
+    _byId: byId,
+  }
+}
+/** COMPLETE only when no imported entry remains; otherwise PARTIAL with the reasons — never overstated (§7.6). */
+function rollbackStatus(total: number, remaining: number, locked: number, changed: number, ledger: number) {
+  if (remaining === 0) return "COMPLETE — no imported entry remains (brokers and locks imported by the batch are kept)"
+  return `PARTIAL — ${remaining} of ${total} imported entries remain (${locked} in locked section-months, ${changed} changed after import, ${ledger} kept for the broker ledger)`
+}
+const publicRollback = (r: ReturnType<typeof planRollback>): ExpenseRollbackReport => {
+  const { _byId, ...rest } = r
+  void _byId
+  return rest
 }
 
 /** A DL number as stored (cleanLicenceNo); refused when another driver already has it — one licence, one person. */
@@ -1434,10 +1753,34 @@ function licenceOf(no: string, driverId: string | null) {
   return clean
 }
 
+/**
+ * A driver's details as stored (Operations → Drivers, owner 27 Nov 2026): name required; father's name, address and
+ * phone trimmed; dates real calendar dates or "" (date of birth never in the future); DL number unique (licenceOf).
+ * The company isn't entered: it follows from the vehicles driven (an older driver keeps what was recorded).
+ */
+function checkDriverFields<T extends Partial<NewEntity<Driver>>>(input: T, id: string | null): T {
+  const out = { ...input }
+  if (out.name !== undefined) {
+    out.name = out.name.trim().replace(/\s+/g, " ")
+    if (!out.name) throw new Error("Enter the driver's name")
+    if (out.name.length > 120) throw new Error("A driver's name is at most 120 characters.")
+  }
+  for (const k of ["fatherName", "address", "phone"] as const) if (out[k] !== undefined) out[k] = (out[k] ?? "").trim()
+  if (out.phone && !/^[0-9+\-\s()]{6,20}$/.test(out.phone)) throw new Error("Enter a valid phone number")
+  const realDate = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(Date.parse(d)) && new Date(d).toISOString().slice(0, 10) === d
+  for (const [k, label] of [["dateOfBirth", "date of birth"], ["licenseValidTill", "DL expiry date"]] as const)
+    if (out[k] !== undefined && out[k] !== "" && !realDate(out[k] as string)) throw new Error(`Enter a valid ${label}`)
+  if (out.dateOfBirth && out.dateOfBirth > todayISO()) throw new Error("The date of birth can't be in the future.")
+  if (out.licenseNo !== undefined) out.licenseNo = licenceOf(out.licenseNo, id)
+  if (out.companyCode !== undefined && out.companyCode !== null && !COMPANIES.some((c) => c.value === out.companyCode)) throw new Error("Choose VT or VTHPL")
+  return out
+}
+
 async function updateDriver(id: string, patch: Partial<NewEntity<Driver>>) {
   assertDriverAccess()
-  if (patch.licenseNo !== undefined) patch = { ...patch, licenseNo: licenceOf(patch.licenseNo, id) }
+  patch = checkDriverFields(patch, id)
   const before = await drivers.get(id)
+  if (!before) throw new NotFoundError("Driver", id)
   const after = await drivers.update(id, patch)
   audit({ action: statusAction(before, after), ...meta.driver(after), before, after })
   return after
@@ -1517,6 +1860,17 @@ export interface RestorePlan {
 }
 
 /**
+ * The audit events this role may see (Phase 2B, C-8, §6.2): Expense events only for roles holding `expenses` (Dev) —
+ * never their snapshots, amounts or labels for the Owner or Employee; every other module unchanged. Used by every audit
+ * read below (list, search, detail, history, Edited badges, deletion badge and reviews, restore). On the shared
+ * database the read policy has already removed them; this keeps the browser backend the same and is a second barrier.
+ */
+function visibleEvents() {
+  const seesExpense = can(currentRole(), "expenses")
+  return readAuditEvents().filter((e) => e.module !== "Expense" || seesExpense)
+}
+
+/**
  * Everything a restore must pass, without writing anything. Uses the DELETED event's snapshot, the
  * original id and createdAt, and the same rules as creating the record: month lock (and no future-dated station payment),
  * archived vehicle or customer on that date, stock never negative, odometer order, voucher / trip
@@ -1525,7 +1879,7 @@ export interface RestorePlan {
 function planRestore(eventId: string): RestorePlan {
   ensureSeeded()
   if (!hasOwnerAuthority(currentRole())) throw new Error("Only the Owner or Dev can restore deleted records.")
-  const events = readAuditEvents()
+  const events = visibleEvents()
   const e = events.find((x) => x.id === eventId)
   if (!e) throw new NotFoundError("Audit event", eventId)
   if (e.action !== "DELETED") throw new Error("Only deletion events can be restored.")
@@ -1777,6 +2131,19 @@ export const api = {
     /** A status change appends to statusHistory; past months keep the status they had. */
     update: (id: string, patch: Partial<NewEntity<Vehicle>>) => tx(() => updateVehicle(id, patch)),
     transfer: (id: string, customerId: string | null, effectiveDate: string, reason?: string) => tx(() => transferVehicle(id, customerId, effectiveDate, reason)),
+    /**
+     * The vehicle moves to company `companyCode` (VT / VTHPL) from `effectiveDate` (owner, 27 Nov 2026): may be
+     * back-dated, never in the future or before its last recorded change. Appends to companyPeriods (an audited vehicle
+     * edit); earlier dates keep their company. Drivers' deployment history follows.
+     */
+    changeCompany: (id: string, companyCode: CompanyCode, effectiveDate: string) =>
+      tx(async () => {
+        assertCan("vehicles", "edit")
+        const v = await vehicles.get(id)
+        if (!v) throw new NotFoundError("Vehicle", id)
+        if (companyCode === v.companyCode) throw new Error(`The vehicle is already with ${companyCode}.`)
+        return updateVehicle(id, { companyCode }, effectiveDate)
+      }),
     /**
      * POST /api/vehicles/:id/drivers (owner, 21 Nov 2026) — a driver starts driving this vehicle `since` (default today;
      * may be back-dated, never in the future). `vehicles:edit`. Dated, so who drove it in any period stays known
@@ -2103,7 +2470,7 @@ export const api = {
     create: (input: NewEntity<Driver>) =>
       tx(async () => {
         assertDriverAccess()
-        const after = await drivers.create({ ...input, licenseNo: licenceOf(input.licenseNo ?? "", null) })
+        const after = await drivers.create(checkDriverFields({ fatherName: "", dateOfBirth: "", address: "", ...input, companyCode: input.companyCode ?? null }, null))
         audit({ action: "CREATED", ...meta.driver(after), after })
         return after
       }),
@@ -2432,8 +2799,8 @@ export const api = {
   },
 
   /**
-   * Expense → Road Tax, Insurance, Fitness, Fines, Broker Charges (owner, 25 Nov 2026). Phase 1: the browser backend
-   * only — refused on the shared database (no table yet), never silently dropped. Permission `expenses`: Dev only while
+   * Expense → Road Tax, Insurance, Fitness, Fines, Broker Charges (owner, 25 Nov 2026). Both backends (Phase 2B: the
+   * shared database's expense schema, 20261128000000). Permission `expenses`: Dev only while
    * the module is unreleased (owner, 25 Nov 2026; UNRELEASED in permissions.ts) — reads refused too. Month lock on the
    * old and new date; delete with a reason. Audited.
    */
@@ -2442,24 +2809,60 @@ export const api = {
       if (!can(currentRole(), "expenses")) throw new PermissionError("Your role can't view expense records.")
       return expenses.list()
     },
-    create: (input: ExpenseInput) =>
+    /**
+     * Phase 2B (§5.4): 1. a `requestId` already used → the saved record (same content) or a refusal (changed content) —
+     * never a second record, even with `confirmSameDay`; 2. the Phase 1 rules; 3. broker bulk payments only — another
+     * payment with the same broker, date and amount needs `confirmSameDay` (PossibleDuplicateError otherwise).
+     */
+    create: (input: ExpenseInput, opts: { confirmSameDay?: boolean } = {}) =>
       tx(async () => {
         assertCan("expenses", "create")
+        const rid = typeof input.requestId === "string" && input.requestId ? input.requestId : null
+        const used = rid ? readCollection("expenses").find((e) => e.requestId === rid) : undefined
+        if (used) {
+          let same = false
+          try {
+            same = sameExpenseContent(checkExpense(input, used.id), used)
+          } catch (e) {
+            if (e instanceof NeedData) throw e // the shared backend loading data on demand — never a validation result
+            same = false
+          }
+          if (same) return used // a retry of a save that already happened: nothing new is written
+          throw new Error("This request was already saved with different values — reopen the form. Nothing was saved.")
+        }
+        // Broker Charges (owner, 27 Nov 2026): a bill (owed — never money paid) or a bulk payment to the broker. Opening
+        // balances are never added here; the ones recorded stay and can be edited.
+        if (input.section === "BROKER" && input.entryType !== "PAYMENT" && input.entryType !== "CHARGE") throw new Error("Record a bill or a payment to the broker.")
+        if (input.section === "BROKER" && input.entryType === "CHARGE" && Number(input.paidAmount)) throw new Error("A bill records what's owed — record money paid to the broker with Add Payment.")
         const data = checkExpense(input)
+        assertExpenseMonthOpen(data.section, data.date)
         assertMonthEditable(data.date)
+        if (data.section === "BROKER") assertBrokerLedger([...readCollection("expenses"), { ...data, id: "new", createdAt: "9999", updatedAt: "9999" }], [data.broker], data.entryType)
+        const twin = samePaymentAs(data)
+        if (twin && !opts.confirmSameDay) throw new PossibleDuplicateError({ id: twin.id, label: `a payment of ${formatINR(twin.paidAmount)} to ${twin.broker} on ${formatDate(twin.date)}` })
         const after = await expenses.create(data)
         audit({ action: "CREATED", ...meta.expense(after), after })
         return after
       }),
-    update: (id: string, input: ExpenseInput, reason?: string) =>
+    update: (id: string, input: ExpenseInput, reason?: string, opts: { confirmSameDay?: boolean } = {}) =>
       tx(async () => {
         assertCan("expenses", "edit")
         const before = await expenses.get(id)
         if (!before) throw new NotFoundError("Expense", id)
+        assertExpenseMonthOpen(before.section, before.date)
         assertMonthEditable(before.date)
         if (input.section !== before.section) throw new Error(`This is a ${EXPENSE_SECTIONS[before.section].one}; it can't be moved to ${EXPENSE_SECTIONS[input.section]?.title ?? "another section"}.`)
+        // A bill stays a bill, a payment a payment, an opening balance an opening balance (owner, 27 Nov 2026).
+        if (before.section === "BROKER" && (input.entryType ?? "CHARGE") !== before.entryType) throw new Error(`This is ${before.entryType === "PAYMENT" ? "a payment" : before.entryType === "BROUGHT_FORWARD" ? "an opening balance" : "a bill"} — it stays one. Record the other kind as a new entry.`)
         const data = checkExpense(input, id)
+        assertExpenseMonthOpen(data.section, data.date)
         assertMonthEditable(data.date)
+        if (data.section === "BROKER") assertBrokerLedger(readCollection("expenses").map((e) => (e.id === id ? { ...e, ...data } : e)), [before.broker, data.broker], data.entryType)
+        const twin = samePaymentAs(data, id)
+        if (twin && !opts.confirmSameDay) throw new PossibleDuplicateError({ id: twin.id, label: `a payment of ${formatINR(twin.paidAmount)} to ${twin.broker} on ${formatDate(twin.date)}` })
+        // An edit keeps the record's own request id and import batch (they describe how it was created).
+        data.requestId = before.requestId ?? null
+        data.importBatchId = before.importBatchId ?? null
         const after = await expenses.update(id, data)
         audit({ action: "UPDATED", ...meta.expense(after), before, after, reason: reason?.trim() || undefined })
         return after
@@ -2471,10 +2874,128 @@ export const api = {
         assertReason(reason)
         const before = await expenses.get(id)
         if (!before) return
+        assertExpenseMonthOpen(before.section, before.date)
         assertMonthEditable(before.date)
-        assertLocalExpenses()
+        if (before.section === "BROKER") assertBrokerLedger(readCollection("expenses").filter((e) => e.id !== id), [before.broker], before.entryType)
         await expenses.remove(id)
         audit({ action: "DELETED", ...meta.expense(before), before, reason: reason.trim() })
+      }),
+  },
+
+  /**
+   * Import of a browser backup's Expense data into the shared database (Phase 2B, §7; Dev only, shared database only).
+   * `importPlan` and `rollbackPlan` are dry runs (read methods — never written); `importApply` writes the batch, the new
+   * brokers, entries and locks **as they are** (id, createdAt, updatedAt, date) in one transaction, with one CREATED
+   * event each (its time = the import; its note = the original dates). Nothing is ever overwritten or deleted by it.
+   */
+  expenseImport: {
+    list: async () => {
+      if (currentRole() !== "DEV") throw new PermissionError("Only Dev can see Expense imports.")
+      return expenseImportBatches.list()
+    },
+    importPlan: async (file: unknown, label: string) => publicPlan(await planExpenseImport(file, label)),
+    importApply: (file: unknown, label: string) =>
+      tx(async () => {
+        const plan = await planExpenseImport(file, label)
+        if (plan.appliedAs) throw new Error(`This file was already imported (batch ${plan.appliedAs}). Nothing was saved.`)
+        if (plan.blocking.length) throw new Error(`The import can't be applied: ${plan.blocking.join("; ")}. Nothing was saved.`)
+        const imported = (c: ImportCollection) => new Set(plan.items.filter((i) => i.sourceCollection === c && i.outcome === "IMPORTED").map((i) => i.sourceId))
+        const [eIds, bIds, lIds] = [imported("expenses"), imported("brokers"), imported("expense_month_locks")]
+        if (!eIds.size && !bIds.size && !lIds.size) throw new Error("Nothing new to import from this file. Nothing was saved.")
+        const at = new Date().toISOString()
+        const batch = await expenseImportBatches.create({
+          sourceLabel: plan.label, sourceFingerprint: plan.fingerprint, exportedAt: plan.exportedAt,
+          summary: { ...publicPlan(plan), items: undefined, importedAt: at } as Record<string, unknown>,
+          sourceSnapshot: plan._source as unknown as Record<string, unknown>,
+          // In the database's order (collection, then source id) so the batch reads back exactly as written.
+          items: plan.items
+            .map((i) => ({ sourceCollection: i.sourceCollection, sourceId: i.sourceId, outcome: i.outcome, targetId: i.targetId, reason: i.reason }))
+            .sort((a, b) => (a.sourceCollection < b.sourceCollection ? -1 : a.sourceCollection > b.sourceCollection ? 1 : a.sourceId < b.sourceId ? -1 : a.sourceId > b.sourceId ? 1 : 0)),
+        })
+        audit({ action: "CREATED", ...meta.importBatch(batch), after: { ...batch, sourceSnapshot: undefined } as never, note: `${eIds.size} entries, ${bIds.size} brokers, ${lIds.size} locks imported` })
+        const note = (x: { createdAt: string; updatedAt: string }) => `Imported from browser backup '${plan.label}' (batch ${batch.id}) — originally entered ${x.createdAt}, last changed ${x.updatedAt}`
+        // Exact records (never repository.create): id, createdAt, updatedAt and the business date are kept.
+        const newBrokers = plan._source.brokers.filter((b) => bIds.has(b.id))
+        if (newBrokers.length) writeCollection("brokers", [...readCollection("brokers"), ...newBrokers])
+        for (const b of newBrokers) audit({ action: "CREATED", ...meta.broker(b), after: b, note: note(b) })
+        const accepted = plan._source.expenses
+          .filter((x) => eIds.has(x.id))
+          .map((x) => {
+            const stamp = assignmentOn(assignmentIndex(periodsOf(x.vehicleIds[0] ?? "")), x.vehicleIds[0] ?? "", x.date)?.customerId ?? null
+            return { ...x, customerId: x.section === "BROKER" ? x.customerId ?? null : stamp, requestId: null, importBatchId: batch.id } as Expense
+          })
+        if (accepted.length) writeCollection("expenses", [...readCollection("expenses"), ...accepted])
+        for (const x of accepted) audit({ action: "CREATED", ...meta.expense(x), after: x, note: note(x) })
+        const locks = plan._source.expense_month_locks.filter((l) => lIds.has(l.id))
+        if (locks.length) writeCollection("expense_month_locks", [...readCollection("expense_month_locks"), ...locks])
+        for (const l of locks) audit({ action: "MONTH_LOCKED", ...meta.expenseMonth(l), after: l, note: note(l) })
+        return { batch: { ...batch, sourceSnapshot: {} }, plan: publicPlan(plan) }
+      }),
+    rollbackPlan: async (batchId: string) => publicRollback(planRollback(batchId)),
+    /** Deletes the batch's eligible entries (open section-months, unchanged since import, ledger safe) — never more (§7.6). */
+    rollbackApply: (batchId: string, reason: string) =>
+      tx(async () => {
+        if (currentRole() !== "DEV") throw new PermissionError("Only Dev can roll back an import.")
+        assertReason(reason)
+        const plan = planRollback(batchId)
+        const batch = readCollection("expense_import_batches").find((b) => b.id === batchId)!
+        for (const id of plan.eligible) {
+          const before = plan._byId.get(id)!
+          await expenses.remove(id)
+          audit({ action: "DELETED", ...meta.expense(before), before, reason: `Import rollback of batch ${batchId}: ${reason.trim()}` })
+        }
+        const report: ExpenseRollbackReport = { ...publicRollback(plan), deleted: [...plan.eligible] }
+        // The batch row itself never changes; its summary event records the rollback (before / after = the rollback status).
+        const previous = visibleEvents().filter((e) => e.recordId === batchId && e.action === "UPDATED").at(-1)
+        audit({ action: "UPDATED", ...meta.importBatch(batch), before: { rollback: (previous?.after as { rollback?: unknown } | null)?.rollback ?? "none" } as never, after: { rollback: report } as never, note: `Rollback ${report.status}` })
+        return report
+      }),
+  },
+
+  /**
+   * Expense months (owner, 25 Nov 2026): each section's month is OPEN until it is locked explicitly, after review — never
+   * by the calendar. Locking one section's month leaves the other sections open. A locked section-month's records are
+   * read-only for every role (add, edit, delete refused above). No unlock yet.
+   * Both backends (shared database: expense.month_locks, append-only). Audited (MONTH_LOCKED).
+   */
+  expenseMonths: {
+    list: async () => {
+      if (!can(currentRole(), "expenses")) throw new PermissionError("Your role can't view expense months.")
+      return expenseMonthLocks.list()
+    },
+    lock: (section: ExpenseSection, month: string) =>
+      tx(async () => {
+        assertCan("expenses", "edit")
+        if (!Object.hasOwn(EXPENSE_SECTIONS, section)) throw new Error("Choose the Expense section")
+        if (typeof month !== "string" || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("Choose the month to lock")
+        if (month > todayISO().slice(0, 7)) throw new Error("A month that hasn't started yet can't be locked.")
+        if (isMonthLocked(readCollection("expense_month_locks"), section, month)) throw new Error(`${format(parseISO(`${month}-01`), "MMMM yyyy")} is already locked in ${EXPENSE_SECTIONS[section].title}.`)
+        const after = await expenseMonthLocks.create({ month, section })
+        audit({ action: "MONTH_LOCKED", ...meta.expenseMonth(after), after })
+        return after
+      }),
+  },
+
+  /**
+   * The broker list (Broker Charges, owner 25 Nov 2026): picked in the entry form, added there (Add New Broker). Names
+   * unique — spaces and case ignored. Same permission and Phase 1 rule as the entries (browser backend only). Audited.
+   */
+  brokers: {
+    list: async () => {
+      if (!can(currentRole(), "expenses")) throw new PermissionError("Your role can't view brokers.")
+      return brokers.list()
+    },
+    create: (name: string) =>
+      tx(async () => {
+        assertCan("expenses", "create")
+        const clean = typeof name === "string" ? name.trim().replace(/\s+/g, " ") : ""
+        if (!clean) throw new Error("Enter the broker's name")
+        if (clean.length > 80) throw new Error("A broker name is at most 80 characters.")
+        const same = readCollection("brokers").find((b) => textKey(b.name) === textKey(clean))
+        if (same) throw new Error(`${same.name} is already in the broker list.`)
+        const after = await brokers.create({ name: clean })
+        audit({ action: "CREATED", ...meta.broker(after), after })
+        return after
       }),
   },
 
@@ -3306,8 +3827,8 @@ export const api = {
         return ids.get(key)!.has(e.recordId)
       }
       const reviews = new Map(readAuditReviews().map((r) => [r.eventId, { at: r.at, actor: r.actor }]))
-      const restored = restorations(readAuditEvents())
-      return newestFirst(readAuditEvents()).map((e) => ({
+      const restored = restorations(visibleEvents())
+      return newestFirst(visibleEvents()).map((e) => ({
         ...e,
         recordExists: exists(e),
         review: reviews.get(e.id) ?? null,
@@ -3319,7 +3840,7 @@ export const api = {
     async unreviewedDeletions() {
       await latency()
       if (!hasOwnerAuthority(currentRole())) throw new Error("Only the Owner or Dev can review deletions.")
-      return unreviewedDeletions(readAuditEvents(), readAuditReviews()).length
+      return unreviewedDeletions(visibleEvents(), readAuditReviews()).length
     },
     /**
      * Owner marks deletion events as reviewed. Only DELETED events count; already-reviewed ones are
@@ -3329,7 +3850,7 @@ export const api = {
       tx(async () => {
         if (!hasOwnerAuthority(currentRole())) throw new Error("Only the Owner or Dev can review deletions.")
         const reviewed = new Set(readAuditReviews().map((r) => r.eventId))
-        const open = new Set(readAuditEvents().filter((e) => e.action === "DELETED" && !reviewed.has(e.id)).map((e) => e.id)) // restored deletions can be marked too
+        const open = new Set(visibleEvents().filter((e) => e.action === "DELETED" && !reviewed.has(e.id)).map((e) => e.id)) // restored deletions can be marked too
         const ids = [...new Set(eventIds)].filter((id) => open.has(id))
         if (ids.length) appendAuditReviews(ids.map((eventId) => ({ eventId, at: new Date().toISOString(), actor: currentActor() })))
         return ids.length
@@ -3359,7 +3880,7 @@ export const api = {
         if (reasonError) throw new Error(reasonError)
         const plan = planRestore(eventId)
         if (plan.duplicate && !opts.confirmNotDuplicate) throw new PossibleDuplicateError(plan.duplicate)
-        const deletion = readAuditEvents().find((x) => x.id === eventId)!
+        const deletion = visibleEvents().find((x) => x.id === eventId)!
         writeCollection(plan.key, [...readCollection(plan.key), plan.record] as never)
         if (plan.key === "diesel_entries") {
           // The vehicle's "last known km" cache, as when the fill was first saved.
@@ -3387,13 +3908,13 @@ export const api = {
       await latency()
       const role = currentRole()
       if (!can(role, "audit")) return [] // the AdBlue profiles see no audit history (owner, 11 Nov 2026)
-      return recordHistory(readAuditEvents(), recordId).filter((e) => can(role, MODULE_RESOURCE[e.module] ?? "audit"))
+      return recordHistory(visibleEvents(), recordId).filter((e) => can(role, MODULE_RESOURCE[e.module] ?? "audit"))
     },
     /** Ids of records with at least one edit — drives the "Edited" badge. */
     async editedIds() {
       await latency()
       if (!can(currentRole(), "audit")) return []
-      return [...editedIds(readAuditEvents())] // an array: a Set doesn't survive JSON (shared backend)
+      return [...editedIds(visibleEvents())] // an array: a Set doesn't survive JSON (shared backend)
     },
   },
 }

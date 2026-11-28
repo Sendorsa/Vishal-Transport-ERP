@@ -28,10 +28,11 @@ select jsonb_build_object(
       and table_schema in (select nspname from pg_namespace where nspname not like 'pg\_%' and nspname not in ('information_schema', 'auth', 'storage', 'realtime', '_realtime', 'vault', 'extensions', 'graphql', 'graphql_public', 'net', 'supabase_functions', 'supabase_migrations', 'cron', 'pgsodium', 'pgsodium_masks', 'pgbouncer', '_analytics', 'topology', 'pgmq'))
       and format('%I.%I', table_schema, table_name) not in (
         'public.profiles', 'core.role_permissions', 'core.companies', 'core.vehicle_types', 'core.app_settings', 'finance.payment_categories', 'audit.events', 'audit.reviews',
-        'core.customers', 'core.customer_status_periods', 'core.customer_pricing', 'core.customer_route_rates', 'core.drivers', 'core.vehicles', 'core.vehicle_driver_periods', 'core.vehicle_document_alerts', 'core.vehicle_status_periods',
+        'core.customers', 'core.customer_status_periods', 'core.customer_pricing', 'core.customer_route_rates', 'core.drivers', 'core.vehicles', 'core.vehicle_driver_periods', 'core.vehicle_company_periods', 'core.vehicle_document_alerts', 'core.vehicle_status_periods',
         'core.vehicle_assignments', 'core.month_locks', 'fuel.fuel_stations', 'fuel.tankers', 'fuel.diesel_entries', 'fuel.tanker_loads', 'fuel.tanker_transfers',
         'fuel.tanker_adjustments', 'fuel.adblue_purchases', 'fuel.adblue_vendors', 'fuel.adblue_entries', 'fuel.adblue_payments', 'fuel.adblue_payment_allocations', 'fuel.industrial_supplies', 'fuel.industrial_supply_allocations', 'finance.payments', 'finance.payment_allocations', 'ops.trips', 'ops.tyre_masters', 'ops.tyre_invoices', 'ops.tyre_invoice_items', 'ops.tyre_payments', 'ops.tyre_payment_allocations', 'billing.invoices',
-        'billing.invoice_lines', 'billing.invoice_line_trips', 'core.profile_customer_access')
+        'billing.invoice_lines', 'billing.invoice_line_trips', 'core.profile_customer_access',
+        'expense.import_batches', 'expense.import_items', 'expense.brokers', 'expense.entries', 'expense.entry_vehicles', 'expense.month_locks')
   ),
   'account_fks', (
     select coalesce(jsonb_agg(jsonb_build_object('from', (select n.nspname || '.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = conrelid), 'to', (select n.nspname || '.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = confrelid), 'on_delete', confdeltype::text) order by conrelid::regclass::text), '[]'::jsonb)

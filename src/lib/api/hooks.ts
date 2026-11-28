@@ -8,6 +8,7 @@ import { useMemo } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { api } from "./client"
+import { PossibleDuplicateError } from "./index"
 import { withVersions } from "@/lib/versions"
 import { useCan, useCompanyScope, useRole } from "@/lib/app-state"
 import { canEditMonth, monthLockInfo } from "@/domain/month-lock"
@@ -17,7 +18,7 @@ import { scopeDataset, type Dataset } from "@/domain/analytics"
 import { withRuns } from "@/domain/adblue"
 import type { InvoiceDraftInput } from "@/domain/invoicing"
 import type { ExpenseInput } from "@/domain/expenses"
-import type { CollectionKey, Customer, Driver, EntityStatus, NewEntity, Payment, Settings, Vehicle } from "@/lib/types"
+import type { CollectionKey, CompanyCode, Customer, Driver, EntityStatus, ExpenseSection, NewEntity, Payment, Settings, Vehicle } from "@/lib/types"
 import type { AdBlueInput, AdBluePaymentInput, AdBluePurchaseInput, AdBlueVendorInput, IndustrialSupplyInput, TyreInvoiceInput, TyreMasterInput, TyrePaymentInput, TankerAdjustmentInput, TankerInput, TankerLoadInput, TankerTransferInput, TripInput } from "@/lib/api"
 
 export const queryKeys = {
@@ -42,6 +43,9 @@ export const queryKeys = {
   tyre_invoices: ["tyre_invoices"] as const,
   tyre_payments: ["tyre_payments"] as const,
   expenses: ["expenses"] as const,
+  brokers: ["brokers"] as const,
+  expense_month_locks: ["expense_month_locks"] as const,
+  expense_import_batches: ["expense_import_batches"] as const,
   adblue_payments: ["adblue_payments"] as const,
   invoices: ["invoices"] as const,
   payments: ["payments"] as const,
@@ -67,7 +71,7 @@ const MODULE_KEYS: Record<string, (keyof typeof queryKeys)[]> = {
   Settings: ["settings"],
   "Month Lock": ["month_locks"],
   Tyre: ["tyre_invoices", "tyre_masters", "tyre_payments"],
-  Expense: ["expenses"],
+  Expense: ["expenses", "brokers", "expense_month_locks", "expense_import_batches"],
 }
 export function keysForModules(modules: string[]) {
   return [...new Set([...modules.flatMap((m) => MODULE_KEYS[m] ?? []), "audit" as const])]
@@ -300,6 +304,16 @@ export function useVehicleDriver() {
   })
 }
 
+/** A vehicle moves to VT / VTHPL from a date (dated company history, owner 27 Nov 2026). */
+export function useChangeVehicleCompany() {
+  const invalidate = useInvalidate()
+  return useMutation({
+    mutationFn: ({ id, companyCode, effectiveDate, version }: { id: string; companyCode: CompanyCode; effectiveDate: string; version?: string }) => v(id, version, () => api.vehicles.changeCompany(id, companyCode, effectiveDate)),
+    onSuccess: () => invalidate("vehicles"),
+    onError,
+  })
+}
+
 export function useSaveDriver() {
   const invalidate = useInvalidate()
   return useMutation({
@@ -432,8 +446,9 @@ export function useCreateVehicleType() {
 /** Creates a driver with just a name (details can be filled later) and returns its id. */
 export function useCreateDriverByName() {
   const save = useSaveDriver()
-  return async (name: string, companyCode: Driver["companyCode"]) => {
-    const d = await save.mutateAsync({ name, phone: "", licenseNo: "", licenseValidTill: "", companyCode, status: "ACTIVE" })
+  // No company: a driver's company follows from the vehicles they drive (owner, 27 Nov 2026).
+  return async (name: string) => {
+    const d = await save.mutateAsync({ name, phone: "", licenseNo: "", licenseValidTill: "", companyCode: null, status: "ACTIVE" })
     return d.id
   }
 }
@@ -772,10 +787,56 @@ export function useExpenses() {
 export function useSaveExpense() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ id, data, reason, version }: { id?: string; data: ExpenseInput; reason?: string; version?: string }) => v(id, version, () => (id ? api.expenses.update(id, data, reason) : api.expenses.create(data))),
+    mutationFn: ({ id, data, reason, version, confirmSameDay }: { id?: string; data: ExpenseInput; reason?: string; version?: string; confirmSameDay?: boolean }) =>
+      v(id, version, () => (id ? api.expenses.update(id, data, reason, { confirmSameDay }) : api.expenses.create(data, { confirmSameDay }))),
     onSuccess: () => invalidate("expenses"),
-    onError,
+    // A second identical broker payment (PossibleDuplicateError) is answered by the payment dialog's own confirmation.
+    onError: (e: unknown) => (e instanceof PossibleDuplicateError ? undefined : onError(e)),
   })
+}
+
+/** Expense import (Phase 2B; Dev, shared database): applied batches, dry runs and apply / rollback. */
+export function useExpenseImports() {
+  const can = useCan()
+  return useQuery({ queryKey: queryKeys.expense_import_batches, queryFn: () => api.expenseImport.list(), enabled: can("system") })
+}
+export function useExpenseImportPlan() {
+  return useMutation({ mutationFn: ({ file, label }: { file: unknown; label: string }) => api.expenseImport.importPlan(file, label), onError })
+}
+export function useApplyExpenseImport() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: ({ file, label }: { file: unknown; label: string }) => api.expenseImport.importApply(file, label), onSuccess: () => invalidate("expenses", "brokers", "expense_month_locks", "expense_import_batches"), onError })
+}
+export function useExpenseRollbackPlan() {
+  return useMutation({ mutationFn: (batchId: string) => api.expenseImport.rollbackPlan(batchId), onError })
+}
+export function useApplyExpenseRollback() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: ({ batchId, reason }: { batchId: string; reason: string }) => api.expenseImport.rollbackApply(batchId, reason), onSuccess: () => invalidate("expenses", "expense_import_batches"), onError })
+}
+
+/** Expense months locked after review (owner, 25 Nov 2026), for roles that may view Expense. */
+export function useExpenseMonthLocks() {
+  const can = useCan()
+  return useQuery({ queryKey: queryKeys.expense_month_locks, queryFn: () => api.expenseMonths.list(), enabled: can("expenses") })
+}
+
+/** Lock Month: one section's month becomes read-only (no unlock in Phase 1). */
+export function useLockExpenseMonth() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: ({ section, month }: { section: ExpenseSection; month: string }) => api.expenseMonths.lock(section, month), onSuccess: () => invalidate("expense_month_locks", "expenses"), onError })
+}
+
+/** The broker list (Broker Charges entry form), for roles that may view Expense. */
+export function useBrokers() {
+  const can = useCan()
+  return useQuery({ queryKey: queryKeys.brokers, queryFn: () => api.brokers.list(), enabled: can("expenses") })
+}
+
+/** Add New Broker: saves the name (duplicates refused, spaces / case ignored) and returns the broker. */
+export function useCreateBroker() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: (name: string) => api.brokers.create(name), onSuccess: () => invalidate("brokers"), onError })
 }
 
 export function useDeleteExpense() {

@@ -139,6 +139,13 @@ export interface Vehicle extends BaseEntity {
    */
   driverPeriods?: DriverPeriod[]
   /**
+   * The company (VT / VTHPL) the vehicle belonged to, and when (owner, 27 Nov 2026; core.vehicle_company_periods).
+   * Inclusive dates; endDate null = now. Appended by the API when `companyCode` changes (with an effective date) —
+   * never rewritten. Empty / absent = the vehicle has always been `companyCode` (no change recorded). A driver's company
+   * deployment = their driver periods × these (src/domain/drivers.ts).
+   */
+  companyPeriods?: CompanyPeriod[]
+  /**
    * Resolved document expiry alerts (owner, 22 Nov 2026; core.vehicle_document_alerts), oldest first. Append-only:
    * written only by the API when an edit changes a document's expiry date while its alert is active — never by the
    * caller, never changed or removed. Active alerts are not stored: they follow from the current dates
@@ -179,12 +186,31 @@ export interface DriverPeriod {
   endDate: string | null
 }
 
+/** One vehicle's company for a span of dates (yyyy-MM-dd, inclusive; endDate null = current). */
+export interface CompanyPeriod {
+  id: string
+  companyCode: CompanyCode
+  startDate: string
+  endDate: string | null
+}
+
+/**
+ * The central driver master (Operations → Drivers, owner 27 Nov 2026) — the one source of a driver's identity: every
+ * record that names a driver stores its id (vehicle driver periods, trips, fines). The company a driver works for is
+ * never kept here by hand: it follows from the vehicles they drive (driverDeployments in src/domain/drivers.ts).
+ */
 export interface Driver extends BaseEntity {
   name: string
+  /** "" = not recorded. */
+  fatherName?: string
+  /** yyyy-MM-dd; "" = not recorded. */
+  dateOfBirth?: string
+  address?: string
   phone: string
   licenseNo: string
   licenseValidTill: string
-  companyCode: CompanyCode
+  /** Kept only as recorded on older drivers (core.drivers.company_code); null on new ones. Never shown as deployment. */
+  companyCode: CompanyCode | null
   status: EntityStatus
 }
 
@@ -192,11 +218,14 @@ export interface Driver extends BaseEntity {
 
 /** Expense → Road Tax, Insurance, Fitness, Fines, Broker Charges (owner, 25 Nov 2026). */
 export type ExpenseSection = "ROAD_TAX" | "INSURANCE" | "FITNESS" | "FINE" | "BROKER"
-/** Broker Charges only: a new charge (expense), a payment to the broker, or the opening balance brought forward (neither is an expense). */
+/**
+ * Broker Charges only (owner, 27 Nov 2026): CHARGE = one bill (raises the broker's outstanding), PAYMENT = a bulk payment
+ * to the broker (lowers it — never tied to a bill), BROUGHT_FORWARD = the broker's opening outstanding.
+ */
 export type BrokerEntryType = "CHARGE" | "PAYMENT" | "BROUGHT_FORWARD"
 
 /**
- * One expense record (collection `expenses`, browser backend only — not on the shared database yet). One flat shape for
+ * One expense record (collection `expenses`; shared database: expense.entries + entry_vehicles, Phase 2B). One flat shape for
  * the five sections; a field a section doesn't use stays "" / 0 / null. Vehicles come from the vehicle master (ids only).
  */
 export interface Expense extends BaseEntity {
@@ -226,6 +255,22 @@ export interface Expense extends BaseEntity {
   paymentReference: string
   /** Fines: PAID / UNPAID. */
   paymentStatus: "PAID" | "UNPAID" | null
+  /** Fines: the driver, from the driver master (owner, 27 Nov 2026); null = not recorded. Name and DL are read from the master. */
+  driverId?: string | null
+  /** Broker bill (CHARGE): the bill / invoice number, "" = none on the bill (owner, 27 Nov 2026). */
+  billNo?: string
+  /**
+   * Idempotency key of the create that saved this entry (Phase 2B): one per form submission, re-sent on retry — a second
+   * call with the same key returns this record instead of saving another. null on imported and older records.
+   */
+  requestId?: string | null
+  /** The import batch that brought this record from a browser backup (Phase 2B); never set by a form. */
+  importBatchId?: string | null
+  /**
+   * Road Tax: true once the entry was saved with its paying company chosen explicitly (required since 27 Nov 2026).
+   * Absent on older entries, whose company the form used to fill from the vehicle — flagged for review until re-saved.
+   */
+  companyConfirmed?: boolean
   /** Fines: the day it was paid. Broker: the cleared date. */
   paymentDate: string
   /** Broker Charges. */
@@ -235,6 +280,47 @@ export interface Expense extends BaseEntity {
   operatingCompany: string
   vehicleCount: number
   paidAmount: number
+}
+
+/** A broker (Broker Charges, owner 25 Nov 2026; Phase 1 browser only): the list the entry form picks from and adds to. */
+export interface Broker extends BaseEntity {
+  /** Unique, spaces and case ignored. Entries store this name in `Expense.broker`. */
+  name: string
+}
+
+/**
+ * An Expense month locked after review (owner, 25 Nov 2026; Phase 1 browser only): its records become read-only for
+ * every role. Only explicit locks exist — a month is never locked by the calendar. Who and when: createdAt and the
+ * MONTH_LOCKED audit event. Separate from the Monthly Sheet Lock (MonthLock), which other modules use.
+ */
+export interface ExpenseMonthLock extends BaseEntity {
+  /** "yyyy-MM" */
+  month: string
+  /** The section whose month is locked (each section locks its own months). Absent = every section. */
+  section?: ExpenseSection
+}
+
+/** One source record's outcome in an import batch (Phase 2B). */
+export interface ExpenseImportItem {
+  sourceCollection: "expenses" | "brokers" | "expense_month_locks"
+  sourceId: string
+  outcome: "IMPORTED" | "ALREADY_PRESENT" | "CONFLICT" | "REJECTED" | "SKIPPED"
+  targetId: string | null
+  reason: string
+}
+
+/**
+ * An applied import of a browser backup's Expense data into the shared database (Phase 2B; Dev only). Never changed or
+ * deleted; `summary` is the dry-run report as applied, `sourceSnapshot` the file's three Expense collections.
+ */
+export interface ExpenseImportBatch extends BaseEntity {
+  sourceLabel: string
+  /** sha256 (hex) of the file's canonical Expense collections — one batch per file. */
+  sourceFingerprint: string
+  exportedAt: string | null
+  summary: Record<string, unknown>
+  sourceSnapshot: Record<string, unknown>
+  items: ExpenseImportItem[]
 }
 
 /* ----------------------------------------------------------------------------- Trips */
@@ -887,6 +973,9 @@ export interface CollectionMap {
   tyre_invoices: TyreInvoice
   tyre_payments: TyrePayment
   expenses: Expense
+  brokers: Broker
+  expense_month_locks: ExpenseMonthLock
+  expense_import_batches: ExpenseImportBatch
   month_locks: MonthLock
   invoices: Invoice
   payments: Payment

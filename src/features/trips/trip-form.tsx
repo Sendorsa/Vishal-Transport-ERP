@@ -66,7 +66,8 @@ export function TripForm({ trip, defaultCustomerId, onDone }: { trip?: Trip; def
   const vehicleList = (vehicles.data ?? []).filter(
     (v) => (v.status === "ACTIVE" || v.status === "MAINTENANCE") && (!customer || (v.companyCode === customer.companyCode && (!v.assignedCustomerId || v.assignedCustomerId === customer.id || v.id === trip?.vehicleId)))
   )
-  const driverList = (drivers.data ?? []).filter((d) => d.status === "ACTIVE" && (!customer || d.companyCode === customer.companyCode))
+  // Every active driver from the central master (owner, 27 Nov 2026) — a driver's company follows from their vehicles.
+  const driverList = (drivers.data ?? []).filter((d) => d.status === "ACTIVE" || d.id === trip?.driverId)
 
   const distance = Math.max(0, (Number(w.endKm) || 0) - (Number(w.startKm) || 0))
   const price = useMemo(

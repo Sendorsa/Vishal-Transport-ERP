@@ -24,7 +24,9 @@ import { CONFIRMED_TANKERS } from "@/domain/tanker"
 import type {
   BusinessUnit,
   CompanyCode,
+  Broker,
   Expense,
+  ExpenseMonthLock, ExpenseImportBatch,
   IndustrialSupply,
   TyreInvoice,
   TyrePayment,
@@ -448,6 +450,9 @@ export interface SeedData {
   tyre_invoices: TyreInvoice[]
   tyre_payments: TyrePayment[]
   expenses: Expense[]
+  brokers: Broker[]
+  expense_month_locks: ExpenseMonthLock[]
+  expense_import_batches: ExpenseImportBatch[]
   adblue_payments: AdBluePayment[]
   invoices: Invoice[]
   payments: Payment[]
@@ -901,5 +906,5 @@ export function generateSeedData(today = new Date(), seed = 20260405): SeedData 
     })
   }
 
-  return { settings, customers, vehicles, drivers, trips, diesel_entries: diesel, adblue_entries: [], vehicle_assignments: [], month_locks: [], fuel_stations: structuredClone(DEFAULT_FUEL_STATIONS), adblue_purchases: [], adblue_vendors: [], tanker_loads: [], tanker_dispenses: [], tankers: [], tanker_transfers: [], tanker_adjustments: [], industrial_supplies: [], tyre_masters: defaultRepairTypes(today.toISOString()), tyre_invoices: [], tyre_payments: [], expenses: [], adblue_payments: [], invoices, payments }
+  return { settings, customers, vehicles, drivers, trips, diesel_entries: diesel, adblue_entries: [], vehicle_assignments: [], month_locks: [], fuel_stations: structuredClone(DEFAULT_FUEL_STATIONS), adblue_purchases: [], adblue_vendors: [], tanker_loads: [], tanker_dispenses: [], tankers: [], tanker_transfers: [], tanker_adjustments: [], industrial_supplies: [], tyre_masters: defaultRepairTypes(today.toISOString()), tyre_invoices: [], tyre_payments: [], expenses: [], brokers: [], expense_month_locks: [], expense_import_batches: [], adblue_payments: [], invoices, payments }
 }

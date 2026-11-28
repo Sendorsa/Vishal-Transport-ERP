@@ -5,20 +5,21 @@
  */
 import { expiryOf } from "@/domain/compliance"
 import { round2 } from "@/lib/format"
-import type { BrokerEntryType, Expense, ExpenseSection, NewEntity } from "@/lib/types"
+import type { BrokerEntryType, Expense, ExpenseMonthLock, ExpenseSection, NewEntity } from "@/lib/types"
 
 export const EXPENSE_SECTIONS: Record<ExpenseSection, { title: string; one: string; href: string; recordType: string }> = {
-  ROAD_TAX: { title: "Road Tax", one: "road tax payment", href: "/expenses/road-tax", recordType: "Road tax" },
-  INSURANCE: { title: "Insurance", one: "insurance premium", href: "/expenses/insurance", recordType: "Insurance" },
-  FITNESS: { title: "Fitness", one: "fitness (FC) payment", href: "/expenses/fitness", recordType: "Fitness" },
-  FINE: { title: "Fines", one: "fine", href: "/expenses/fines", recordType: "Fine" },
-  BROKER: { title: "Broker Charges", one: "broker entry", href: "/expenses/broker-charges", recordType: "Broker charge" },
+  ROAD_TAX: { title: "Road Tax", one: "road tax payment", href: "/road-tax", recordType: "Road tax" },
+  INSURANCE: { title: "Insurance", one: "insurance premium", href: "/insurance", recordType: "Insurance" },
+  FITNESS: { title: "Fitness", one: "fitness (FC) payment", href: "/fitness", recordType: "Fitness" },
+  FINE: { title: "Fines", one: "fine", href: "/fines", recordType: "Fine" },
+  BROKER: { title: "Broker Charges", one: "broker bill", href: "/broker-charges", recordType: "Broker charge" },
 }
 
 export const BROKER_ENTRY_LABEL: Record<BrokerEntryType, string> = {
-  CHARGE: "New charge",
-  PAYMENT: "Payment to broker",
-  BROUGHT_FORWARD: "Opening balance (brought forward)",
+  // Owner, 27 Nov 2026: every bunk bill is recorded on its own; payments are made to the broker in bulk.
+  CHARGE: "Bill",
+  PAYMENT: "Payment",
+  BROUGHT_FORWARD: "Opening balance",
 }
 
 /** What the API stores from the form: everything but the customer, which it stamps from the vehicle's assignment. */
@@ -36,7 +37,7 @@ export function blankExpense(section: ExpenseSection, today: string): ExpenseInp
   return {
     section, date: today, vehicleIds: [], companyCode: null, description: "", amount: 0, remarks: "", validFrom: "", validTill: "",
     taxType: "", provider: "", policyNo: "", paymentMode: "", paymentReference: "", paymentStatus: section === "FINE" ? "UNPAID" : null, paymentDate: "",
-    entryType: section === "BROKER" ? "CHARGE" : null, broker: "", purpose: "", operatingCompany: "", vehicleCount: 0, paidAmount: 0,
+    entryType: section === "BROKER" ? "CHARGE" : null /* a new broker entry is a bill; payments go through Add Payment (owner, 27 Nov 2026) */, broker: "", purpose: "", operatingCompany: "", vehicleCount: 0, paidAmount: 0,
   }
 }
 
@@ -56,7 +57,7 @@ export function expenseProblems(x: ExpenseInput, today: string): ExpenseProblems
   if (!ISO.test(x.date)) p.date = "Enter the date"
   else if (x.date > today) p.date = "The date can't be in the future"
   if (singleVehicle(x.section) && x.vehicleIds.length !== 1) p.vehicleIds = "Choose the vehicle"
-  if (broker && type !== "CHARGE" && x.vehicleIds.length) p.vehicleIds = "Only a new charge names vehicles"
+  if (broker && type === "BROUGHT_FORWARD" && x.vehicleIds.length) p.vehicleIds = "An opening balance names no vehicle"
   if (new Set(x.vehicleIds).size !== x.vehicleIds.length) p.vehicleIds = "A vehicle is listed twice"
 
   // Validity period: both dates or neither; Insurance always has one.
@@ -74,7 +75,9 @@ export function expenseProblems(x: ExpenseInput, today: string): ExpenseProblems
 
   switch (x.section) {
     case "ROAD_TAX":
-      if (!x.description.trim()) p.description = "Enter what was paid (e.g. the tax)"
+      if (!x.description.trim()) p.description = "Choose the tax description"
+      // The company making the payment, chosen on the entry — never taken from the vehicle (owner, 27 Nov 2026).
+      if (x.companyCode !== "VT" && x.companyCode !== "VTHPL") p.companyCode = "Choose the paying company (VT or VTHPL)"
       break
     case "INSURANCE":
       if (!x.provider.trim()) p.provider = "Enter the insurance provider"
@@ -89,13 +92,13 @@ export function expenseProblems(x: ExpenseInput, today: string): ExpenseProblems
       }
       break
     case "BROKER": {
-      if (!x.broker.trim()) p.broker = "Enter the broker"
+      if (!x.broker.trim()) p.broker = "Choose the broker" // owner, 25 Nov 2026: every payment names its broker
       if (!Number.isInteger(x.vehicleCount) || x.vehicleCount < 0) p.vehicleCount = "Enter a whole number"
       else if (x.vehicleIds.length && x.vehicleCount !== x.vehicleIds.length) p.vehicleCount = "Must match the vehicles chosen"
       if (!money(x.paidAmount)) p.paidAmount = "Enter an amount in rupees (up to 2 decimals)"
       if (type === "CHARGE") {
-        if (!x.description.trim()) p.description = "Enter what the charge is for"
-        if (!p.paidAmount && !p.amount && x.paidAmount > x.amount) p.paidAmount = "More than the charge — record the rest as a Payment to broker"
+        if (!x.description.trim()) p.description = "Enter what the bill is for"
+        if (!p.paidAmount && !p.amount && x.paidAmount > x.amount) p.paidAmount = "More than the bill — record money paid with Add Payment"
       }
       if (type === "PAYMENT" && !(x.paidAmount > 0)) p.paidAmount = "Enter the amount paid"
       if (type === "BROUGHT_FORWARD" && x.paidAmount) p.paidAmount = "Record payments as their own entry"
@@ -141,8 +144,69 @@ export function validityOf(x: Expense, all: Expense[], today: string): ValidityS
 
 /* ------------------------------------------------------------------ Broker Charges */
 
-/** One entry's effect on what we owe the broker: + charge or opening balance, − payment. */
-export const brokerBalanceOf = (x: Pick<Expense, "amount" | "paidAmount">) => round2(x.amount - x.paidAmount)
+/**
+ * One entry's effect on what we owe the broker (owner, 27 Nov 2026): + a bill or the opening balance (less any Amount
+ * Paid recorded on an older bill itself), − a payment. A payment belongs to the broker, never to a bill.
+ */
+export const brokerBalanceOf = (x: Pick<Expense, "entryType" | "amount" | "paidAmount">) => round2(x.entryType === "PAYMENT" ? -x.paidAmount : x.amount - x.paidAmount)
+
+const TYPE_ORDER = { BROUGHT_FORWARD: 0, CHARGE: 1, PAYMENT: 2 } as const
+/** A broker's entries in ledger order: date, then opening → bills → payments on one day, then as entered. */
+export const ledgerOrder = <T extends Pick<Expense, "date" | "entryType" | "createdAt" | "id">>(xs: T[]) =>
+  [...xs].sort((a, b) => a.date.localeCompare(b.date) || TYPE_ORDER[a.entryType ?? "CHARGE"] - TYPE_ORDER[b.entryType ?? "CHARGE"] || a.createdAt.localeCompare(b.createdAt) || (a.id < b.id ? -1 : 1))
+
+/** One broker's entries (spelling / spacing ignored). */
+export const entriesOf = (all: Expense[], broker: string) => all.filter((x) => x.section === "BROKER" && textKey(x.broker) === textKey(broker))
+
+/** One broker's ledger, oldest first, with the outstanding after each entry. */
+export function brokerLedger(all: Expense[], broker: string) {
+  let bal = 0
+  return ledgerOrder(entriesOf(all, broker)).map((x) => ({ entry: x, balance: (bal = round2(bal + brokerBalanceOf(x))) }))
+}
+
+/** What's owed to the broker after every entry up to `asOf` (default: all). */
+export const brokerOutstanding = (all: Expense[], broker: string, asOf = "9999-12-31") =>
+  round2(entriesOf(all, broker).reduce((t, x) => t + (x.date <= asOf ? brokerBalanceOf(x) : 0), 0))
+
+/** The first entry after which the broker would be owed less than nothing (paid more than billed), or null. */
+export function firstOverpayment(entries: Expense[]) {
+  let bal = 0
+  for (const x of ledgerOrder(entries)) {
+    bal = round2(bal + brokerBalanceOf(x))
+    if (bal < -0.005) return { entry: x, balance: bal }
+  }
+  return null
+}
+
+/**
+ * Per broker for one month (Opening Outstanding + Bills − Payments = Closing Outstanding):
+ *   opening  — owed before the month, + an opening balance dated in it;
+ *   bills    — the bills dated in the month;
+ *   payments — payments dated in the month (+ Amount Paid recorded on an older bill of the month);
+ *   closing  — owed at the month's end.
+ * Brokers with no entry up to the month's end are left out.
+ */
+export function brokerMonthAccounts(all: Expense[], month: string) {
+  const first = `${month}-01`
+  const last = monthEnd(month)
+  const by = new Map<string, { broker: string; opening: number; bills: number; payments: number; closing: number }>()
+  for (const x of all) {
+    if (x.section !== "BROKER" || x.date > last) continue
+    const k = textKey(x.broker)
+    const a = by.get(k) ?? { broker: x.broker || "No broker named", opening: 0, bills: 0, payments: 0, closing: 0 }
+    const inMonth = x.date >= first
+    if (!inMonth || x.entryType === "BROUGHT_FORWARD") a.opening += brokerBalanceOf(x)
+    else if (x.entryType === "CHARGE") {
+      a.bills += x.amount
+      a.payments += x.paidAmount
+    } else a.payments += x.paidAmount
+    a.closing += brokerBalanceOf(x)
+    by.set(k, a)
+  }
+  return [...by.values()]
+    .map((a) => ({ broker: a.broker, opening: round2(a.opening), bills: round2(a.bills), payments: round2(a.payments), closing: round2(a.closing) }))
+    .sort((a, b) => b.closing - a.closing || a.broker.localeCompare(b.broker))
+}
 
 export type BrokerPayStatus = "PAID" | "PARTIAL" | "UNPAID"
 /** A new charge's own status (paid on that row); payments and openings have none. */
@@ -157,13 +221,16 @@ export function brokerPayStatus(x: Expense): BrokerPayStatus | null {
  *   paid     — money recorded as paid:
  *              Road Tax, Insurance, Fitness = Σ Amount — each of their entries IS a payment made on its transaction
  *              date (the RTO / insurance books list what was paid; the form asks for the amount paid);
- *              Broker = Σ Amount Paid on its charges (partly paid counts only what was paid; unpaid 0);
+ *              Broker = Σ Amount Paid on its charges + Σ payments to the broker (opening balances: neither);
  *              Fines = Σ the fines marked Paid (a fine is paid in full or not at all; unpaid 0).
  */
 export function sectionCards(section: ExpenseSection, records: Expense[]): { invoices: number; paid: number } {
   if (section === "BROKER") {
+    // Paid: Amount Paid on charges (older entries) + payments to the broker — since 25 Nov 2026 the form records money
+    // paid only as "Payment to broker". Opening balances are neither invoices nor payments. Each amount counted once.
     const charges = records.filter((x) => x.entryType === "CHARGE")
-    return { invoices: charges.length, paid: round2(charges.reduce((s, x) => s + x.paidAmount, 0)) }
+    const paid = records.filter((x) => x.entryType === "CHARGE" || x.entryType === "PAYMENT")
+    return { invoices: charges.length, paid: round2(paid.reduce((s, x) => s + x.paidAmount, 0)) }
   }
   const paid = section === "FINE" ? records.filter((x) => x.paymentStatus === "PAID") : records
   return { invoices: records.length, paid: round2(paid.reduce((s, x) => s + x.amount, 0)) }
@@ -177,6 +244,63 @@ export function latestPayment(expenses: Expense[], vehicleId: string, section: "
   return expenses.filter((x) => x.section === section && x.vehicleIds.includes(vehicleId)).sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))[0] ?? null
 }
 
+/* ------------------------------------------------------------------ accounting months (owner, 25 Nov 2026) */
+
+/**
+ * The accounting month of a record = its own transaction date (`date`): Road Tax / Insurance / Fitness — the date it was
+ * paid (never Tax From / Valid Till or policy dates); Fines — the fine date; Broker — the Pay Date. Never stored, so a
+ * record can't drift from its date, and records saved before months existed need no migration.
+ */
+export const monthOf = (x: Pick<Expense, "date">) => x.date.slice(0, 7)
+
+/**
+ * Only an explicit lock locks a month — never the calendar. Each section locks its own months (owner, 25 Nov 2026):
+ * locking Broker Charges for November leaves November open in the other four. A lock without a section applies to all.
+ */
+export const isMonthLocked = (locks: Pick<ExpenseMonthLock, "month" | "section">[], section: ExpenseSection, month: string) =>
+  locks.some((l) => l.month === month && (l.section ?? section) === section)
+
+/** "yyyy-MM" shifted by n months (n may be negative). */
+export function addMonthKey(month: string, n: number) {
+  const [y, m] = month.split("-").map(Number)
+  const t = y * 12 + (m - 1) + n
+  return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, "0")}`
+}
+
+/** Last day ("yyyy-MM-dd") of a "yyyy-MM" month. */
+export const monthEnd = (month: string) => `${month}-${String(new Date(Date.UTC(+month.slice(0, 4), +month.slice(5, 7), 0)).getUTCDate()).padStart(2, "0")}`
+
+/**
+ * One section's month selector, newest first: the months holding at least one of its records + the current month
+ * (always, so a new month can be started — `current` comes from India time, never hard-coded). Empty past months —
+ * even between two populated ones — are not offered.
+ */
+export const expenseMonthOptions = (records: Pick<Expense, "date">[], current: string) => [...new Set([current, ...records.map(monthOf)])].sort().reverse()
+
+/**
+ * One section's summary of one month (`records` = the section's records, every month; only `month`'s are counted):
+ *   records     — its entries dated in the month (broker payments and opening balances included);
+ *   expense     — new expenses: the amounts; Broker: the bills (a payment settles bills already counted; an opening
+ *                 balance was owed before);
+ *   paid        — the section's Total Amount Paid (sectionCards) for the month;
+ *   outstanding — Fines: the month's unpaid fines; Broker: owed at the month's end (Σ brokerBalanceOf over every broker
+ *                 entry up to then — bills and opening balances add, payments subtract);
+ *                 Road Tax / Insurance / Fitness: null (each entry is a payment, nothing is owed).
+ */
+export function monthSummary(section: ExpenseSection, records: Expense[], month: string) {
+  const inMonth = records.filter((x) => x.section === section && monthOf(x) === month)
+  // Broker: the bills (a payment settles bills already counted; an opening balance was owed before).
+  const expense = inMonth.reduce((t, x) => t + (section !== "BROKER" || x.entryType === "CHARGE" ? x.amount : 0), 0)
+  const end = monthEnd(month)
+  const outstanding =
+    section === "FINE"
+      ? inMonth.reduce((t, x) => t + (x.paymentStatus === "PAID" ? 0 : x.amount), 0)
+      : section === "BROKER"
+        ? records.reduce((t, x) => t + (x.section === "BROKER" && x.date <= end ? brokerBalanceOf(x) : 0), 0)
+        : null
+  return { records: inMonth.length, expense: round2(expense), paid: sectionCards(section, inMonth).paid, outstanding: outstanding === null ? null : round2(outstanding) }
+}
+
 /* ------------------------------------------------------------------ suggestions (no master list) */
 
 /**
@@ -184,7 +308,8 @@ export function latestPayment(expenses: Expense[], vehicleId: string, section: "
  * description already recorded in the section is offered again (no separate description master exists or is created).
  */
 const STARTERS: Record<ExpenseSection, string[]> = {
-  ROAD_TAX: ["MV TAX", "TN TP", "GREEN TAX", "DIFF TAX", "TEMPORARY REGISTRATION"],
+  // The descriptions in the road tax books 2025–26 and 2026–27 (Data/RTO Expense Data; FC FEES rows belong to Fitness).
+  ROAD_TAX: ["MV TAX", "TN TP", "GREEN TAX", "DIFF TAX", "DIFFERENCE TAX FLOOR AREA", "TEMPORARY REGISTRATION"],
   INSURANCE: [],
   FITNESS: ["FC FEES", "FC 1 YEAR", "FC 2 YEARS"],
   FINE: [],
@@ -212,8 +337,12 @@ export const descriptionOptions = (all: Expense[], section: ExpenseSection) => u
 export interface ExpenseFilters {
   search: string
   vehicleId: string
-  /** A customer id, NO_CUSTOMER, or (Broker) an operating company. */
+  /** A customer id, NO_CUSTOMER, (Road Tax) the paying company VT / VTHPL, or (Broker) an operating company. */
   company: string
+  /** Road Tax → Customer Company (owner, 27 Nov 2026): a customer id or NO_CUSTOMER — the record's `customerId`. */
+  customer: string
+  /** Road Tax → Description (owner, 27 Nov 2026): textKey of the description (case and spacing ignored). */
+  description: string
   from: string
   to: string
   /** Road Tax: tax type. Fines: fine type. */
@@ -223,14 +352,18 @@ export interface ExpenseFilters {
   /** Validity status (Road Tax, Insurance, Fitness) or payment status (Fines, Broker). */
   status: string
 }
-export const NO_FILTERS: ExpenseFilters = { search: "", vehicleId: "", company: "", from: "", to: "", taxType: "", provider: "", broker: "", status: "" }
+export const NO_FILTERS: ExpenseFilters = { search: "", vehicleId: "", company: "", customer: "", description: "", from: "", to: "", taxType: "", provider: "", broker: "", status: "" }
 export const NO_CUSTOMER = "__none"
 
 /** `regs`: the entry's registrations; `status`: its validity or payment status. */
-export function expenseMatches(x: Expense, f: ExpenseFilters, regs: string[], status: string | null) {
-  const company = x.section === "BROKER" ? textKey(x.operatingCompany) : (x.customerId ?? NO_CUSTOMER)
+/** `extra`: more text the search covers (a fine's driver name and DL number, from the driver master). */
+export function expenseMatches(x: Expense, f: ExpenseFilters, regs: string[], status: string | null, extra: string[] = []) {
+  // Company: Broker — operating company; Road Tax — the paying company, VT / VTHPL (owner, 27 Nov 2026); else the customer.
+  const company = x.section === "BROKER" ? textKey(x.operatingCompany) : x.section === "ROAD_TAX" ? (x.companyCode ?? "") : (x.customerId ?? NO_CUSTOMER)
   if (f.vehicleId && !x.vehicleIds.includes(f.vehicleId)) return false
   if (f.company && company !== f.company) return false
+  if (f.customer && (x.customerId ?? NO_CUSTOMER) !== f.customer) return false
+  if (f.description && textKey(x.description) !== f.description) return false
   if (f.from && x.date < f.from) return false
   if (f.to && x.date > f.to) return false
   if (f.taxType && textKey(x.taxType) !== f.taxType) return false
@@ -240,6 +373,6 @@ export function expenseMatches(x: Expense, f: ExpenseFilters, regs: string[], st
   const q = f.search.trim().toUpperCase()
   if (!q) return true
   const compact = q.replace(/[^A-Z0-9]/g, "")
-  const hay = [x.description, x.remarks, x.taxType, x.provider, x.policyNo, x.broker, x.purpose, x.operatingCompany, x.paymentReference].join(" ").toUpperCase()
+  const hay = [x.description, x.remarks, x.taxType, x.provider, x.policyNo, x.broker, x.purpose, x.operatingCompany, x.paymentReference, ...extra].join(" ").toUpperCase()
   return hay.includes(q) || (!!compact && regs.some((r) => r.replace(/[^A-Z0-9]/gi, "").toUpperCase().includes(compact)))
 }

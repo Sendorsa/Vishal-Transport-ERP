@@ -15,7 +15,8 @@ import { Field, NoAccess, PageSkeleton } from "@/components/shared/misc"
 import { PageHeader } from "@/components/shared/page-header"
 import { SimpleSelect } from "@/components/shared/simple-select"
 import { StatusBadge } from "@/components/shared/status-badge"
-import { fetchBackup, useAdminAction, useDrivers, useRestoreBackup, useSetDriverStatus, useSettings, useSetupTankerMasters, useUpdateSettings } from "@/lib/api/hooks"
+import { ExpenseImportPanel } from "./expense-import"
+import { fetchBackup, useAdminAction, useRestoreBackup, useSettings, useSetupTankerMasters, useUpdateSettings } from "@/lib/api/hooks"
 import { isSharedBackend } from "@/lib/api/client"
 import { can as roleCan, hasOwnerAuthority } from "@/lib/permissions"
 import { useCan, useRole, useSession } from "@/lib/app-state"
@@ -23,7 +24,7 @@ import { STATES } from "@/lib/constants"
 import { formatDate } from "@/lib/format"
 import { can as canRole, ROLES, type Resource } from "@/lib/permissions"
 import { storageUsage } from "@/lib/storage/local-store"
-import type { CompanyProfile, EntityStatus, ExpenseCategory, Settings, VehicleType } from "@/lib/types"
+import type { CompanyProfile, ExpenseCategory, Settings, VehicleType } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 export function SettingsView() {
@@ -56,7 +57,6 @@ export function SettingsView() {
         <TabsList className="max-w-full justify-start overflow-x-auto">
           <TabsTrigger value="company">Company profile</TabsTrigger>
           <TabsTrigger value="categories">Expense categories</TabsTrigger>
-          <TabsTrigger value="drivers">Drivers</TabsTrigger>
           <TabsTrigger value="types">Vehicle types</TabsTrigger>
           <TabsTrigger value="roles">Roles</TabsTrigger>
           <TabsTrigger value="data">Data</TabsTrigger>
@@ -89,9 +89,6 @@ export function SettingsView() {
           <CategoryManager items={s.expenseCategories} editable={editable} onChange={(expenseCategories) => patch({ expenseCategories })} />
         </TabsContent>
 
-        <TabsContent value="drivers" className="mt-4">
-          <DriverManager editable={editable} />
-        </TabsContent>
 
         <TabsContent value="types" className="mt-4">
           <VehicleTypeManager items={s.vehicleTypes} editable={editable} onChange={(vehicleTypes) => patch({ vehicleTypes })} />
@@ -224,52 +221,6 @@ function TaxDefaults({ settings, editable, onSave }: { settings: Settings; edita
 
 function ActiveToggle({ active, disabled, onChange }: { active: boolean; disabled?: boolean; onChange: (v: boolean) => void }) {
   return <Switch checked={active} disabled={disabled} onCheckedChange={onChange} onClick={(e) => e.stopPropagation()} />
-}
-
-const STATUS_OPTIONS = [
-  { value: "ACTIVE", label: "Active" },
-  { value: "INACTIVE", label: "Inactive" },
-  { value: "ARCHIVED", label: "Archived" },
-]
-
-/** Active / Inactive / Archived. Archived records stay in every report but can't be picked for new entries. */
-function StatusSelect({ value, disabled, onChange }: { value: EntityStatus; disabled?: boolean; onChange: (s: EntityStatus) => void }) {
-  if (disabled) return <StatusBadge status={value} />
-  return <SimpleSelect value={value} onChange={(v) => onChange(v as EntityStatus)} options={STATUS_OPTIONS} className="ml-auto h-8 w-32" />
-}
-
-function DriverManager({ editable }: { editable: boolean }) {
-  const drivers = useDrivers()
-  const setStatus = useSetDriverStatus()
-  return (
-    <div className="space-y-3">
-      <p className="text-sm text-muted-foreground">Drivers are added from the vehicle form. Archive a driver who has left — past trips and vehicles still show their name.</p>
-      <DataTable
-        data={[...(drivers.data ?? [])].sort((a, b) => a.name.localeCompare(b.name))}
-        getRowId={(d) => d.id}
-        pageSize={50}
-        columns={[
-          { id: "name", header: "Driver", cell: (d) => <span className={d.status === "ARCHIVED" ? "font-medium text-muted-foreground" : "font-medium"}>{d.name}</span> },
-          { id: "phone", header: "Phone", cell: (d) => <span className="text-muted-foreground">{d.phone || "—"}</span> },
-          {
-            id: "status",
-            header: "Status",
-            align: "right",
-            cell: (d) => (
-              <StatusSelect
-                value={d.status}
-                disabled={!editable}
-                onChange={async (status) => {
-                  await setStatus.mutateAsync({ id: d.id, version: d.updatedAt, status })
-                  toast.success(`${d.name} ${status === "ARCHIVED" ? "archived — history kept" : status === "ACTIVE" ? "restored" : "set inactive"}`)
-                }}
-              />
-            ),
-          },
-        ]}
-      />
-    </div>
-  )
 }
 
 function CategoryManager({ items, editable, onChange }: { items: ExpenseCategory[]; editable: boolean; onChange: (x: ExpenseCategory[]) => void }) {
@@ -511,6 +462,8 @@ function SharedDataPanel() {
           </CardContent>
         </Card>
       )}
+      {/* Phase 2B: Dev imports the Expense data of a browser backup (dry run first). */}
+      {role === "DEV" && <ExpenseImportPanel />}
     </div>
   )
 }
@@ -559,7 +512,7 @@ function DataPanel() {
             <CardTitle className="flex items-center gap-2 text-sm font-semibold">
               <Upload className="size-4" /> Restore from file
             </CardTitle>
-            <CardDescription>Replaces all data with a backup or prepared import file. A backup of the current data downloads first.</CardDescription>
+            <CardDescription>Replaces all data with a backup or prepared import file. A backup of the current data downloads first. This browser&apos;s Expense records are kept as they are.</CardDescription>
           </CardHeader>
           <CardContent>
             <Input type="file" accept="application/json,.json" onChange={(e) => pick(e.target.files?.[0])} />
@@ -574,7 +527,7 @@ function DataPanel() {
               <CardTitle className="flex items-center gap-2 text-sm font-semibold">
                 <RotateCcw className="size-4" /> Reset demo data
               </CardTitle>
-              <CardDescription>Regenerates ~6 months of realistic data ending today. Your changes will be lost.</CardDescription>
+              <CardDescription>Regenerates ~6 months of realistic data ending today. Your changes will be lost; Expense records are kept.</CardDescription>
             </CardHeader>
             <CardContent>
               <Button variant="outline" onClick={() => setConfirm("reset")}>
@@ -587,7 +540,7 @@ function DataPanel() {
               <CardTitle className="flex items-center gap-2 text-sm font-semibold">
                 <Trash2 className="size-4" /> Start empty
               </CardTitle>
-              <CardDescription>Deletes every customer, vehicle, driver, fuel station, entry and payment in this browser, leaving the clean workspace: company settings, the three tankers (JIO, Office, Mini) with zero stock, and the internal tanker source.</CardDescription>
+              <CardDescription>Deletes every customer, vehicle, driver, fuel station, entry and payment in this browser, leaving the clean workspace: company settings, the three tankers (JIO, Office, Mini) with zero stock, and the internal tanker source. Expense records are kept.</CardDescription>
             </CardHeader>
             <CardContent>
               <Button variant="destructive" onClick={() => setConfirm("clear")}>

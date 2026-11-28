@@ -46,6 +46,9 @@ const STORAGE_NAME: Record<CollectionKey, string> = {
   tyre_invoices: "tyreInvoices",
   tyre_payments: "tyrePayments",
   expenses: "expenses",
+  brokers: "brokers",
+  expense_month_locks: "expenseMonthLocks",
+  expense_import_batches: "expenseImportBatches",
   adblue_payments: "adBluePayments",
   invoices: "invoices",
   payments: "payments",
@@ -73,6 +76,9 @@ export const COLLECTION_KEYS: CollectionKey[] = [
   "tyre_invoices",
   "tyre_payments",
   "expenses",
+  "brokers",
+  "expense_month_locks",
+  "expense_import_batches",
   "adblue_payments",
   "invoices",
   "payments",
@@ -208,8 +214,11 @@ export function readAuditEvents(): AuditEvent[] {
 }
 
 export const AUDIT_REVIEWS_KEY = `${STORAGE_PREFIX}auditReviews`
-/** Keys that survive data resets: the audit trail and the Owner's reviews of it. */
-const KEPT_KEYS = new Set([AUDIT_KEY, AUDIT_REVIEWS_KEY])
+/**
+ * Keys that survive data resets: the audit trail and the Owner's reviews of it — and, since Phase 2B (owner, 27 Nov
+ * 2026), this browser's Expense data: Clear all data, Restore from file and Load demo data never delete it (C-7).
+ */
+const KEPT_KEYS = new Set([AUDIT_KEY, AUDIT_REVIEWS_KEY, ...["expenses", "brokers", "expenseMonthLocks", "expenseImportBatches"].map((k) => `${STORAGE_PREFIX}${k}`)])
 
 /** The Owner's reviews of deletion events, oldest first. */
 export function readAuditReviews(): AuditReview[] {

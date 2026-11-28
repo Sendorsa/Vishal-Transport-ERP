@@ -17,7 +17,9 @@
 -- PART B — OPTIONAL, separate, after Part A: clears the audit trail. The trail is append-only for every role, so this
 --   switches the append-only triggers off INSIDE the transaction only, deletes, switches them back on and verifies they
 --   are on before committing (an error rolls the switch back too). Mode BUSINESS keeps the "Accounts" history (who
---   created / changed each user account); mode ALL removes it too. Leaves one DATA_RESET marker.
+--   created / changed each user account); mode ALL removes it too. BOTH modes keep every Expense event (module
+--   'Expense') and every review of one — Expense is never reset, so its history isn't either (Phase 2B, §8.2); the
+--   script proves they are unchanged before committing. Leaves one DATA_RESET marker.
 --
 -- TO RUN A PART: select from its "begin;" to its "commit;", replace TYPE-PROJECT-REF with the project ref
 -- (and, for Part B, TYPE-MODE with BUSINESS or ALL), and Run. A success ends with "Success. No rows returned".
@@ -32,13 +34,16 @@ declare
   cleared constant text[] := array['core.profile_customer_access', 'finance.payment_allocations', 'finance.payments', 'billing.invoice_line_trips', 'billing.invoice_lines', 'billing.invoices',
     'ops.trips', 'ops.tyre_payment_allocations', 'ops.tyre_payments', 'ops.tyre_invoice_items', 'ops.tyre_invoices', 'ops.tyre_masters', 'fuel.adblue_payment_allocations', 'fuel.adblue_payments', 'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.adblue_vendors', 'fuel.diesel_entries', 'fuel.industrial_supply_allocations', 'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments',
     'fuel.tankers', 'core.vehicle_assignments', 'core.vehicle_status_periods', 'core.customer_route_rates', 'core.customer_pricing', 'core.customer_status_periods',
-    'core.month_locks', 'core.vehicle_driver_periods', 'core.vehicle_document_alerts', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'];
+    'core.month_locks', 'core.vehicle_driver_periods', 'core.vehicle_company_periods', 'core.vehicle_document_alerts', 'core.vehicles', 'core.drivers', 'core.customers', 'fuel.fuel_stations'];
   -- Tables whose rows carry their own audit record id (child rows are covered by their parent's event).
   audited constant text[] := array['finance.payments', 'billing.invoices', 'ops.trips', 'ops.tyre_payments', 'ops.tyre_invoices', 'ops.tyre_masters', 'fuel.adblue_payments', 'fuel.adblue_entries', 'fuel.adblue_purchases', 'fuel.adblue_vendors', 'fuel.diesel_entries',
     'fuel.industrial_supplies', 'fuel.tanker_loads', 'fuel.tanker_transfers', 'fuel.tanker_adjustments', 'fuel.tankers', 'core.month_locks', 'core.vehicles', 'core.drivers', 'core.customers',
     'fuel.fuel_stations'];
   kept constant text[] := array['public.profiles', 'core.role_permissions', 'core.companies', 'core.vehicle_types', 'core.app_settings', 'finance.payment_categories',
-    'audit.events', 'audit.reviews'];
+    'audit.events', 'audit.reviews',
+    -- Expense (Phase 2B): never reset (§8.2).
+    'expense.import_batches', 'expense.import_items', 'expense.brokers', 'expense.entries', 'expense.entry_vehicles', 'expense.month_locks'];
+  expense_before text;
   t text;
   n bigint;
   unknown text;
@@ -59,6 +64,16 @@ begin
     and format('%I.%I', table_schema, table_name) <> all (cleared || kept);
   if unknown is not null then
     raise exception 'Tables this script does not know: % — inspect them first. Nothing was changed.', unknown;
+  end if;
+  -- Expense (Phase 2B) is NEVER touched by this reset (docs/PHASE_2B_IMPLEMENTATION_PLAN.md §8.2). It stops before deleting
+  -- anything when Expense records name vehicles, customers or drivers this reset would delete, and proves at the end that
+  -- every Expense table is exactly as it was.
+  if to_regclass('expense.entries') is not null then
+    if exists (select 1 from expense.entry_vehicles) or exists (select 1 from expense.entries where customer_id is not null or driver_id is not null) then
+      raise exception 'Expense records reference vehicles, customers or drivers this reset would delete — Expense is never reset. Nothing was changed.';
+    end if;
+    expense_before := (select md5(concat_ws('|', (select count(*) from expense.entries), (select coalesce(sum(amount), 0) from expense.entries), (select coalesce(sum(paid_amount), 0) from expense.entries),
+      (select count(*) from expense.entry_vehicles), (select count(*) from expense.brokers), (select count(*) from expense.month_locks), (select count(*) from expense.import_batches), (select count(*) from expense.import_items))));
   end if;
 
   -- One SYSTEM deletion event per business row, with its full snapshot (checked at COMMIT: no change without its event).
@@ -105,6 +120,9 @@ begin
   if not exists (select 1 from fuel.fuel_stations where id = 'dv_tanker' and is_tanker_source) then
     raise exception 'The internal tanker source dv_tanker is missing — aborting, nothing changed.';
   end if;
+  if to_regclass('expense.entries') is not null and (select md5(concat_ws('|', (select count(*) from expense.entries), (select coalesce(sum(amount), 0) from expense.entries), (select coalesce(sum(paid_amount), 0) from expense.entries), (select count(*) from expense.entry_vehicles), (select count(*) from expense.brokers), (select count(*) from expense.month_locks), (select count(*) from expense.import_batches), (select count(*) from expense.import_items)))) is distinct from expense_before then
+    raise exception 'An Expense table would change — Expense is never reset. Aborting, nothing changed.';
+  end if;
 end $$;
 commit;
 
@@ -116,6 +134,9 @@ do $$
 declare
   mode constant text := current_setting('vt.audit_clear', true);
   profiles_before text := (select md5(coalesce(string_agg(concat_ws('|', id, user_id, email, role, status, full_name, activated_at, updated_at), ',' order by id), '')) from public.profiles);
+  -- Expense history (Phase 2B): every Expense event and every review of one, kept exactly.
+  expense_history_before text := (select md5(concat((select coalesce(string_agg(to_jsonb(e)::text, ',' order by e.id), '') from audit.events e where e.module = 'Expense'),
+    '|', (select coalesce(string_agg(to_jsonb(r)::text, ',' order by r.event_id), '') from audit.reviews r join audit.events e on e.id = r.event_id where e.module = 'Expense'))));
   ev bigint;
   rv bigint;
 begin
@@ -133,9 +154,10 @@ begin
   -- The append-only guard is off only inside this transaction; it is switched back on below, and verified.
   alter table audit.reviews disable trigger reviews_append_only;
   alter table audit.events disable trigger events_append_only;
-  delete from audit.reviews r where mode = 'ALL' or exists (select 1 from audit.events e where e.id = r.event_id and e.module <> 'Accounts');
+  -- Never an Expense event or a review of one (both modes).
+  delete from audit.reviews r where exists (select 1 from audit.events e where e.id = r.event_id and e.module <> 'Expense' and (mode = 'ALL' or e.module <> 'Accounts'));
   get diagnostics rv = row_count;
-  delete from audit.events where mode = 'ALL' or module <> 'Accounts';
+  delete from audit.events where module <> 'Expense' and (mode = 'ALL' or module <> 'Accounts');
   get diagnostics ev = row_count;
   alter table audit.events enable trigger events_append_only;
   alter table audit.reviews enable trigger reviews_append_only;
@@ -153,8 +175,12 @@ begin
   if (select md5(coalesce(string_agg(concat_ws('|', id, user_id, email, role, status, full_name, activated_at, updated_at), ',' order by id), '')) from public.profiles) <> profiles_before then
     raise exception 'A profile would change — aborting, nothing changed.';
   end if;
-  if mode = 'BUSINESS' and exists (select 1 from audit.events where module not in ('Accounts', 'System')) then
+  if mode = 'BUSINESS' and exists (select 1 from audit.events where module not in ('Accounts', 'System', 'Expense')) then
     raise exception 'Business audit events remain — aborting, nothing changed.';
+  end if;
+  if (select md5(concat((select coalesce(string_agg(to_jsonb(e)::text, ',' order by e.id), '') from audit.events e where e.module = 'Expense'),
+      '|', (select coalesce(string_agg(to_jsonb(r)::text, ',' order by r.event_id), '') from audit.reviews r join audit.events e on e.id = r.event_id where e.module = 'Expense')))) <> expense_history_before then
+    raise exception 'An Expense audit event or review would change — Expense history is never reset. Aborting, nothing changed.';
   end if;
 end $$;
 commit;

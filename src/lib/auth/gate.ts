@@ -31,7 +31,9 @@ export const landingFor = (role: Role | null | undefined) => (role === "TATA_ADB
  * Pages of modules still unreleased (permissions.ts UNRELEASED) and the permission each needs: Expense is Dev only
  * (owner, 25 Nov 2026). Any other role is sent to its landing page before the page renders.
  */
-const UNRELEASED_PAGES: [string, Resource][] = [["/expenses", "expenses"]]
+// The five Expense pages sit at the top level (owner, 26 Nov 2026: /road-tax … /broker-charges); "/expenses" stays gated
+// as the old prefix (next.config.ts redirects its five pages to the new URLs).
+const UNRELEASED_PAGES: [string, Resource][] = [["/road-tax", "expenses"], ["/insurance", "expenses"], ["/fitness", "expenses"], ["/fines", "expenses"], ["/broker-charges", "expenses"], ["/expenses", "expenses"]]
 export const unreleasedPageAllowed = (role: Role | null | undefined, pathname: string) =>
   UNRELEASED_PAGES.every(([prefix, resource]) => !(pathname === prefix || pathname.startsWith(`${prefix}/`)) || (!!role && can(role, resource)))
 

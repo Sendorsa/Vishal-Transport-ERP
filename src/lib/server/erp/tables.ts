@@ -5,12 +5,16 @@
  * Generated columns (amounts, totals) are read, never written: the database computes money exactly (D-12).
  */
 import type {
+  Broker,
+  Expense,
+  ExpenseImportBatch,
+  ExpenseMonthLock,
   TyreInvoice,
   TyreInvoiceItem,
   TyreMaster,
   TyrePayment,
   AdBlueVendor,
-  AdBlueEntry, AdBluePayment, AdBluePurchase, AuditEvent, AuditReview, CollectionKey, CompanyProfile, Customer, DieselEntry, Driver, DriverPeriod,
+  AdBlueEntry, AdBluePayment, AdBluePurchase, AuditEvent, AuditReview, CollectionKey, CompanyProfile, Customer, DieselEntry, Driver, CompanyPeriod, DriverPeriod,
   ExpenseCategory, FuelStation, IndustrialSupply, Invoice, MonthLock, Payment, ResolvedDocumentAlert, Settings, StatusPeriod, Tanker, TankerAdjustment, TankerLoad,
   TankerTransfer, Trip, Vehicle, VehicleAssignment, VehicleType,
 } from "@/lib/types"
@@ -166,6 +170,9 @@ const vehicles: Spec<Vehicle> = {
     const drivers = new Map<string, DriverPeriod[]>()
     for (const j of await rows(sql, "core.vehicle_driver_periods", "vehicle_id, start_date, id collate \"C\""))
       drivers.set(j.vehicle_id as string, [...(drivers.get(j.vehicle_id as string) ?? []), { id: j.id, driverId: j.driver_id as string, startDate: j.start_date as string, endDate: (j.end_date as string) ?? null }])
+    const companies = new Map<string, CompanyPeriod[]>()
+    for (const j of await rows(sql, "core.vehicle_company_periods", "vehicle_id, start_date, id collate \"C\""))
+      companies.set(j.vehicle_id as string, [...(companies.get(j.vehicle_id as string) ?? []), { id: j.id, companyCode: j.company_code as CompanyPeriod["companyCode"], startDate: j.start_date as string, endDate: (j.end_date as string) ?? null }])
     const alerts = await loadAlertHistory(sql)
     return (await rows(sql, "core.vehicles")).map((j) => ({
       ...base(j), regNo: str(j.reg_no), companyCode: j.company_code as Vehicle["companyCode"], typeCode: str(j.type_code), make: str(j.make), model: str(j.model),
@@ -175,6 +182,7 @@ const vehicles: Spec<Vehicle> = {
       insurance: { provider: str(j.insurance_provider), policyNo: str(j.insurance_policy_no), validTill: str(j.insurance_valid_till), premium: num(j.insurance_premium) },
       roadTax: { validTill: str(j.road_tax_valid_till), amount: num(j.road_tax_amount), period: (j.road_tax_period as "QUARTERLY" | "ANNUAL") ?? "ANNUAL" },
       fitnessValidTill: str(j.fitness_valid_till), permitValidTill: str(j.permit_valid_till), pucValidTill: str(j.puc_valid_till), driverPeriods: drivers.get(j.id) ?? [],
+      ...opt("companyPeriods", companies.get(j.id)),
       ...opt("documentAlertHistory", alerts.get(j.id)),
       emiAmount: num(j.emi_amount), notes: str(j.notes),
       openingOdometerKm: numOrNull(j.opening_odometer_km), openingOdometerDate: (j.opening_odometer_date as string) ?? null,
@@ -192,12 +200,14 @@ const vehicles: Spec<Vehicle> = {
   async afterInsert(sql, v) {
     await syncPeriods(sql, "core.vehicle_status_periods", "vehicle_id", v.id, [], [], v.statusHistory ?? [])
     await syncDrivers(sql, v.id, [], v.driverPeriods ?? [])
+    await syncCompanyPeriods(sql, v.id, [], v.companyPeriods ?? [])
     await syncAlertHistory(sql, v.id, [], v.documentAlertHistory ?? [])
   },
   async afterUpdate(sql, before, after, ctx) {
     const p = (ctx.extras.get("vehicle_periods") as Periods).byEntity.get(after.id)
     await syncPeriods(sql, "core.vehicle_status_periods", "vehicle_id", after.id, p?.ids ?? [], before.statusHistory ?? [], after.statusHistory ?? [])
     await syncDrivers(sql, after.id, before.driverPeriods ?? [], after.driverPeriods ?? [])
+    await syncCompanyPeriods(sql, after.id, before.companyPeriods ?? [], after.companyPeriods ?? [])
     await syncAlertHistory(sql, after.id, before.documentAlertHistory ?? [], after.documentAlertHistory ?? [])
   },
 }
@@ -250,11 +260,36 @@ async function syncDrivers(sql: Sql, vehicleId: string, before: DriverPeriod[], 
     await sql(`insert into core.vehicle_driver_periods (id, vehicle_id, driver_id, start_date, end_date) values ($1, $2, $3, $4, $5)`, [p.id, vehicleId, p.driverId, p.startDate, p.endDate])
 }
 
+/**
+ * The vehicle's company history (core.vehicle_company_periods, owner 27 Nov 2026), matched by id: the open period is
+ * closed or a same-day change replaced (update), a same-day undo removes the newest (delete), new ones inserted. History
+ * older than that is never changed (the database refuses it). A change RLS refuses (0 rows) is never silent.
+ */
+async function syncCompanyPeriods(sql: Sql, vehicleId: string, before: CompanyPeriod[], after: CompanyPeriod[]) {
+  const refused = () => {
+    throw new Error("The database refused this change (your role doesn't allow changing this vehicle's company history). Nothing was saved.")
+  }
+  const was = new Map(before.map((p) => [p.id, p]))
+  const now = new Set(after.map((p) => p.id))
+  for (const p of before.filter((x) => !now.has(x.id)))
+    if (!(await sql(`delete from core.vehicle_company_periods where id = $1 returning id`, [p.id])).length) refused()
+  for (const p of after.filter((x) => was.has(x.id) && JSON.stringify(was.get(x.id)) !== JSON.stringify(x)))
+    if (!(await sql(`update core.vehicle_company_periods set company_code = $2, start_date = $3, end_date = $4 where id = $1 returning id`, [p.id, p.companyCode, p.startDate, p.endDate])).length) refused()
+  for (const p of after.filter((x) => !was.has(x.id)))
+    await sql(`insert into core.vehicle_company_periods (id, vehicle_id, company_code, start_date, end_date) values ($1, $2, $3, $4, $5)`, [p.id, vehicleId, p.companyCode, p.startDate, p.endDate])
+}
+
 const drivers: Spec<Driver> = {
   table: "core.drivers",
   load: async (sql) =>
-    (await rows(sql, "core.drivers")).map((j) => ({ ...base(j), name: str(j.name), phone: str(j.phone), licenseNo: str(j.license_no), licenseValidTill: str(j.license_valid_till), companyCode: j.company_code as Driver["companyCode"], status: j.status as Driver["status"] })),
-  cols: (d) => ({ id: d.id, name: d.name, phone: d.phone ?? "", license_no: d.licenseNo ?? "", license_valid_till: dateOrNull(d.licenseValidTill), company_code: d.companyCode, status: d.status }),
+    (await rows(sql, "core.drivers")).map((j) => ({
+      ...base(j), name: str(j.name), fatherName: str(j.father_name), dateOfBirth: str(j.date_of_birth), address: str(j.address), phone: str(j.phone),
+      licenseNo: str(j.license_no), licenseValidTill: str(j.license_valid_till), companyCode: (j.company_code as Driver["companyCode"]) ?? null, status: j.status as Driver["status"],
+    })),
+  cols: (d) => ({
+    id: d.id, name: d.name, father_name: d.fatherName ?? "", date_of_birth: dateOrNull(d.dateOfBirth), address: d.address ?? "", phone: d.phone ?? "",
+    license_no: d.licenseNo ?? "", license_valid_till: dateOrNull(d.licenseValidTill), company_code: d.companyCode ?? null, status: d.status,
+  }),
 }
 
 const assignments: Spec<VehicleAssignment> = {
@@ -595,17 +630,100 @@ const payments: Spec<Payment> = {
 }
 
 /** External dispenses have no table (D-15: none since 31 Oct 2026, nothing imported): an empty, read-only list. */
-/** Expense (Phase 1): browser backend only — no table yet; the API refuses every write on the server (api.expenses). */
-const expenses: Spec<{ id: string; updatedAt: string; createdAt: string }> = { table: null, load: async () => [] }
+/* ------------------------------------------------------------------ Expense (Phase 2B; schema `expense`, Dev-only by RLS) */
+
+/**
+ * Expense entries (`expense.entries` + `expense.entry_vehicles`): one collection, one parent table with its ordered
+ * vehicle lines, written by the same hooks as every other parent / child spec (docs/PHASE_2B_IMPLEMENTATION_PLAN.md §4).
+ * `updated_at` is part of `cols`, so every edit — even one that changes only the vehicles — runs the version-guarded
+ * UPDATE (and an insert keeps the record's own `updatedAt`, as `created_at` is kept by `applyUpserts`).
+ */
+const expenseEntries: Spec<Expense> = {
+  table: "expense.entries",
+  async load(sql) {
+    const lines = new Map<string, string[]>()
+    for (const l of await rows(sql, "expense.entry_vehicles", "entry_id collate \"C\", line_no"))
+      lines.set(l.entry_id as string, [...(lines.get(l.entry_id as string) ?? []), l.vehicle_id as string])
+    return (await rows(sql, "expense.entries")).map((j): Expense => ({
+      ...base(j), section: j.section as Expense["section"], date: str(j.date), vehicleIds: lines.get(j.id) ?? [], customerId: (j.customer_id as string) ?? null,
+      companyCode: (j.company_code as Expense["companyCode"]) ?? null, ...(j.section === "ROAD_TAX" ? { companyConfirmed: !!j.company_confirmed } : {}),
+      description: str(j.description), amount: num(j.amount), remarks: str(j.remarks), validFrom: str(j.valid_from), validTill: str(j.valid_till),
+      taxType: str(j.tax_type), provider: str(j.provider), policyNo: str(j.policy_no), paymentMode: str(j.payment_mode), paymentReference: str(j.payment_reference),
+      paymentStatus: (j.payment_status as Expense["paymentStatus"]) ?? null, paymentDate: str(j.payment_date), driverId: (j.driver_id as string) ?? null,
+      entryType: (j.entry_type as Expense["entryType"]) ?? null, broker: str(j.broker_name), billNo: str(j.bill_no), purpose: str(j.purpose),
+      operatingCompany: str(j.operating_company), vehicleCount: num(j.vehicle_count), paidAmount: num(j.paid_amount),
+      requestId: (j.request_id as string) ?? null, importBatchId: (j.import_batch_id as string) ?? null,
+    }))
+  },
+  cols: (x) => ({
+    id: x.id, section: x.section, date: x.date, customer_id: x.customerId ?? null, company_code: x.companyCode ?? null, company_confirmed: !!x.companyConfirmed,
+    description: x.description ?? "", amount: x.amount ?? 0, remarks: x.remarks ?? "", valid_from: dateOrNull(x.validFrom), valid_till: dateOrNull(x.validTill),
+    tax_type: x.taxType ?? "", provider: x.provider ?? "", policy_no: x.policyNo ?? "", payment_mode: x.paymentMode ?? "", payment_reference: x.paymentReference ?? "",
+    payment_status: x.paymentStatus ?? null, payment_date: dateOrNull(x.paymentDate), driver_id: x.driverId ?? null, entry_type: x.entryType ?? null,
+    broker_name: x.broker ?? "", bill_no: x.billNo ?? "", purpose: x.purpose ?? "", operating_company: x.operatingCompany ?? "", vehicle_count: x.vehicleCount ?? 0,
+    paid_amount: x.paidAmount ?? 0, request_id: x.requestId ?? null, import_batch_id: x.importBatchId ?? null, updated_at: x.updatedAt,
+  }),
+  async afterInsert(sql, x) {
+    await syncEntryVehicles(sql, x.id, [], x.vehicleIds)
+  },
+  async afterUpdate(sql, before, after) {
+    await syncEntryVehicles(sql, after.id, before.vehicleIds, after.vehicleIds)
+  },
+}
+/**
+ * An entry's vehicle lines, in the order chosen: unchanged → nothing; changed → the old lines removed and the new ones
+ * inserted with `line_no` 0, 1, 2… (the parent's audited write is in the same transaction). A removal RLS or the
+ * section-month lock refuses is never silent.
+ */
+async function syncEntryVehicles(sql: Sql, entryId: string, before: string[], after: string[]) {
+  if (JSON.stringify(before) === JSON.stringify(after)) return
+  if (before.length && (await sql(`delete from expense.entry_vehicles where entry_id = $1 returning entry_id`, [entryId])).length !== before.length)
+    throw new Error("The database refused this change (your role or the month lock doesn't allow it). Nothing was saved.")
+  for (const [i, v] of after.entries()) await sql(`insert into expense.entry_vehicles (entry_id, line_no, vehicle_id) values ($1, $2, $3)`, [entryId, i, v])
+}
+
+const expenseBrokers: Spec<Broker> = {
+  table: "expense.brokers",
+  load: async (sql) => (await rows(sql, "expense.brokers")).map((j) => ({ ...base(j), name: str(j.name) })),
+  cols: (b) => ({ id: b.id, name: b.name, updated_at: b.updatedAt }),
+}
+
+/** Locked section-months: insert only (who locked = the verified session, added by applyUpserts). No unlock exists. */
+const expenseMonthLocks: Spec<ExpenseMonthLock> = {
+  table: "expense.month_locks",
+  load: async (sql) => (await rows(sql, "expense.month_locks")).map((j) => ({ ...base(j), month: str(j.month), section: j.section as ExpenseMonthLock["section"] })),
+  cols: (l) => ({ id: l.id, month: l.month, section: l.section, updated_at: l.updatedAt }),
+}
+
+/** Applied imports (Dev only by RLS), with their per-record outcomes (`expense.import_items`). Never changed or deleted. */
+const expenseImportBatches: Spec<ExpenseImportBatch> = {
+  table: "expense.import_batches",
+  async load(sql) {
+    const items = new Map<string, ExpenseImportBatch["items"]>()
+    for (const i of await rows(sql, "expense.import_items", "batch_id, source_collection, source_id collate \"C\""))
+      items.set(i.batch_id as string, [...(items.get(i.batch_id as string) ?? []), { sourceCollection: i.source_collection as ExpenseImportBatch["items"][number]["sourceCollection"], sourceId: str(i.source_id), outcome: i.outcome as ExpenseImportBatch["items"][number]["outcome"], targetId: (i.target_id as string) ?? null, reason: str(i.reason) }])
+    return (await rows(sql, "expense.import_batches")).map((j) => ({
+      ...base(j), sourceLabel: str(j.source_label), sourceFingerprint: str(j.source_fingerprint), exportedAt: j.exported_at ? new Date(j.exported_at as string).toISOString() : null,
+      summary: (j.summary as Record<string, unknown>) ?? {}, sourceSnapshot: (j.source_snapshot as Record<string, unknown>) ?? {}, items: items.get(j.id) ?? [],
+    }))
+  },
+  cols: (b) => ({ id: b.id, source_label: b.sourceLabel, source_fingerprint: b.sourceFingerprint, exported_at: b.exportedAt ?? null, summary: b.summary, source_snapshot: b.sourceSnapshot, updated_at: b.updatedAt }),
+  async afterInsert(sql, b) {
+    for (const i of b.items)
+      await sql(`insert into expense.import_items (batch_id, source_collection, source_id, outcome, target_id, reason) values ($1, $2, $3, $4, $5, $6)`, [b.id, i.sourceCollection, i.sourceId, i.outcome, i.targetId, i.reason])
+  },
+}
 const tankerDispenses: Spec<{ id: string; updatedAt: string; createdAt: string }> = { table: null, load: async () => [] }
 
 /** Every collection the API reads, with how it is stored. FK order: parents first (deletes run in reverse). */
 export const SPECS: Record<CollectionKey, Spec<never>> = {
   customers, drivers, vehicles, vehicle_assignments: assignments, month_locks: monthLocks, fuel_stations: fuelStations, tankers,
   diesel_entries: diesel, tanker_loads: tankerLoads, tanker_transfers: tankerTransfers, tanker_adjustments: tankerAdjustments,
-  industrial_supplies: industrialSupplies, tyre_masters: tyreMasters, tyre_invoices: tyreInvoices, tyre_payments: tyrePayments, expenses, adblue_vendors: adblueVendors, adblue_purchases: adbluePurchases, adblue_payments: adbluePayments, adblue_entries: adblueEntries, tanker_dispenses: tankerDispenses, invoices, trips, payments,
+  industrial_supplies: industrialSupplies, tyre_masters: tyreMasters, tyre_invoices: tyreInvoices, tyre_payments: tyrePayments, expenses: expenseEntries, brokers: expenseBrokers, expense_month_locks: expenseMonthLocks, expense_import_batches: expenseImportBatches, adblue_vendors: adblueVendors, adblue_purchases: adbluePurchases, adblue_payments: adbluePayments, adblue_entries: adblueEntries, tanker_dispenses: tankerDispenses, invoices, trips, payments,
 } as unknown as Record<CollectionKey, Spec<never>>
-export const WRITE_ORDER: CollectionKey[] = ["customers", "drivers", "vehicles", "vehicle_assignments", "month_locks", "fuel_stations", "tankers", "diesel_entries", "tanker_loads", "tanker_transfers", "tanker_adjustments", "industrial_supplies", "adblue_vendors", "adblue_purchases", "adblue_entries", "adblue_payments", "tyre_masters", "tyre_invoices", "tyre_payments", "invoices", "trips", "payments", "tanker_dispenses"]
+export const WRITE_ORDER: CollectionKey[] = ["customers", "drivers", "vehicles", "vehicle_assignments", "month_locks", "fuel_stations", "tankers", "diesel_entries", "tanker_loads", "tanker_transfers", "tanker_adjustments", "industrial_supplies", "adblue_vendors", "adblue_purchases", "adblue_entries", "adblue_payments", "tyre_masters", "tyre_invoices", "tyre_payments", "invoices", "trips", "payments", "tanker_dispenses",
+  // Expense (Phase 2B) — appended, so no existing module's order changes; FK order: batch → broker → entry → lock.
+  "expense_import_batches", "brokers", "expenses", "expense_month_locks"]
 
 /** Applies one collection's changes: deletes (by the caller, in reverse FK order) are separate from upserts. */
 export async function applyUpserts(sql: Sql, key: CollectionKey, before: { id: string; updatedAt: string }[], after: { id: string; updatedAt: string }[], ctx: WriteCtx) {
@@ -634,7 +752,14 @@ export async function applyUpserts(sql: Sql, key: CollectionKey, before: { id: s
     await spec.afterUpdate?.(sql, prev as never, r as never, ctx)
   }
   for (const r of changed.filter((x) => !old.has(x.id))) {
-    await insertRow(sql, spec.table, { ...spec.cols(r as never), ...(key === "month_locks" ? { changed_by: ctx.identity.profileId } : {}), created_at: (r as unknown as { createdAt: string }).createdAt })
+    await insertRow(sql, spec.table, {
+      ...spec.cols(r as never),
+      ...(key === "month_locks" ? { changed_by: ctx.identity.profileId } : {}),
+      // Expense (Phase 2B): who locked a section-month / ran an import = the verified session, never the browser.
+      ...(key === "expense_month_locks" ? { locked_by: ctx.identity.profileId, locked_by_role: ctx.identity.role } : {}),
+      ...(key === "expense_import_batches" ? { created_by: ctx.identity.profileId } : {}),
+      created_at: (r as unknown as { createdAt: string }).createdAt,
+    })
     await spec.afterInsert?.(sql, r as never, ctx)
   }
 }
@@ -645,6 +770,8 @@ export async function applyDeletes(sql: Sql, key: CollectionKey, before: { id: s
     if (!spec.table) continue
     if (key === "customers" || key === "vehicles" || key === "drivers" || key === "fuel_stations" || key === "tankers" || key === "adblue_vendors" || key === "tyre_masters" || key === "invoices")
       throw new Error("Master records and invoices are never deleted — archive or cancel them.")
+    if (key === "brokers" || key === "expense_month_locks" || key === "expense_import_batches")
+      throw new Error("Brokers, locked Expense months and import batches are never deleted.")
     await deleteRow(sql, spec.table, r.id, r.updatedAt)
   }
 }

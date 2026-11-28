@@ -13,8 +13,10 @@ end $$;
 
 with t(name) as (values
   ('core.customers'), ('core.customer_status_periods'), ('core.customer_pricing'), ('core.customer_route_rates'),
-  ('core.drivers'), ('core.vehicles'), ('core.vehicle_driver_periods'), ('core.vehicle_document_alerts'), ('core.vehicle_status_periods'), ('core.vehicle_assignments'), ('core.month_locks'),
+  ('core.drivers'), ('core.vehicles'), ('core.vehicle_driver_periods'), ('core.vehicle_company_periods'), ('core.vehicle_document_alerts'), ('core.vehicle_status_periods'), ('core.vehicle_assignments'), ('core.month_locks'),
   ('core.companies'), ('core.vehicle_types'), ('core.app_settings'),
+  -- Expense (Phase 2B, 20261128000000): backed up, never reset.
+  ('expense.import_batches'), ('expense.import_items'), ('expense.brokers'), ('expense.entries'), ('expense.entry_vehicles'), ('expense.month_locks'),
   ('fuel.fuel_stations'), ('fuel.tankers'), ('fuel.diesel_entries'), ('fuel.tanker_loads'), ('fuel.tanker_transfers'),
   ('fuel.tanker_adjustments'), ('fuel.adblue_purchases'), ('fuel.adblue_entries'), ('fuel.adblue_vendors'), ('fuel.adblue_payments'), ('fuel.adblue_payment_allocations'), ('fuel.industrial_supplies'), ('fuel.industrial_supply_allocations'),
   ('finance.payment_categories'), ('finance.payments'), ('finance.payment_allocations'),

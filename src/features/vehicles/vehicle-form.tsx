@@ -12,7 +12,9 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Field, FormActionBar, FormSection } from "@/components/shared/misc"
 import { SimpleSelect } from "@/components/shared/simple-select"
-import { useCreateDriverByName, useCreateVehicleType, useCustomers, useDrivers, useSaveVehicle, useSettings } from "@/lib/api/hooks"
+import { useChangeVehicleCompany, useCreateDriverByName, useCreateVehicleType, useCustomers, useDrivers, useSaveVehicle, useSettings } from "@/lib/api/hooks"
+import { driverLabel } from "@/domain/drivers"
+import { useState } from "react"
 import { CreatableSelect } from "@/components/shared/creatable-select"
 import { useCompanyScope } from "@/lib/app-state"
 import { COMPANIES, FUEL_TYPES, VEHICLE_REG_REGEX } from "@/lib/constants"
@@ -93,6 +95,9 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
   const customers = useCustomers()
   const drivers = useDrivers()
   const save = useSaveVehicle()
+  const changeCompany = useChangeVehicleCompany()
+  // A company change on an existing vehicle is dated (owner, 27 Nov 2026): earlier dates keep the company they had.
+  const [companyFrom, setCompanyFrom] = useState(todayISO())
   const createType = useCreateVehicleType()
   const createDriver = useCreateDriverByName()
   const form = useForm<FormValues, unknown, z.output<typeof schema>>({
@@ -119,7 +124,11 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
       defaultDriverId: values.defaultDriverId === NONE ? null : values.defaultDriverId,
       seats: values.seats && !Number.isNaN(values.seats) ? values.seats : null,
     }
-    const saved = await save.mutateAsync({ id: vehicle?.id, version: vehicle?.updatedAt, data })
+    let version = vehicle?.updatedAt
+    if (vehicle && data.companyCode !== vehicle.companyCode) {
+      version = (await changeCompany.mutateAsync({ id: vehicle.id, companyCode: data.companyCode, effectiveDate: companyFrom, version })).updatedAt
+    }
+    const saved = await save.mutateAsync({ id: vehicle?.id, version, data })
     toast.success(vehicle ? "Vehicle updated" : `${saved.regNo} added to fleet`)
     if (onDone) onDone()
     else router.push(`/vehicles/${saved.id}`)
@@ -136,6 +145,11 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
             <Field label="Company" required>
               <Controller control={control} name="companyCode" render={({ field }) => <SimpleSelect value={field.value} onChange={field.onChange} options={COMPANIES} />} />
             </Field>
+            {vehicle && company !== vehicle.companyCode && (
+              <Field label="Company change effective from" required hint={`Until the day before, the vehicle stays with ${vehicle.companyCode} — drivers' company history follows.`}>
+                <Input type="date" value={companyFrom} max={todayISO()} onChange={(e) => setCompanyFrom(e.target.value)} />
+              </Field>
+            )}
             <Field label="Vehicle type" required error={errors.typeCode?.message}>
               <Controller
                 control={control}
@@ -248,10 +262,10 @@ export function VehicleForm({ vehicle, onDone }: { vehicle?: Vehicle; onDone?: (
                   <CreatableSelect
                     value={field.value}
                     onChange={field.onChange}
-                    onCreate={(name) => createDriver(name, company)}
+                    onCreate={(name) => createDriver(name)}
                     createLabel={(q) => `Create driver "${q}"`}
                     placeholder="Select driver"
-                    options={[{ value: NONE, label: "None" }, ...(drivers.data ?? []).filter((d) => d.companyCode === company).map((d) => ({ value: d.id, label: d.name }))]}
+                    options={[{ value: NONE, label: "None" }, ...(drivers.data ?? []).filter((d) => d.status !== "ARCHIVED" || d.id === vehicle?.defaultDriverId).map((d) => ({ value: d.id, label: driverLabel(d) }))]}
                   />
                 )}
               />
